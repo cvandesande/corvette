@@ -192,6 +192,11 @@ enum EventListLayout {
     Complete,
 }
 
+/// Events a compact list shows on mobile before the reader asks for the rest.
+/// Both the hidden count and the per-card rule read this, so a change cannot
+/// make "Show N more" disagree with what is hidden.
+const COMPACT_EVENT_LIMIT: usize = 4;
+
 #[component]
 fn ReviewEventList(
     events: Vec<ReviewEvent>,
@@ -212,7 +217,7 @@ fn ReviewEventList(
             .into_any();
         }
         let hidden_event_count = match layout {
-            EventListLayout::Compact => events.len().saturating_sub(4),
+            EventListLayout::Compact => events.len().saturating_sub(COMPACT_EVENT_LIMIT),
             EventListLayout::Complete => 0,
         };
         view! {
@@ -231,7 +236,9 @@ fn ReviewEventList(
                         <article
                             class="event-card"
                             class:mobile-hidden=move || {
-                                hidden_event_count > 0 && index >= 4 && !expanded.get()
+                                hidden_event_count > 0
+                                    && index >= COMPACT_EVENT_LIMIT
+                                    && !expanded.get()
                             }
                         >
                             <button
@@ -1155,6 +1162,21 @@ fn RecordingTimeline(
     }
 }
 
+/// Playhead offsets closer together than this count as already positioned:
+/// seeking to one restarts decoding for no visible change.
+const SEEK_TOLERANCE_SECONDS: f64 = 0.25;
+
+/// A completed seek lands on the nearest keyframe rather than on the exact
+/// offset, so a seek is accepted with a looser bound than it is requested with.
+const SETTLED_SEEK_TOLERANCE_SECONDS: f64 = 0.5;
+
+/// A clip's end timestamp is exclusive, so the playhead stops this far short of
+/// it to stay on a moment the clip actually contains.
+const CLIP_END_MARGIN_SECONDS: f64 = 1.0;
+
+/// Keeps a final reported time inside its source without moving it visibly.
+const SOURCE_END_EPSILON_SECONDS: f64 = 0.001;
+
 #[component]
 fn TimelinePlayer(
     clips: Vec<RecordingClip>,
@@ -1212,7 +1234,7 @@ fn TimelinePlayer(
                 return;
             };
             let requested_offset = selected_time - source.start_time;
-            if (video.current_time() - requested_offset).abs() < 0.25 {
+            if (video.current_time() - requested_offset).abs() < SEEK_TOLERANCE_SECONDS {
                 return;
             }
             if video.seeking() {
@@ -1288,7 +1310,7 @@ fn TimelinePlayer(
                 if let Some(source) = source {
                     let requested_offset =
                         (selected_time.get_untracked() - source.start_time).max(0.0);
-                    if (video.current_time() - requested_offset).abs() >= 0.25 {
+                    if (video.current_time() - requested_offset).abs() >= SEEK_TOLERANCE_SECONDS {
                         tracks_playback.set(false);
                         video.set_current_time(requested_offset);
                     } else {
@@ -1312,7 +1334,7 @@ fn TimelinePlayer(
             let Some(requested_offset) = pending_seek.get_untracked() else {
                 return;
             };
-            if (video.current_time() - requested_offset).abs() >= 0.5 {
+            if (video.current_time() - requested_offset).abs() >= SETTLED_SEEK_TOLERANCE_SECONDS {
                 video.set_current_time(requested_offset);
             } else {
                 pending_seek.set(None);
@@ -1332,7 +1354,8 @@ fn TimelinePlayer(
             active_source.with_untracked(|source| {
                 if let Some(source) = source {
                     let playback_time = source.start_time + video.current_time();
-                    selected_time.set(playback_time.min(source.end_time - 1.0));
+                    selected_time
+                        .set(playback_time.min(source.end_time - CLIP_END_MARGIN_SECONDS));
                 }
             });
             }
@@ -1386,7 +1409,9 @@ impl ActivityPlaybackState {
             self.selected_time.set(next_time);
         } else {
             self.tracks_playback.set(false);
-            let final_time = activity.end_time.min(source.end_time - 0.001);
+            let final_time = activity
+                .end_time
+                .min(source.end_time - SOURCE_END_EPSILON_SECONDS);
             self.selected_time.set(final_time);
             if let Err(error) = video.pause() {
                 self.playback_error
@@ -1447,7 +1472,8 @@ fn playable_time(clips: &[RecordingClip], requested_time: f64) -> f64 {
     clips
         .iter()
         .map(|clip| {
-            let last_playable_time = (clip.range.end_time - 1.0).max(clip.range.start_time);
+            let last_playable_time =
+                (clip.range.end_time - CLIP_END_MARGIN_SECONDS).max(clip.range.start_time);
             requested_time.clamp(clip.range.start_time, last_playable_time)
         })
         .min_by(|left, right| {
@@ -1471,6 +1497,10 @@ fn review_timeline_bounds(
     range_start: f64,
     range_end: f64,
 ) -> Option<(f64, f64)> {
+    /// Frigate reports an instantaneous review as a zero-length span, which
+    /// would compute to a zero-width marker the reader cannot see or click.
+    const MINIMUM_MARKER_SECONDS: f64 = 1.0;
+
     let review_end = review_end.unwrap_or(range_end);
     if review_start >= range_end || review_end < range_start {
         return None;
@@ -1478,7 +1508,7 @@ fn review_timeline_bounds(
     let start_time = review_start.max(range_start);
     let end_time = review_end
         .min(range_end)
-        .max((start_time + 1.0).min(range_end));
+        .max((start_time + MINIMUM_MARKER_SECONDS).min(range_end));
     (start_time < end_time).then_some((start_time, end_time))
 }
 
@@ -1881,8 +1911,13 @@ fn local_time_of_day(date: &js_sys::Date, hours: u32, minutes: u32) -> f64 {
 }
 
 fn next_local_day(day_start: f64) -> f64 {
+    // 36 hours: past the longest local day a daylight-saving transition can
+    // produce (25 hours) and short of two days, so the result always lands on
+    // the following calendar date whatever the offset does in between.
+    const NEXT_DAY_OFFSET_MILLIS: f64 = 129_600_000.0;
+
     let date = js_sys::Date::new(&JsValue::from_f64(
-        day_start.mul_add(1_000.0, 129_600_000.0),
+        day_start.mul_add(1_000.0, NEXT_DAY_OFFSET_MILLIS),
     ));
     local_day_start(&date)
 }
