@@ -23,6 +23,9 @@ When changing this repository:
   fails when the defect is reintroduced whenever practical.
 - Run the formatters, linters, and tests relevant to every changed file. Use the
   Rust toolchain pinned by `rust-toolchain.toml`; `nix develop` provides it.
+- Before committing, compare the staged change with `docs/roadmap.md`. Update
+  completed status, current progress, and the next planned slice when the change
+  affects them; otherwise explicitly confirm that the roadmap remains accurate.
 - Review the final diff against the full style guide before declaring the work
   complete. Report checks that could not be run and why.
 
