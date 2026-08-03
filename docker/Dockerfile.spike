@@ -7,7 +7,9 @@
 # same generation on both sides of the comparison.
 ARG NCNN_TAG=20260526
 ARG DEBIAN_IMAGE=debian:trixie
-ARG RUST_IMAGE=rust:1-trixie
+# Pinned to match rust-toolchain.toml and flake.nix -- one Rust version across
+# the container build, the Nix dev shell and any rustup user.
+ARG RUST_IMAGE=rust:1.97.1-trixie
 
 FROM ${DEBIAN_IMAGE} AS ncnn-builder
 ARG NCNN_TAG
@@ -40,9 +42,15 @@ RUN apt-get update \
 COPY --from=ncnn-builder /opt/ncnn /opt/ncnn
 ENV NCNN_DIR=/opt/ncnn
 WORKDIR /src
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates crates
-RUN cargo build --release --bin ncnn-spike
+RUN cargo build --release --locked --bin ncnn-spike
+
+# Lints are a build stage so they run against the same pinned toolchain and the
+# same ncnn as the binary. `docker build --target lint` is the gate.
+FROM rust-builder AS lint
+RUN cargo clippy --workspace --all-targets --locked -- -D warnings \
+    && cargo fmt --all --check
 
 FROM ${DEBIAN_IMAGE} AS spike
 # mesa-vulkan-drivers is both RADV and lavapipe -- the point, not an accident:

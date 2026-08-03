@@ -2,3 +2,5 @@ target/
 out*/
 models/
 *.f32
+result
+result-*

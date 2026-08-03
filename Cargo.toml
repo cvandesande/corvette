@@ -1,11 +1,35 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/ncnn-sys", "crates/ncnn-spike"]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.97.1"
 license = "MIT"
 
 [profile.release]
 debug = 1
+
+# Everything clippy has that is meant to be enabled as a group. `restriction` is
+# deliberately not among them -- upstream says so itself, since it contains
+# mutually exclusive lints and ones that fight ordinary code -- so the few of its
+# lints that earn their place here are listed individually below.
+#
+# Group entries carry priority = -1 so the specific allows that follow win.
+[workspace.lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+
+# From `restriction`: this is an FFI crate, so every unsafe block should have to
+# say why it is sound.
+undocumented_unsafe_blocks = "deny"
+
+# There is no remote yet, so `cargo` cannot have its repository/keywords.
+cargo_common_metadata = "allow"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unreachable_pub = "deny"
+missing_debug_implementations = "deny"

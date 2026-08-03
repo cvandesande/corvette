@@ -8,72 +8,150 @@
 //! thing".
 //!
 //! Environment:
-//!   MODEL_PARAM   .param file; the .bin is derived from it (required)
-//!   MODEL_SIZE    square input resolution (default 320)
-//!   BENCH_ITERS   timed iterations (default 2000)
-//!   NCNN_DEVICE   Vulkan device index (default: ncnn's own choice)
-//!   INPUT_F32     raw f32 input, 3*size*size little-endian (default: zeros)
-//!   OUTPUT_F32    where to write the raw f32 output tensor
-//!   ALLOW_CPU     accept a Vulkan device that reports type=cpu
+//!   `MODEL_PARAM`   .param file; the .bin is derived from it (required)
+//!   `MODEL_SIZE`    square input resolution (default 320)
+//!   `BENCH_ITERS`   timed iterations (default 2000)
+//!   `NCNN_DEVICE`   Vulkan device index (default: ncnn's own choice)
+//!   `INPUT_F32`     raw f32 input, 3*size*size little-endian (default: zeros)
+//!   `OUTPUT_F32`    where to write the raw f32 output tensor
+//!   `ALLOW_CPU`     accept a Vulkan device that reports type=cpu
 
 use std::env;
 use std::ffi::{CStr, CString};
 use std::fs;
-use std::os::raw::c_void;
+use std::os::raw::{c_char, c_int};
+use std::path::Path;
 use std::process::ExitCode;
 use std::ptr;
 use std::time::Instant;
 
-use ncnn_sys::*;
+use ncnn_sys::{
+    DeviceType, ncnn_ext_destroy_gpu_instance, ncnn_ext_get_default_gpu_index,
+    ncnn_ext_get_gpu_count, ncnn_ext_get_gpu_device_name, ncnn_ext_get_gpu_driver_name,
+    ncnn_ext_get_gpu_rough_score, ncnn_ext_get_gpu_type, ncnn_extractor_create,
+    ncnn_extractor_destroy, ncnn_extractor_extract, ncnn_extractor_input,
+    ncnn_mat_create_external_3d, ncnn_mat_destroy, ncnn_mat_get_c, ncnn_mat_get_cstep,
+    ncnn_mat_get_data, ncnn_mat_get_dims, ncnn_mat_get_elempack, ncnn_mat_get_elemsize,
+    ncnn_mat_get_h, ncnn_mat_get_w, ncnn_mat_t, ncnn_net_create, ncnn_net_destroy,
+    ncnn_net_get_input_count, ncnn_net_get_input_name, ncnn_net_get_option,
+    ncnn_net_get_output_count, ncnn_net_get_output_name, ncnn_net_load_model, ncnn_net_load_param,
+    ncnn_net_set_vulkan_device, ncnn_net_t, ncnn_option_get_use_vulkan_compute,
+    ncnn_option_set_use_fp16_arithmetic, ncnn_option_set_use_fp16_packed,
+    ncnn_option_set_use_fp16_storage, ncnn_option_set_use_vulkan_compute, ncnn_version,
+};
 
+type Failure = String;
+
+/// Owns the net so an early return cannot leak it.
 struct Net(ncnn_net_t);
 
 impl Drop for Net {
     fn drop(&mut self) {
+        // SAFETY: self.0 came from ncnn_net_create and is dropped once, and no
+        // extractor outlives the net -- infer() destroys each one it makes.
         unsafe { ncnn_net_destroy(self.0) }
     }
 }
 
-fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    match env::var(key) {
-        Ok(value) => value
-            .parse()
-            .unwrap_or_else(|_| panic!("{key}: cannot parse {value:?}")),
-        Err(_) => default,
-    }
+struct Config {
+    param_path: String,
+    bin_path: String,
+    size: c_int,
+    elements: usize,
+    iters: usize,
 }
 
-fn cstr(ptr: *const std::os::raw::c_char) -> String {
+struct Stats {
+    head_mean: f64,
+    steady_mean: f64,
+    steady_median: f64,
+    steady_p95: f64,
+    steady_min: f64,
+}
+
+fn env_or<T: std::str::FromStr>(key: &str, default: T) -> Result<T, Failure> {
+    env::var(key).map_or(Ok(default), |value| {
+        value
+            .parse()
+            .map_err(|_| format!("{key}: cannot parse {value:?}"))
+    })
+}
+
+/// Copies a C string ncnn owns into a `String`.
+///
+/// # Safety
+/// `ptr` must be null, or point to a NUL-terminated string that stays valid
+/// for the duration of the call.
+unsafe fn cstr(ptr: *const c_char) -> String {
     if ptr.is_null() {
         return "<null>".into();
     }
-    unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+    // SAFETY: non-null by the check above, and the caller guarantees the
+    // pointee is a valid NUL-terminated string.
+    unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned()
 }
 
-/// Enumerate, then select. Selection alone is in upstream's C API; everything
-/// this function prints comes from csrc/c_api_ext.cpp.
-fn select_device() -> Result<i32, String> {
-    let count = unsafe { ncnn_ext_get_gpu_count() };
+// The four helpers below are the whole of csrc/c_api_ext.cpp. Each is sound
+// for any argument: the shim bounds-checks the index itself and reports a miss
+// as -1/0/null rather than reading past the device array.
+fn gpu_count() -> c_int {
+    // SAFETY: no arguments, and the shim creates the Vulkan instance on first
+    // call rather than assuming one exists.
+    unsafe { ncnn_ext_get_gpu_count() }
+}
+
+fn device_name(index: c_int) -> String {
+    // SAFETY: the shim returns null for an out-of-range index, which cstr
+    // handles, and any string it does return is owned by ncnn for the life of
+    // the Vulkan instance -- which outlives this call.
+    unsafe { cstr(ncnn_ext_get_gpu_device_name(index)) }
+}
+
+fn driver_name(index: c_int) -> String {
+    // SAFETY: as device_name above.
+    unsafe { cstr(ncnn_ext_get_gpu_driver_name(index)) }
+}
+
+fn default_device() -> c_int {
+    // SAFETY: no arguments; returns -1 when nothing enumerated, which the
+    // caller's range check rejects.
+    unsafe { ncnn_ext_get_default_gpu_index() }
+}
+
+fn device_type(index: c_int) -> DeviceType {
+    // SAFETY: the shim bounds-checks and returns -1 out of range, which maps
+    // to DeviceType::Unknown.
+    DeviceType::from_raw(unsafe { ncnn_ext_get_gpu_type(index) })
+}
+
+/// Enumerate, then select. Only selection is in upstream's C API; everything
+/// this function prints comes from `csrc/c_api_ext.cpp`.
+fn select_device() -> Result<c_int, Failure> {
+    let count = gpu_count();
     if count <= 0 {
         return Err("no Vulkan device enumerated".into());
     }
     for index in 0..count {
-        let kind = DeviceType::from_raw(unsafe { ncnn_ext_get_gpu_type(index) });
+        // SAFETY: bounds-checked by the shim, as above.
+        let score = unsafe { ncnn_ext_get_gpu_rough_score(index) };
         eprintln!(
-            "ncnn-spike: vulkan device {index}: {} [driver={} type={} score={}]",
-            cstr(unsafe { ncnn_ext_get_gpu_device_name(index) }),
-            cstr(unsafe { ncnn_ext_get_gpu_driver_name(index) }),
-            kind.as_str(),
-            unsafe { ncnn_ext_get_gpu_rough_score(index) },
+            "ncnn-spike: vulkan device {index}: {} [driver={} type={} score={score}]",
+            device_name(index),
+            driver_name(index),
+            device_type(index).as_str(),
         );
     }
 
-    let device = match env::var("NCNN_DEVICE") {
-        Ok(value) => value
-            .parse::<i32>()
-            .map_err(|_| format!("NCNN_DEVICE: cannot parse {value:?}"))?,
-        Err(_) => unsafe { ncnn_ext_get_default_gpu_index() },
-    };
+    let device = env::var("NCNN_DEVICE").map_or_else(
+        |_| Ok(default_device()),
+        |value| {
+            value
+                .parse::<c_int>()
+                .map_err(|_| format!("NCNN_DEVICE: cannot parse {value:?}"))
+        },
+    )?;
     if !(0..count).contains(&device) {
         return Err(format!(
             "device {device} out of range, {count} Vulkan device(s) present"
@@ -83,31 +161,104 @@ fn select_device() -> Result<i32, String> {
     // The reason the enumeration gap mattered. A CPU-type device is lavapipe:
     // it is a working Vulkan path at a fraction of the speed, and without
     // GpuInfo::type() the only way to notice is to match on the device name.
-    let kind = DeviceType::from_raw(unsafe { ncnn_ext_get_gpu_type(device) });
-    if kind == DeviceType::Cpu && env::var("ALLOW_CPU").is_err() {
+    if device_type(device) == DeviceType::Cpu && env::var("ALLOW_CPU").is_err() {
         return Err(format!(
             "device {device} ({}) is a software rasterizer; set ALLOW_CPU=1 to use it deliberately",
-            cstr(unsafe { ncnn_ext_get_gpu_device_name(device) })
+            device_name(device)
         ));
     }
     eprintln!(
         "ncnn-spike: using vulkan device {device} ({})",
-        cstr(unsafe { ncnn_ext_get_gpu_device_name(device) })
+        device_name(device)
     );
     Ok(device)
 }
 
+/// Creates the net, pins the device and the fp32 options, and loads the model.
+/// Returns the load time in milliseconds alongside it.
+fn load_net(config: &Config, device: c_int) -> Result<(Net, f64), Failure> {
+    // SAFETY: ncnn_net_create returns an owned handle or null; the option
+    // pointer borrows the net and is only read/written while the net is alive.
+    // Every setter must precede load_param, which is why they are in one block
+    // with it.
+    let net = unsafe {
+        let handle = ncnn_net_create();
+        if handle.is_null() {
+            return Err("ncnn_net_create returned null".into());
+        }
+        let net = Net(handle);
+        let opt = ncnn_net_get_option(net.0);
+        ncnn_option_set_use_vulkan_compute(opt, 1);
+        ncnn_net_set_vulkan_device(net.0, device);
+        // Explicit fp32 everywhere, matching bench_steady.py.
+        ncnn_option_set_use_fp16_packed(opt, 0);
+        ncnn_option_set_use_fp16_storage(opt, 0);
+        ncnn_option_set_use_fp16_arithmetic(opt, 0);
+        if ncnn_option_get_use_vulkan_compute(opt) != 1 {
+            return Err("use_vulkan_compute did not stick".into());
+        }
+        net
+    };
+
+    let param = CString::new(config.param_path.clone()).map_err(|e| e.to_string())?;
+    let bin = CString::new(config.bin_path.clone()).map_err(|e| e.to_string())?;
+    let start = Instant::now();
+    // SAFETY: both pointers are valid NUL-terminated paths owned by the
+    // CStrings above, which outlive the calls.
+    unsafe {
+        // Both return -1 rather than raising, so an unchecked load defers the
+        // failure to the first inference, where it looks like a lost device.
+        let rc = ncnn_net_load_param(net.0, param.as_ptr());
+        if rc != 0 {
+            return Err(format!(
+                "failed to parse parameter file {} ({rc})",
+                config.param_path
+            ));
+        }
+        let rc = ncnn_net_load_model(net.0, bin.as_ptr());
+        if rc != 0 {
+            return Err(format!("failed to load weights {} ({rc})", config.bin_path));
+        }
+    }
+    Ok((net, start.elapsed().as_secs_f64() * 1000.0))
+}
+
+/// The C API names blobs directly, so the `.param` parsing `ncnn.py` does by
+/// hand is not needed on this path -- but honour an override in case a model's
+/// declared outputs ever disagree with its last layer.
+fn blob_names(net: &Net) -> (String, String) {
+    // SAFETY: the net is loaded, so its blob tables are populated; the
+    // returned strings are owned by the net, which outlives this call.
+    let (input, output, inputs, outputs) = unsafe {
+        (
+            cstr(ncnn_net_get_input_name(net.0, 0)),
+            cstr(ncnn_net_get_output_name(net.0, 0)),
+            ncnn_net_get_input_count(net.0),
+            ncnn_net_get_output_count(net.0),
+        )
+    };
+    let input = env::var("INPUT_BLOB").unwrap_or(input);
+    let output = env::var("OUTPUT_BLOB").unwrap_or(output);
+    eprintln!("ncnn-spike: blobs in={input} ({inputs} declared) out={output} ({outputs} declared)");
+    (input, output)
+}
+
 /// One inference, structured like `NcnnDetector._extract`: a fresh extractor
 /// and a Mat borrowing the caller's buffer, which therefore has to outlive it.
-fn infer(net: &Net, input_name: &CStr, output_name: &CStr, input: &mut [f32], size: i32) -> Result<(Vec<f32>, Vec<i32>), String> {
+fn infer(
+    net: &Net,
+    input_name: &CStr,
+    output_name: &CStr,
+    input: &mut [f32],
+    size: c_int,
+) -> Result<(Vec<f32>, Vec<c_int>), Failure> {
+    // SAFETY: the Mat borrows `input`, which is borrowed mutably for the whole
+    // block and so cannot move or be freed; every handle created here is
+    // destroyed on every path out. The extract() output Mat is ours to destroy
+    // per the C API.
     unsafe {
-        let mat = ncnn_mat_create_external_3d(
-            size,
-            size,
-            3,
-            input.as_mut_ptr() as *mut c_void,
-            ptr::null_mut(),
-        );
+        let mat =
+            ncnn_mat_create_external_3d(size, size, 3, input.as_mut_ptr().cast(), ptr::null_mut());
         if mat.is_null() {
             return Err("ncnn_mat_create_external_3d returned null".into());
         }
@@ -119,7 +270,7 @@ fn infer(net: &Net, input_name: &CStr, output_name: &CStr, input: &mut [f32], si
             return Err(format!("extractor input returned {rc}"));
         }
         let mut out: ncnn_mat_t = ptr::null_mut();
-        let rc = ncnn_extractor_extract(ex, output_name.as_ptr(), &mut out);
+        let rc = ncnn_extractor_extract(ex, output_name.as_ptr(), &raw mut out);
         if rc != 0 || out.is_null() {
             ncnn_extractor_destroy(ex);
             ncnn_mat_destroy(mat);
@@ -136,49 +287,73 @@ fn infer(net: &Net, input_name: &CStr, output_name: &CStr, input: &mut [f32], si
     }
 }
 
-/// Flatten an output Mat the way `np.array(mat)` does: [w], [h,w] or [c,h,w],
-/// walking `cstep` rather than assuming channels are contiguous.
-unsafe fn copy_out(mat: ncnn_mat_t) -> Result<(Vec<f32>, Vec<i32>), String> {
-    let elemsize = ncnn_mat_get_elemsize(mat);
-    let elempack = ncnn_mat_get_elempack(mat);
+/// Flattens an output Mat the way `np.array(mat)` does: `[w]`, `[h, w]` or
+/// `[c, h, w]`, walking `cstep` rather than assuming channels are contiguous.
+///
+/// # Safety
+/// `mat` must be a live Mat returned by `ncnn_extractor_extract`.
+unsafe fn copy_out(mat: ncnn_mat_t) -> Result<(Vec<f32>, Vec<c_int>), Failure> {
+    // SAFETY: the caller guarantees `mat` is live; all of these are pure
+    // accessors on it.
+    let (elemsize, elempack, dims, w, h, c, cstep, data) = unsafe {
+        (
+            ncnn_mat_get_elemsize(mat),
+            ncnn_mat_get_elempack(mat),
+            ncnn_mat_get_dims(mat),
+            ncnn_mat_get_w(mat),
+            ncnn_mat_get_h(mat),
+            ncnn_mat_get_c(mat),
+            ncnn_mat_get_cstep(mat),
+            ncnn_mat_get_data(mat),
+        )
+    };
+    // Guards the cast below: 4-byte elements, one per slot, is plain fp32.
     if elemsize != 4 || elempack != 1 {
         return Err(format!(
             "expected unpacked fp32 output, got elemsize={elemsize} elempack={elempack}"
         ));
     }
-    let (dims, w, h, c) = (
-        ncnn_mat_get_dims(mat),
-        ncnn_mat_get_w(mat),
-        ncnn_mat_get_h(mat),
-        ncnn_mat_get_c(mat),
-    );
-    let cstep = ncnn_mat_get_cstep(mat);
-    let data = ncnn_mat_get_data(mat) as *const f32;
     if data.is_null() {
         return Err("output Mat has no data".into());
     }
 
-    let (shape, plane) = match dims {
-        1 => (vec![w], w as usize),
-        2 => (vec![h, w], (w * h) as usize),
-        3 => (vec![c, h, w], (w * h) as usize),
+    let plane = usize::try_from(w * h).map_err(|_| "negative output extent".to_string())?;
+    let (shape, plane, channels) = match dims {
+        1 => (
+            vec![w],
+            usize::try_from(w).map_err(|_| "negative output extent".to_string())?,
+            1usize,
+        ),
+        2 => (vec![h, w], plane, 1usize),
+        3 => (
+            vec![c, h, w],
+            plane,
+            usize::try_from(c).map_err(|_| "negative channel count".to_string())?,
+        ),
         other => return Err(format!("unexpected output dims {other}")),
     };
-    let channels = if dims == 3 { c as usize } else { 1 };
+
     let mut out = Vec::with_capacity(plane * channels);
     for channel in 0..channels {
-        let start = data.add(channel * cstep);
-        out.extend_from_slice(std::slice::from_raw_parts(start, plane));
+        // SAFETY: elemsize == 4 and elempack == 1 make this an array of f32,
+        // which ncnn allocates with at least that alignment; channel < c and
+        // cstep is ncnn's own channel stride, so each slice stays inside the
+        // allocation.
+        unsafe {
+            let start = data.cast::<f32>().add(channel * cstep);
+            out.extend_from_slice(std::slice::from_raw_parts(start, plane));
+        }
     }
     Ok((out, shape))
 }
 
-fn percentile(sorted: &[f64], q: f64) -> f64 {
-    sorted[(sorted.len() as f64 * q) as usize]
-}
-
 fn mean(values: &[f64]) -> f64 {
-    values.iter().sum::<f64>() / values.len() as f64
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "iteration counts are nowhere near 2^53"
+    )]
+    let count = values.len() as f64;
+    values.iter().sum::<f64>() / count
 }
 
 fn median(sorted: &[f64]) -> f64 {
@@ -186,98 +361,87 @@ fn median(sorted: &[f64]) -> f64 {
     if n % 2 == 1 {
         sorted[n / 2]
     } else {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+        f64::midpoint(sorted[n / 2 - 1], sorted[n / 2])
     }
 }
 
-fn round3(value: f64) -> f64 {
-    (value * 1000.0).round() / 1000.0
+/// Same quartile split as `bench_steady.py`: a head that runs at the boosted
+/// rate, and the sustained tail Frigate actually lives with.
+fn summarise(samples: &[f64], iters: usize) -> Stats {
+    let quarter = std::cmp::max(1, iters / 4);
+    let head = &samples[..quarter];
+    let tail = &samples[samples.len() - iters / 2..];
+    let mut sorted = tail.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "matches bench_steady.py's int(len * 0.95) exactly, and the index is in range"
+    )]
+    let p95 = sorted[(sorted.len() as f64 * 0.95) as usize];
+    Stats {
+        head_mean: mean(head),
+        steady_mean: mean(tail),
+        steady_median: median(&sorted),
+        steady_p95: p95,
+        steady_min: sorted[0],
+    }
 }
 
-fn run() -> Result<(), String> {
+fn round(value: f64, places: i32) -> f64 {
+    let scale = 10f64.powi(places);
+    (value * scale).round() / scale
+}
+
+fn config() -> Result<Config, Failure> {
     let param_path = env::var("MODEL_PARAM").map_err(|_| "MODEL_PARAM is not set".to_string())?;
     let bin_path = param_path
         .strip_suffix(".param")
         .map(|stem| format!("{stem}.bin"))
         .ok_or_else(|| format!("MODEL_PARAM must name a .param file, got {param_path}"))?;
-    let size: i32 = env_or("MODEL_SIZE", 320);
-    let iters: usize = env_or("BENCH_ITERS", 2000);
+    let size: c_int = env_or("MODEL_SIZE", 320)?;
+    let extent = usize::try_from(size).map_err(|_| "MODEL_SIZE must be positive".to_string())?;
+    Ok(Config {
+        param_path,
+        bin_path,
+        size,
+        elements: 3 * extent * extent,
+        iters: env_or("BENCH_ITERS", 2000)?,
+    })
+}
 
-    eprintln!("ncnn-spike: ncnn {}", cstr(unsafe { ncnn_version() }));
+fn read_input(config: &Config) -> Result<Vec<f32>, Failure> {
+    let Ok(path) = env::var("INPUT_F32") else {
+        return Ok(vec![0.0f32; config.elements]);
+    };
+    let bytes = fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+    if bytes.len() != config.elements * 4 {
+        return Err(format!(
+            "{path}: expected {} bytes for 3x{size}x{size} f32, got {}",
+            config.elements * 4,
+            bytes.len(),
+            size = config.size,
+        ));
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect())
+}
+
+fn run() -> Result<(), Failure> {
+    let config = config()?;
+    // SAFETY: no arguments, and the returned string is static in ncnn.
+    eprintln!("ncnn-spike: ncnn {}", unsafe { cstr(ncnn_version()) });
     let device = select_device()?;
+    let (net, load_ms) = load_net(&config, device)?;
+    let (input_name, output_name) = blob_names(&net);
+    let input_c = CString::new(input_name.clone()).map_err(|e| e.to_string())?;
+    let output_c = CString::new(output_name.clone()).map_err(|e| e.to_string())?;
+    let mut input = read_input(&config)?;
 
-    let net = Net(unsafe { ncnn_net_create() });
-    unsafe {
-        // The net's own Option -- mutating it in place, which is what the
-        // Python plugin does through net.opt, so it must precede load_param.
-        let opt = ncnn_net_get_option(net.0);
-        ncnn_option_set_use_vulkan_compute(opt, 1);
-        ncnn_net_set_vulkan_device(net.0, device);
-        // Explicit fp32 everywhere, matching bench_steady.py.
-        ncnn_option_set_use_fp16_packed(opt, 0);
-        ncnn_option_set_use_fp16_storage(opt, 0);
-        ncnn_option_set_use_fp16_arithmetic(opt, 0);
-        if ncnn_option_get_use_vulkan_compute(opt) != 1 {
-            return Err("use_vulkan_compute did not stick".into());
-        }
-    }
-
-    let param_c = CString::new(param_path.clone()).unwrap();
-    let bin_c = CString::new(bin_path.clone()).unwrap();
-    let load_start = Instant::now();
-    unsafe {
-        // Both return -1 rather than raising, so an unchecked load defers the
-        // failure to the first inference, where it looks like a lost device.
-        let rc = ncnn_net_load_param(net.0, param_c.as_ptr());
-        if rc != 0 {
-            return Err(format!("failed to parse parameter file {param_path} ({rc})"));
-        }
-        let rc = ncnn_net_load_model(net.0, bin_c.as_ptr());
-        if rc != 0 {
-            return Err(format!("failed to load weights {bin_path} ({rc})"));
-        }
-    }
-    let load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
-
-    // The C API names blobs directly, so the .param parsing ncnn.py does by
-    // hand is not needed on this path -- but honour an override in case a
-    // model's declared outputs ever disagree with the last layer.
-    let (input_count, output_count) =
-        unsafe { (ncnn_net_get_input_count(net.0), ncnn_net_get_output_count(net.0)) };
-    let input_name = match env::var("INPUT_BLOB") {
-        Ok(name) => name,
-        Err(_) => cstr(unsafe { ncnn_net_get_input_name(net.0, 0) }),
-    };
-    let output_name = match env::var("OUTPUT_BLOB") {
-        Ok(name) => name,
-        Err(_) => cstr(unsafe { ncnn_net_get_output_name(net.0, 0) }),
-    };
-    eprintln!(
-        "ncnn-spike: blobs in={input_name} ({input_count} declared) out={output_name} ({output_count} declared)"
-    );
-    let input_c = CString::new(input_name.clone()).unwrap();
-    let output_c = CString::new(output_name.clone()).unwrap();
-
-    let expected = 3 * size as usize * size as usize;
-    let mut input = match env::var("INPUT_F32") {
-        Ok(path) => {
-            let bytes = fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
-            if bytes.len() != expected * 4 {
-                return Err(format!(
-                    "{path}: expected {} bytes for 3x{size}x{size} f32, got {}",
-                    expected * 4,
-                    bytes.len()
-                ));
-            }
-            bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect::<Vec<f32>>()
-        }
-        Err(_) => vec![0.0f32; expected],
-    };
-
-    let (first, shape) = infer(&net, &input_c, &output_c, &mut input, size)?;
+    let (first, shape) = infer(&net, &input_c, &output_c, &mut input, config.size)?;
     if let Ok(path) = env::var("OUTPUT_F32") {
         let mut bytes = Vec::with_capacity(first.len() * 4);
         for value in &first {
@@ -286,21 +450,13 @@ fn run() -> Result<(), String> {
         fs::write(&path, bytes).map_err(|e| format!("{path}: {e}"))?;
     }
 
-    let mut samples = Vec::with_capacity(iters);
-    for _ in 0..iters {
+    let mut samples = Vec::with_capacity(config.iters);
+    for _ in 0..config.iters {
         let start = Instant::now();
-        infer(&net, &input_c, &output_c, &mut input, size)?;
+        infer(&net, &input_c, &output_c, &mut input, config.size)?;
         samples.push(start.elapsed().as_secs_f64() * 1000.0);
     }
-
-    // Same quartile split as bench_steady.py: a head that runs at the boosted
-    // rate and the sustained tail Frigate actually lives with.
-    let quarter = std::cmp::max(1, iters / 4);
-    let head = &samples[..quarter];
-    let tail = &samples[samples.len() - iters / 2..];
-    let mut sorted_tail = tail.to_vec();
-    sorted_tail.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let steady_mean = mean(tail);
+    let stats = summarise(&samples, config.iters);
 
     println!(
         concat!(
@@ -309,25 +465,25 @@ fn run() -> Result<(), String> {
             r#""output_len": {}, "iters": {}, "head_mean_ms": {}, "steady_mean_ms": {}, "#,
             r#""steady_median_ms": {}, "steady_p95_ms": {}, "steady_min_ms": {}, "steady_fps": {}}}"#
         ),
-        std::path::Path::new(&param_path)
-            .file_name()
-            .unwrap()
-            .to_string_lossy(),
-        size,
-        cstr(unsafe { ncnn_ext_get_gpu_device_name(device) }),
-        DeviceType::from_raw(unsafe { ncnn_ext_get_gpu_type(device) }).as_str(),
+        Path::new(&config.param_path).file_name().map_or_else(
+            || config.param_path.clone(),
+            |n| n.to_string_lossy().into_owned()
+        ),
+        config.size,
+        device_name(device),
+        device_type(device).as_str(),
         input_name,
         output_name,
-        (load_ms * 10.0).round() / 10.0,
+        round(load_ms, 1),
         shape,
         first.len(),
-        iters,
-        round3(mean(head)),
-        round3(steady_mean),
-        round3(median(&sorted_tail)),
-        round3(percentile(&sorted_tail, 0.95)),
-        round3(sorted_tail[0]),
-        (1000.0 / steady_mean * 10.0).round() / 10.0,
+        config.iters,
+        round(stats.head_mean, 3),
+        round(stats.steady_mean, 3),
+        round(stats.steady_median, 3),
+        round(stats.steady_p95, 3),
+        round(stats.steady_min, 3),
+        round(1000.0 / stats.steady_mean, 1),
     );
     Ok(())
 }
@@ -337,6 +493,8 @@ fn main() -> ExitCode {
         Ok(()) => {
             // ncnn's Vulkan instance is process-wide; tearing it down here
             // keeps validation-layer runs quiet about leaked devices.
+            // SAFETY: no arguments, and nothing holds a device afterwards --
+            // the net was dropped when run() returned.
             unsafe { ncnn_ext_destroy_gpu_instance() };
             ExitCode::SUCCESS
         }

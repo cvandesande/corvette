@@ -18,13 +18,13 @@ extractor and Mat per iteration), 2000 iterations at 320 and 600 at 640.
 `steady` is the last half of the run -- the sustained state Frigate actually
 lives in, per `frigate-vulkan/scripts/bench_steady.py`.
 
-| | Python (`ncnn` module) | Rust (C API) | |
-| --- | --- | --- | --- |
-| 320 steady mean | 4.976 ms (201.0 fps) | **4.821 ms (207.4 fps)** | -3.1% |
-| 320 steady p95 | 5.969 ms | 5.818 ms | |
-| 640 steady mean | 7.604 ms (131.5 fps) | 7.608 ms (131.4 fps) | ±0 |
-| load | 826.7 ms | 855.5 ms | |
-| output | 105000 / 420000 floats | identical | `max_abs_diff = 0` |
+| | Python (`ncnn` module) | Rust (C API) |
+| --- | --- | --- |
+| 320 steady mean | 4.829 ms (207.1 fps) | 4.917 ms (203.4 fps) |
+| 320 steady p95 | 5.751 ms | 5.730 ms |
+| 640 steady mean | 7.532 ms (132.8 fps) | 7.851 ms (127.4 fps) |
+| load | 774 / 790 ms | 842 / 795 ms |
+| output | 105000 / 420000 floats | identical, `max_abs_diff = 0` |
 
 Not "close" -- **every element of both output tensors is bitwise equal**
 (105000/105000 at 320, 420000/420000 at 640). Both bindings drive the same
@@ -33,11 +33,17 @@ chance to diverge; the value of measuring it is that a mistake in Mat layout,
 `cstep` handling or blob naming would have shown up here as a mismatch rather
 than as a plausible-looking wrong answer later.
 
-The small 320 win is per-call overhead disappearing -- three FFI calls per
-inference instead of the pybind11 round trip -- and it shrinks to nothing at
-640, where the GPU dominates. **Rust buys no inference speed.** That is the
-expected result and it is fine: the detector was never the bottleneck this
-project was going to fix.
+**Rust buys no inference speed, and the differences above are noise.** An
+earlier run of the same harness had Rust ahead at 320 (4.821 against 4.976) --
+the sign flips between runs, which is the honest summary: ±2% run to run, on a
+card whose clocks move under sustained load. Anything real would have to be
+larger than that. This is the expected result and it is fine: the detector was
+never the bottleneck this project was going to fix.
+
+The same binary built by Nix and run **natively on the host** -- no container,
+Mesa 26.1.5 against the image's 25.x, a separately built ncnn -- produced the
+same tensor again, bitwise, at 4.979 ms. Two toolchains, two Mesa generations,
+one answer.
 
 ## The C API gap, and what closes it
 
@@ -108,3 +114,18 @@ MODEL=yolov9t-640-2026-2.ncnn.param SIZE=640 ITERS=600 scripts/run_spike.sh
 
 Needs `frigate-vulkan:py313` built for the reference side, and the models in
 `../frigate-vulkan/models`. Both are overridable; see the top of the script.
+
+Without Docker, on a host that has a Vulkan driver:
+
+```
+nix run .#ncnn-spike        # MODEL_PARAM=... and the rest via the environment
+nix develop                 # Rust 1.97.1, ncnn, and python3+numpy for the diff
+```
+
+`nix build .#ncnn` builds the same pinned ncnn tag the container does, with
+system glslang rather than the submodule. Two things about it are worth
+knowing, because both fail silently rather than loudly: ncnn's generated
+`ncnn.pc` joins `${prefix}` with absolute paths, and ncnn **dlopens**
+`libvulkan.so.1` instead of linking it -- so `fixupPhase`'s RPATH shrinking
+drops the loader and every enumeration comes back empty. `flake.nix` handles
+both.

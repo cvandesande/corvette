@@ -3,7 +3,7 @@
 //!
 //! Only the surface the detector actually uses is declared, so this file
 //! doubles as the answer to "is the C API wide enough?" -- everything the
-//! Python plugin calls appears below, and the four entry points prefixed
+//! Python plugin calls appears below, and the entry points prefixed
 //! `ncnn_ext_` are the ones we had to add.
 //!
 //! Every handle is an opaque pointer in ncnn's ABI, so no struct layouts are
@@ -13,10 +13,15 @@
 
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 
+#[derive(Debug)]
 pub enum __ncnn_net_t {}
+#[derive(Debug)]
 pub enum __ncnn_option_t {}
+#[derive(Debug)]
 pub enum __ncnn_mat_t {}
+#[derive(Debug)]
 pub enum __ncnn_extractor_t {}
+#[derive(Debug)]
 pub enum __ncnn_allocator_t {}
 
 pub type ncnn_net_t = *mut __ncnn_net_t;
@@ -25,7 +30,7 @@ pub type ncnn_mat_t = *mut __ncnn_mat_t;
 pub type ncnn_extractor_t = *mut __ncnn_extractor_t;
 pub type ncnn_allocator_t = *mut __ncnn_allocator_t;
 
-extern "C" {
+unsafe extern "C" {
     pub fn ncnn_version() -> *const c_char;
 
     pub fn ncnn_net_create() -> ncnn_net_t;
@@ -47,7 +52,7 @@ extern "C" {
     pub fn ncnn_option_set_use_fp16_storage(opt: ncnn_option_t, enable: c_int);
     pub fn ncnn_option_set_use_fp16_arithmetic(opt: ncnn_option_t, enable: c_int);
 
-    /// Borrows `data`, exactly as `ncnn.Mat(numpy_array)` borrows NumPy
+    /// Borrows `data`, exactly as `ncnn.Mat(numpy_array)` borrows `NumPy`
     /// storage: the buffer must outlive the Mat.
     pub fn ncnn_mat_create_external_3d(
         w: c_int,
@@ -89,9 +94,12 @@ extern "C" {
     pub fn ncnn_ext_destroy_gpu_instance();
 }
 
-/// `GpuInfo::type()`. The software rasterizer is the reason this is exposed:
-/// lavapipe reports `Cpu` while every real target reports `Discrete` or
-/// `Integrated`, which is a structural test rather than a name match.
+/// `GpuInfo::type()`.
+///
+/// The software rasterizer is the reason this is exposed: lavapipe reports
+/// [`DeviceType::Cpu`] while every real target reports [`DeviceType::Discrete`]
+/// or [`DeviceType::Integrated`], which is a structural test rather than a
+/// name match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceType {
     Discrete,
@@ -102,23 +110,25 @@ pub enum DeviceType {
 }
 
 impl DeviceType {
-    pub fn from_raw(raw: i32) -> Self {
+    #[must_use]
+    pub const fn from_raw(raw: i32) -> Self {
         match raw {
-            0 => DeviceType::Discrete,
-            1 => DeviceType::Integrated,
-            2 => DeviceType::Virtual,
-            3 => DeviceType::Cpu,
-            other => DeviceType::Unknown(other),
+            0 => Self::Discrete,
+            1 => Self::Integrated,
+            2 => Self::Virtual,
+            3 => Self::Cpu,
+            other => Self::Unknown(other),
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
-            DeviceType::Discrete => "discrete",
-            DeviceType::Integrated => "integrated",
-            DeviceType::Virtual => "virtual",
-            DeviceType::Cpu => "cpu",
-            DeviceType::Unknown(_) => "unknown",
+            Self::Discrete => "discrete",
+            Self::Integrated => "integrated",
+            Self::Virtual => "virtual",
+            Self::Cpu => "cpu",
+            Self::Unknown(_) => "unknown",
         }
     }
 }

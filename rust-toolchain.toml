@@ -1,0 +1,7 @@
+# The single source of truth for the toolchain: rustup reads it directly, and
+# flake.nix feeds it to rust-overlay so the Nix dev shell cannot drift from it.
+# docker/Dockerfile.spike pins the same version in its RUST_IMAGE arg.
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"
+components = ["clippy", "rustfmt", "rust-src"]
