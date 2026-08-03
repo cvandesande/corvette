@@ -99,6 +99,11 @@ pub struct ReviewEventData {
     /// Detected audio labels.
     #[serde(default)]
     pub audio: Vec<String>,
+    /// Identifiers of the tracked-object events this review was built from.
+    ///
+    /// Empty for a review with no tracked object, such as an audio-only one.
+    #[serde(default)]
+    pub detections: Vec<String>,
     /// Detected object labels.
     #[serde(default)]
     pub objects: Vec<String>,

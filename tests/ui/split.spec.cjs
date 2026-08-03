@@ -20,6 +20,13 @@ const consecutiveDates = (lastDate, count) =>
     return date.toISOString().slice(0, 10);
   });
 
+// A 1x1 PNG. An <img> fires `error` on an empty body, so any test that asserts
+// an image was kept rather than replaced has to serve bytes that decode.
+const DECODABLE_IMAGE = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
+
 // Answers the recording-availability preflight with the whole requested range
 // retained, so a review's clip URL is reached rather than reported as expired.
 const retainRequestedRange = (route) => {
@@ -429,6 +436,73 @@ test("recent events are filtered review activity from the last six hours", async
   await expect(
     page.getByRole("heading", { name: "No events in the last 6 hours" }),
   ).toBeVisible();
+});
+
+test("event cards show the detection snapshot, falling back to the review crop", async ({
+  page,
+}) => {
+  await page.route("**/api/config", (route) => route.fulfill({ json: { cameras: {} } }));
+  await page.route("**/api/review?*", (route) => {
+    const before = Number(new URL(route.request().url()).searchParams.get("before"));
+    return route.fulfill({
+      json: [
+        {
+          id: "kept-snapshot",
+          camera: "front",
+          start_time: before - 60,
+          end_time: before - 50,
+          severity: "alert",
+          thumb_path: "/media/frigate/clips/review/kept.webp",
+          data: { objects: ["person"], zones: [], audio: [], detections: ["event-kept"] },
+        },
+        {
+          id: "expired-snapshot",
+          camera: "front",
+          start_time: before - 120,
+          end_time: before - 110,
+          severity: "alert",
+          thumb_path: "/media/frigate/clips/review/expired.webp",
+          data: { objects: ["car"], zones: [], audio: [], detections: ["event-expired"] },
+        },
+        {
+          id: "audio-only",
+          camera: "front",
+          start_time: before - 180,
+          end_time: before - 170,
+          severity: "detection",
+          thumb_path: "/media/frigate/clips/review/audio.webp",
+          data: { objects: [], zones: [], audio: ["speech"], detections: [] },
+        },
+      ],
+    });
+  });
+  await page.route("**/api/review/activity/motion?*", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/events/event-kept/snapshot.jpg*", (route) =>
+    route.fulfill({ contentType: "image/png", body: DECODABLE_IMAGE }),
+  );
+  // Frigate expires a snapshot on its own retention, so the event outlives it.
+  await page.route("**/api/events/event-expired/snapshot.jpg*", (route) =>
+    route.fulfill({
+      status: 404,
+      json: { success: false, message: "Snapshot not available" },
+    }),
+  );
+  await page.route("**/clips/review/*.webp", (route) =>
+    route.fulfill({ contentType: "image/png", body: DECODABLE_IMAGE }),
+  );
+
+  await page.goto("/");
+  const images = page.locator(".event-card img");
+  await expect(images).toHaveCount(3);
+
+  await expect(images.nth(0)).toHaveAttribute(
+    "src",
+    "/api/events/event-kept/snapshot.jpg?crop=1&height=360&quality=80",
+  );
+  // The expired snapshot and the review with no tracked object both land on
+  // the review's own crop rather than showing a broken image.
+  await expect(images.nth(1)).toHaveAttribute("src", "/clips/review/expired.webp");
+  await expect(images.nth(2)).toHaveAttribute("src", "/clips/review/audio.webp");
 });
 
 test("a review whose footage expired reports the absence, not a media error", async ({

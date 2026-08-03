@@ -50,8 +50,16 @@ The first reviewable foundation is complete:
 - Camera cards use go2rtc's maintained MSE player, keeping media decode outside
   WASM and the stream inside one TCP connection.
 - The event history shows Frigate review activity from the last six hours with
-  review thumbnails, unambiguous browser-local timestamps, camera names and
-  entered zones. It can be filtered to alerts, detections or significant motion;
+  unambiguous browser-local timestamps, camera names and entered zones. A card
+  shows the snapshot of the tracked object the review names in its `detections`,
+  because that image carries the detection box Frigate draws on it, and falls
+  back to the review's own thumbnail -- a 16:9 crop with nothing drawn on it --
+  whenever there is no tracked object or its snapshot has expired. Frigate
+  retains an event's snapshot, an event's clip and a review's thumbnail on three
+  separate schedules, so the fallback is an ordinary state rather than an error
+  path. An image that fails to load is allowed to select it, which is the one
+  place inferring availability from a failed load is reasonable: the reader sees
+  the next-best picture rather than a broken one, and nothing is misreported. It can be filtered to alerts, detections or significant motion;
   mobile layouts initially collapse the list to four entries. Consecutive
   30-second motion samples from the same camera are presented as one continuous
   motion event, with zero-motion gaps kept as boundaries. Selecting any activity

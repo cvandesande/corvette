@@ -68,7 +68,15 @@ pub(crate) fn ReviewEventList(
         view! {
             <div class="event-grid" aria-label="Events">
                 {events.into_iter().enumerate().map(|(index, event)| {
-                    let snapshot_url = review_thumbnail_url(&event.thumb_path);
+                    let thumbnail_url = review_thumbnail_url(&event.thumb_path);
+                    let snapshot_url = event.data.detections.first().map(|id| {
+                        event_snapshot_url(id)
+                    });
+                    // Frigate expires an event's snapshot on its own retention,
+                    // separately from the review and its thumbnail, so the
+                    // snapshot is preferred for the box it draws and the review
+                    // crop stands in whenever it has already gone.
+                    let shows_snapshot = RwSignal::new(snapshot_url.is_some());
                     let detail = review_event_title(&event);
                     let thumbnail_alt = format!("{detail} activity from {}", event.camera);
                     let event_for_selection = event.clone();
@@ -91,7 +99,15 @@ pub(crate) fn ReviewEventList(
                                 type="button"
                                 on:click=move |_| selected_review.set(Some(event_for_selection.clone()))
                             >
-                                <img src=snapshot_url alt=thumbnail_alt loading="lazy"/>
+                                <img
+                                    src=move || match snapshot_url.clone() {
+                                        Some(snapshot) if shows_snapshot.get() => snapshot,
+                                        _ => thumbnail_url.clone(),
+                                    }
+                                    alt=thumbnail_alt
+                                    loading="lazy"
+                                    on:error=move |_| shows_snapshot.set(false)
+                                />
                                 <div class="event-card-body">
                                     <div class="event-card-heading">
                                         <h2>{detail}</h2>
@@ -326,6 +342,13 @@ fn review_event_title(event: &ReviewEvent) -> String {
         .or_else(|| event.data.audio.first())
         .cloned()
         .unwrap_or_else(|| severity_label(event.severity).to_owned())
+}
+
+/// Addresses a tracked object's snapshot, cropped to the object and carrying
+/// the detection box Frigate draws on it.
+fn event_snapshot_url(event_id: &str) -> String {
+    let event_id = js_sys::encode_uri_component(event_id);
+    format!("/api/events/{event_id}/snapshot.jpg?crop=1&height=360&quality=80")
 }
 
 fn review_thumbnail_url(thumb_path: &str) -> String {
