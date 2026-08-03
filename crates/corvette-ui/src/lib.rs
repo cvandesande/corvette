@@ -583,8 +583,8 @@ pub(crate) fn RecordingBrowser() -> impl IntoView {
     let selected_event = RwSignal::new(None);
     let recording_range = RwSignal::new(None::<RecordingRange>);
     let calendar_selection = RwSignal::new(None::<CalendarSelection>);
-    let recording_failed = RwSignal::new(false);
-    let recording_error = RwSignal::new(None::<String>);
+    let playback_failed = RwSignal::new(false);
+    let selection_error = RwSignal::new(None::<String>);
     let recording_camera = RwSignal::new(String::new());
     let calendar_days = recent_calendar_days(21);
     let calendar_after = calendar_days.first().map_or(0.0, |day| day.start_time);
@@ -653,8 +653,8 @@ pub(crate) fn RecordingBrowser() -> impl IntoView {
         selected_event,
         recording_range,
         calendar_selection,
-        recording_failed,
-        recording_error,
+        playback_failed,
+        selection_error,
         recording_camera,
         calendar_days,
         start_clock,
@@ -683,8 +683,8 @@ struct RecordingContext {
     selected_event: RwSignal<Option<Event>>,
     recording_range: RwSignal<Option<RecordingRange>>,
     calendar_selection: RwSignal<Option<CalendarSelection>>,
-    recording_failed: RwSignal<bool>,
-    recording_error: RwSignal<Option<String>>,
+    playback_failed: RwSignal<bool>,
+    selection_error: RwSignal<Option<String>>,
     recording_camera: RwSignal<String>,
     calendar_days: Vec<CalendarDay>,
     start_clock: RwSignal<String>,
@@ -697,11 +697,11 @@ struct RecordingContext {
 
 impl RecordingContext {
     fn load(&self, start_time: f64, end_time: f64) {
-        self.recording_failed.set(false);
-        self.recording_error.set(None);
+        self.playback_failed.set(false);
+        self.selection_error.set(None);
         let camera = self.recording_camera.get_untracked();
         if camera.is_empty() {
-            self.recording_error.set(Some(
+            self.selection_error.set(Some(
                 "Choose a camera before loading a recording.".to_owned(),
             ));
             return;
@@ -743,7 +743,7 @@ fn PageShell(active_path: &'static str, children: Children) -> impl IntoView {
 #[component]
 fn RecordingControls() -> impl IntoView {
     let context = expect_context::<RecordingContext>();
-    let selection_error = context.recording_error;
+    let selection_error = context.selection_error;
     view! {
         {move || selection_error.get().map(|error| view! {
             <p class="recording-error" role="alert">{error}</p>
@@ -851,13 +851,13 @@ fn select_calendar_day(context: &RecordingContext, day_start: f64) {
         local_day_time(selection.start_day, &context.start_clock.get_untracked()),
         local_day_time(selection.end_day, &context.end_clock.get_untracked()),
     ) else {
-        context.recording_error.set(Some(
+        context.selection_error.set(Some(
             "Enter both times as 24-hour HH:MM before choosing a date.".to_owned(),
         ));
         return;
     };
     if start_time >= end_time {
-        context.recording_error.set(Some(
+        context.selection_error.set(Some(
             "The end time must be later than the start time.".to_owned(),
         ));
         return;
@@ -953,14 +953,14 @@ fn EventPlayback(event: Event) -> impl IntoView {
         <div class="recording-heading playback-heading">
             <div><h2>{heading}</h2><p>{format_event_time(event.start_time)}</p></div>
             <button type="button" on:click=move |_| {
-                context.recording_failed.set(false);
+                context.playback_failed.set(false);
                 context.selected_event.set(None);
             }>"Close"</button>
         </div>
         <video class="recording-player" src=clip_url controls autoplay playsinline
-            on:error=move |_| context.recording_failed.set(true)
+            on:error=move |_| context.playback_failed.set(true)
         >"This browser cannot play the event recording."</video>
-        {move || context.recording_failed.get().then(|| view! {
+        {move || context.playback_failed.get().then(|| view! {
             <p class="recording-error" role="alert">
                 "The recording could not be loaded. It may have expired or still be processing."
             </p>
@@ -1021,7 +1021,7 @@ fn RecordingList(
     let context = expect_context::<RecordingContext>();
     view! {
         <RecordingTimeline selection clips motion_ranges previews reviews/>
-        {move || context.recording_failed.get().then(|| view! {
+        {move || context.playback_failed.get().then(|| view! {
             <p class="recording-error" role="alert">"One or more recordings could not be loaded."</p>
         })}
     }.into_any()
