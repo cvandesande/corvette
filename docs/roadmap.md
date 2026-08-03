@@ -63,7 +63,10 @@ The first reviewable foundation is complete:
   25-hour daylight-saving days are neither skipped nor repeated.
 - Continuous recordings can be selected by camera with common range shortcuts
   or by tapping the start and end of a calendar range. A single player follows
-  the selected point on the availability timeline.
+  the selected point on the availability timeline. Selections that cannot be
+  loaded -- no camera chosen, an end time at or before the start, a time field
+  the reader has cleared -- are reported above the controls rather than
+  silently dropped.
 - Calendar selections accept start/end times and summarize each day's highest
   review severity as motion, detection or alert. Days without retained footage
   are disabled using Frigate's camera-specific recording summary.

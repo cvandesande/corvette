@@ -736,7 +736,11 @@ fn PageShell(active_path: &'static str, children: Children) -> impl IntoView {
 #[component]
 fn RecordingControls() -> impl IntoView {
     let context = expect_context::<RecordingContext>();
+    let selection_error = context.recording_error;
     view! {
+        {move || selection_error.get().map(|error| view! {
+            <p class="recording-error" role="alert">{error}</p>
+        })}
         <div class="recording-browser">
             <aside class="recording-presets" aria-label="Recording shortcuts">
                 <h2>"Quick ranges"</h2>
@@ -836,16 +840,24 @@ fn RecordingCalendarDays() -> impl IntoView {
 
 fn select_calendar_day(context: &RecordingContext, day_start: f64) {
     let selection = select_calendar_range(context.calendar_selection.get_untracked(), day_start);
-    let start_time = local_day_time(selection.start_day, &context.start_clock.get_untracked());
-    let end_time = local_day_time(selection.end_day, &context.end_clock.get_untracked());
-    if start_time < end_time {
-        context.calendar_selection.set(Some(selection));
-        context.load(start_time, end_time);
-    } else {
+    let (Some(start_time), Some(end_time)) = (
+        local_day_time(selection.start_day, &context.start_clock.get_untracked()),
+        local_day_time(selection.end_day, &context.end_clock.get_untracked()),
+    ) else {
+        context.recording_error.set(Some(
+            "Enter both times as 24-hour HH:MM before choosing a date.".to_owned(),
+        ));
+        return;
+    };
+    if start_time >= end_time {
         context.recording_error.set(Some(
             "The end time must be later than the start time.".to_owned(),
         ));
+        return;
     }
+
+    context.calendar_selection.set(Some(selection));
+    context.load(start_time, end_time);
 }
 
 fn calendar_day_label(
@@ -1830,23 +1842,41 @@ fn has_recording(days: &std::collections::BTreeMap<String, bool>, date: &str) ->
 }
 
 fn local_day_start(date: &js_sys::Date) -> f64 {
-    let local = format!(
-        "{:04}-{:02}-{:02}T00:00:00",
-        date.get_full_year(),
-        date.get_month() + 1,
-        date.get_date(),
-    );
-    js_sys::Date::parse(&local) / 1_000.0
+    local_time_of_day(date, 0, 0)
 }
 
-fn local_day_time(day_start: f64, clock: &str) -> f64 {
+/// Returns the Unix seconds of `clock` on `day_start`'s calendar day, or
+/// `None` when `clock` is not an `HH:MM` time.
+fn local_day_time(day_start: f64, clock: &str) -> Option<f64> {
+    let (hours, minutes) = parse_clock(clock)?;
     let date = js_sys::Date::new(&JsValue::from_f64(day_start * 1_000.0));
+    Some(local_time_of_day(&date, hours, minutes))
+}
+
+/// Parses an `<input type="time">` value into local hours and minutes.
+///
+/// Returns `None` for anything that is not `HH:MM`, which is what the element
+/// reports once the user clears it.
+fn parse_clock(clock: &str) -> Option<(u32, u32)> {
+    let (hours, minutes) = clock.split_once(':')?;
+    let hours = hours.parse::<u32>().ok().filter(|hours| *hours < 24)?;
+    let minutes = minutes
+        .parse::<u32>()
+        .ok()
+        .filter(|minutes| *minutes < 60)?;
+    Some((hours, minutes))
+}
+
+fn local_time_of_day(date: &js_sys::Date, hours: u32, minutes: u32) -> f64 {
     let local = format!(
-        "{:04}-{:02}-{:02}T{clock}:00",
+        "{:04}-{:02}-{:02}T{hours:02}:{minutes:02}:00",
         date.get_full_year(),
         date.get_month() + 1,
         date.get_date(),
     );
+    // A local date built from a Date's own fields always parses; a
+    // spring-forward hour that does not exist is normalized rather than
+    // rejected.
     js_sys::Date::parse(&local) / 1_000.0
 }
 
@@ -1905,7 +1935,9 @@ const fn weekday_name(day: u32) -> &'static str {
         4 => "Thu",
         5 => "Fri",
         6 => "Sat",
-        _ => "",
+        // ECMA-262 defines getDay as 0-6, so any other value means the
+        // argument did not come from a Date.
+        _ => panic!("weekday number out of range 0-6"),
     }
 }
 
@@ -1923,7 +1955,9 @@ const fn month_name(month: u32) -> &'static str {
         9 => "Oct",
         10 => "Nov",
         11 => "Dec",
-        _ => "",
+        // ECMA-262 defines getMonth as 0-11, so any other value means the
+        // argument did not come from a Date.
+        _ => panic!("month number out of range 0-11"),
     }
 }
 
@@ -1956,6 +1990,32 @@ mod tests {
             Some(ReviewSeverity::Alert)
         );
         assert_eq!(day_severity(&reviews, 220.0, 230.0), None);
+    }
+
+    #[test]
+    fn a_cleared_or_malformed_time_input_is_not_a_clock() {
+        assert_eq!(parse_clock("00:00"), Some((0, 0)));
+        assert_eq!(parse_clock("07:05"), Some((7, 5)));
+        assert_eq!(parse_clock("23:59"), Some((23, 59)));
+        assert_eq!(parse_clock(""), None);
+        assert_eq!(parse_clock("24:00"), None);
+        assert_eq!(parse_clock("12:60"), None);
+        assert_eq!(parse_clock("12"), None);
+        assert_eq!(parse_clock("noon"), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "weekday number out of range 0-6")]
+    fn a_weekday_outside_the_date_contract_is_a_bug() {
+        let day = std::hint::black_box(7);
+        let _ = weekday_name(day);
+    }
+
+    #[test]
+    #[should_panic(expected = "month number out of range 0-11")]
+    fn a_month_outside_the_date_contract_is_a_bug() {
+        let month = std::hint::black_box(12);
+        let _ = month_name(month);
     }
 
     #[test]
