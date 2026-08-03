@@ -19,6 +19,9 @@ gloo-net = { version = "0.6.0", features = ["json"] }
 js-sys = "=0.3.98"
 leptos = { version = "0.8.20", features = ["csr"] }
 leptos_router = "0.8.14"
+# Already built for corvette-api and gloo-net's json feature; named directly
+# here only to bound the shared response decoder.
+serde = "1.0.228"
 wasm-bindgen = "=0.2.121"
 web-sys = { version = "=0.3.98", features = ["HtmlVideoElement", "KeyboardEvent", "Location", "Window"] }
 

@@ -248,6 +248,7 @@ dependencies = [
  "js-sys",
  "leptos",
  "leptos_router",
+ "serde",
  "wasm-bindgen",
  "web-sys",
 ]
