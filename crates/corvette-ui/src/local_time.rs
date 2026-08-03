@@ -17,6 +17,20 @@ fn format_date_time_parts(day: u32, month: u32, year: u32, hour: u32, minute: u3
     format!("{day} {} {year}, {hour:02}:{minute:02}", month_name(month))
 }
 
+/// Formats a timestamp as a local clock time, to the second.
+///
+/// Seconds are shown because the timeline zooms to a window a minute wide, and
+/// at that depth `HH:MM` labels the whole track identically.
+pub(crate) fn format_clock_time(unix_seconds: f64) -> String {
+    let date = js_sys::Date::new(&JsValue::from_f64(unix_seconds * 1_000.0));
+    format!(
+        "{:02}:{:02}:{:02}",
+        date.get_hours(),
+        date.get_minutes(),
+        date.get_seconds(),
+    )
+}
+
 #[derive(Clone)]
 pub(crate) struct CalendarDay {
     pub(crate) start_time: f64,

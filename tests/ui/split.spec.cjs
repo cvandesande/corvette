@@ -265,6 +265,55 @@ test.describe("recording timeline", () => {
     );
   });
 
+  // The playhead's own bounds are the window the track is showing, so their
+  // span is what zooming changes.
+  const visibleSeconds = async (page) => {
+    const playhead = page.locator(".timeline-track input");
+    return (
+      Number(await playhead.getAttribute("max")) - Number(await playhead.getAttribute("min"))
+    );
+  };
+
+  test("ctrl and the wheel zoom the window, stopping at the whole selection", async ({
+    page,
+  }) => {
+    const wholeSelection = await visibleSeconds(page);
+    expect(wholeSelection).toBeCloseTo(3600, 0);
+
+    await page.locator(".timeline-track").hover();
+    await page.keyboard.down("Control");
+    await page.mouse.wheel(0, -500);
+    await page.keyboard.up("Control");
+    await expect.poll(() => visibleSeconds(page)).toBeLessThan(wholeSelection / 2);
+
+    await page.keyboard.down("Control");
+    await page.mouse.wheel(0, 5000);
+    await page.keyboard.up("Control");
+    await expect.poll(() => visibleSeconds(page)).toBeCloseTo(wholeSelection, 0);
+  });
+
+  test("pinching the track widens the spans inside it", async ({ page }) => {
+    const track = page.locator(".timeline-track");
+    const motionWidth = () =>
+      page
+        .locator(".timeline-motion-recording")
+        .evaluate((span) => Number.parseFloat(span.style.width));
+    const box = await track.boundingBox();
+    const acrossTrack = (fraction) => box.x + box.width * fraction;
+
+    // A 30-second span of a one-hour selection, before zooming: under a
+    // percent of the track, which is a handful of pixels to aim at.
+    const beforePinch = await motionWidth();
+    expect(beforePinch).toBeCloseTo((30 / 3600) * 100, 2);
+
+    await track.dispatchEvent("pointerdown", { pointerId: 1, clientX: acrossTrack(0.8) });
+    await track.dispatchEvent("pointerdown", { pointerId: 2, clientX: acrossTrack(0.9) });
+    await track.dispatchEvent("pointermove", { pointerId: 2, clientX: acrossTrack(0.98) });
+
+    await expect.poll(motionWidth).toBeGreaterThan(beforePinch);
+    await expect.poll(() => visibleSeconds(page)).toBeLessThan(3600);
+  });
+
   test("dragging the playhead does not scroll the page", async ({ page }) => {
     const playhead = page.getByRole("slider", { name: "Recording playhead" });
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));

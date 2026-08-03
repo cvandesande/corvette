@@ -15,7 +15,7 @@ and nothing there is pinned to a Rust toolchain.
 | | State |
 | --- | --- |
 | **Stage 2, the ncnn-from-Rust spike** | **Done, 2026-08-03.** The premise holds; see [ncnn-spike.md](ncnn-spike.md) |
-| **Stage 0, the Leptos UI** | **In progress, started 2026-08-03.** Live view, event browsing and availability-aware recording playback work. Cargo Leptos splits the recording route into a lazy WASM payload; timeline zoom is next. |
+| **Stage 0, the Leptos UI** | **In progress, started 2026-08-03.** Live view, event browsing and availability-aware recording playback work, and the timeline zooms into long ranges. Cargo Leptos splits the recording route into a lazy WASM payload. |
 
 Packaging work -- the distroless split pod, retiring the Frigate donor image --
 belongs to `frigate-vulkan` and is parked there, not tracked here. It does not
@@ -95,7 +95,16 @@ as the fallback for direct client-side route navigation. The release artifact is
 plain static content under `target/site`, including a separate recording-route
 WASM payload that is fetched only when Recordings is opened.
 
-The next timeline slice is adding zoom for long recording ranges.
+The timeline zooms into long recording ranges. A week-long selection renders a
+30-second motion span at 0.005% of the track -- a fraction of a pixel, which is
+neither visible nor clickable -- so the track shows a window within the
+selection rather than the whole of it. Pinching zooms on touch and `ctrl` with
+the wheel zooms on a pointer, both anchored so the moment under the fingers
+stays put; two fingers travelling together and a horizontal wheel pan. A plain
+vertical wheel is left alone, and the track's `touch-action` keeps vertical page
+scrolling with the browser. Zoom stops at the whole selection in one direction
+and at a one-minute window in the other, below which the playhead's one-second
+step cannot address the footage anyway.
 
 Selecting a review whose footage has expired no longer reports a browser media
 error. Frigate answers a clip request for a range it has no recordings for with

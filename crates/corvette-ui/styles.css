@@ -623,10 +623,21 @@ main {
 .timeline-track {
   position: relative;
   height: 2.4rem;
-  margin-bottom: 1rem;
   border-radius: 0.45rem;
   background: #293233;
   overflow: hidden;
+  /* Leaves vertical page scrolling to the browser while claiming pinch and
+     horizontal drag, which the timeline reads as zoom and pan. */
+  touch-action: pan-y;
+}
+
+.timeline-scale {
+  display: flex;
+  justify-content: space-between;
+  margin: 0.35rem 0 1rem;
+  color: #8fa3a0;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .timeline-availability {

@@ -4,14 +4,36 @@ use corvette_api::{PreviewClip, ReviewSegment};
 use leptos::prelude::*;
 
 use crate::activity::{severity_class, severity_label};
-use crate::local_time::format_event_time;
+use crate::local_time::{format_clock_time, format_event_time};
 use crate::media::{RecordingClip, RecordingRange};
+
+/// A span of the selection, used both for the whole selection and for the
+/// narrower window the track is currently showing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TimelineView {
+    start_time: f64,
+    end_time: f64,
+}
+
+impl TimelineView {
+    fn duration(self) -> f64 {
+        self.end_time - self.start_time
+    }
+
+    /// Where `time` sits across the span, as 0.0 at its start and 1.0 at its
+    /// end. Times outside the span report the nearer edge.
+    fn fraction_of(self, time: f64) -> f64 {
+        ((time - self.start_time) / self.duration()).clamp(0.0, 1.0)
+    }
+}
 
 /// The selected window and the playhead every span on the track moves.
 #[derive(Clone, Copy)]
 struct TimelineControls {
-    range_start: f64,
-    range_end: f64,
+    /// The whole selection, which zooming never leaves.
+    bounds: TimelineView,
+    /// The part of `bounds` the track currently shows.
+    view: RwSignal<TimelineView>,
     active_activity: RwSignal<Option<TimelineActivity>>,
     selected_time: RwSignal<f64>,
     uses_preview: RwSignal<bool>,
@@ -26,8 +48,11 @@ impl TimelineControls {
         self.selected_time.set(time);
     }
 
+    /// Positions a span against the current view. Reads a signal, so call sites
+    /// must be inside a reactive closure for zooming to move the span.
     fn span_style(self, start_time: f64, end_time: f64) -> String {
-        timeline_segment_style(start_time, end_time, self.range_start, self.range_end)
+        let view = self.view.get();
+        timeline_segment_style(start_time, end_time, view.start_time, view.end_time)
     }
 }
 
@@ -42,14 +67,26 @@ pub(crate) fn RecordingTimeline(
 ) -> impl IntoView {
     let selectable_clips = clips.clone();
     let playback_activities = timeline_activities(&motion_ranges, &reviews, range_start, range_end);
+    let bounds = TimelineView {
+        start_time: range_start,
+        end_time: range_end,
+    };
     let controls = TimelineControls {
-        range_start,
-        range_end,
+        bounds,
+        view: RwSignal::new(bounds),
         active_activity: RwSignal::new(None::<TimelineActivity>),
         selected_time: RwSignal::new(playable_time(&clips, range_start)),
         uses_preview: RwSignal::new(true),
     };
     let selected_time = controls.selected_time;
+    let view_window = controls.view;
+    let track = NodeRef::<leptos::html::Div>::new();
+    let gestures = TimelineGestures {
+        bounds,
+        view: view_window,
+        track,
+        fingers: StoredValue::new(PinchGesture::default()),
+    };
 
     view! {
         <section class="recording-timeline" aria-label="Recording timeline">
@@ -57,14 +94,22 @@ pub(crate) fn RecordingTimeline(
                 <h3>"Timeline"</h3>
                 <output>{move || format_event_time(selected_time.get())}</output>
             </div>
-            <div class="timeline-track">
+            <div
+                class="timeline-track"
+                node_ref=track
+                on:wheel=move |event| gestures.wheel(&event)
+                on:pointerdown=move |event| gestures.finger_down(&event)
+                on:pointermove=move |event| gestures.finger_moved(&event)
+                on:pointerup=move |event| gestures.finger_lifted(&event)
+                on:pointercancel=move |event| gestures.finger_lifted(&event)
+            >
                 <AvailabilitySpans clips=clips.clone() controls/>
                 <MotionSpans motion_ranges clips=clips.clone() controls/>
                 <ReviewMarkers reviews clips=clips.clone() controls/>
                 <input
                     type="range"
-                    min=range_start
-                    max=range_end
+                    min=move || view_window.get().start_time
+                    max=move || view_window.get().end_time
                     step="1"
                     prop:value=move || selected_time.get()
                     aria-label="Recording playhead"
@@ -79,6 +124,7 @@ pub(crate) fn RecordingTimeline(
                     }
                 />
             </div>
+            <TimelineScale view=view_window/>
             <TimelinePlayer
                 clips
                 previews
@@ -91,6 +137,109 @@ pub(crate) fn RecordingTimeline(
     }
 }
 
+/// Turns wheel and two-finger gestures on the track into movements of the view
+/// window, and owns the fingers currently down.
+///
+/// Every gesture is measured against the track's width on screen, so all of
+/// these do nothing until the track has been laid out.
+#[derive(Clone, Copy)]
+struct TimelineGestures {
+    bounds: TimelineView,
+    view: RwSignal<TimelineView>,
+    track: NodeRef<leptos::html::Div>,
+    fingers: StoredValue<PinchGesture>,
+}
+
+impl TimelineGestures {
+    /// Zooms on `ctrl`/`meta` and the wheel, and pans on a horizontal wheel.
+    ///
+    /// A plain vertical wheel is left alone so that it still scrolls the page.
+    fn wheel(self, event: &web_sys::WheelEvent) {
+        if event.ctrl_key() || event.meta_key() {
+            event.prevent_default();
+            self.zoom_about(
+                (event.delta_y() * WHEEL_ZOOM_PER_PIXEL).exp(),
+                f64::from(event.client_x()),
+            );
+        } else if event.delta_x() != 0.0 {
+            event.prevent_default();
+            self.pan_by(-event.delta_x());
+        }
+    }
+
+    fn finger_down(self, event: &web_sys::PointerEvent) {
+        self.fingers.set_value(
+            self.fingers
+                .get_value()
+                .press(event.pointer_id(), f64::from(event.client_x())),
+        );
+    }
+
+    fn finger_moved(self, event: &web_sys::PointerEvent) {
+        let (moved, delta) = self
+            .fingers
+            .get_value()
+            .slide(event.pointer_id(), f64::from(event.client_x()));
+        self.fingers.set_value(moved);
+        let Some(delta) = delta else {
+            return;
+        };
+
+        event.prevent_default();
+        self.zoom_about(delta.scale, delta.anchor_client_x);
+        self.pan_by(delta.pan_pixels);
+    }
+
+    fn finger_lifted(self, event: &web_sys::PointerEvent) {
+        self.fingers
+            .set_value(self.fingers.get_value().release(event.pointer_id()));
+    }
+
+    fn zoom_about(self, scale: f64, client_x: f64) {
+        let Some(track) = self.laid_out_track() else {
+            return;
+        };
+        let current = self.view.get_untracked();
+        let anchor = time_at_client_x(current, track.left(), track.width(), client_x);
+        self.view
+            .set(zoom_view(current, self.bounds, scale, anchor));
+    }
+
+    /// Moves the window against `pan_pixels` of finger travel, so the footage
+    /// under the fingers follows them.
+    fn pan_by(self, pan_pixels: f64) {
+        let Some(track) = self.laid_out_track() else {
+            return;
+        };
+        let current = self.view.get_untracked();
+        let seconds = -pan_pixels / track.width() * current.duration();
+        self.view.set(pan_view(current, self.bounds, seconds));
+    }
+
+    /// The track's box on screen, once it has one to divide screen pixels by.
+    fn laid_out_track(self) -> Option<web_sys::DomRect> {
+        self.track
+            .get_untracked()
+            .map(|element| element.get_bounding_client_rect())
+            .filter(|track| track.width() > 0.0)
+    }
+}
+
+/// Names the window the track is showing, so a zoomed view says where it is.
+#[component]
+fn TimelineScale(view: RwSignal<TimelineView>) -> impl IntoView {
+    view! {
+        <div class="timeline-scale" aria-hidden="true">
+            <span>{move || format_clock_time(view.get().start_time)}</span>
+            <span>{move || {
+                let view = view.get();
+                format_clock_time(view.start_time.midpoint(view.end_time))
+            }}</span>
+            <span>{move || format_clock_time(view.get().end_time)}</span>
+        </div>
+    }
+}
+
 /// Renders one clickable span per stretch of retained footage.
 #[component]
 fn AvailabilitySpans(clips: Vec<RecordingClip>, controls: TimelineControls) -> impl IntoView {
@@ -98,12 +247,12 @@ fn AvailabilitySpans(clips: Vec<RecordingClip>, controls: TimelineControls) -> i
         .into_iter()
         .map(|clip| {
             let start_time = clip.range.start_time;
-            let style = controls.span_style(start_time, clip.range.end_time);
+            let end_time = clip.range.end_time;
             let label = format!("Play from {}", format_event_time(start_time));
             view! { <button
                 type="button"
                 class="timeline-availability"
-                style=style
+                style=move || controls.span_style(start_time, end_time)
                 aria-label=label
                 on:click=move |_| controls.select(None, start_time)
             ></button> }
@@ -125,7 +274,6 @@ fn MotionSpans(
                 start_time: range.start_time,
                 end_time: range.end_time,
             };
-            let style = controls.span_style(activity.start_time, activity.end_time);
             let label = format!(
                 "Motion recording at {}",
                 format_event_time(activity.start_time),
@@ -134,7 +282,7 @@ fn MotionSpans(
             view! { <button
                 type="button"
                 class="timeline-activity timeline-motion-recording activity-motion"
-                style=style
+                style=move || controls.span_style(activity.start_time, activity.end_time)
                 aria-label=label
                 on:click=move |_| controls.select(
                     Some(activity),
@@ -161,14 +309,13 @@ fn ReviewMarkers(
             let (start_time, end_time) = review_timeline_bounds(
                 review.start_time,
                 review.end_time,
-                controls.range_start,
-                controls.range_end,
+                controls.bounds.start_time,
+                controls.bounds.end_time,
             )?;
             let activity = TimelineActivity {
                 start_time,
                 end_time,
             };
-            let style = controls.span_style(start_time, end_time);
             let severity = review.severity;
             let label = format!(
                 "{} activity at {}",
@@ -183,7 +330,7 @@ fn ReviewMarkers(
                     severity_class(severity),
                     if is_point { " timeline-point" } else { "" },
                 )
-                style=style
+                style=move || controls.span_style(start_time, end_time)
                 aria-label=label
                 on:click=move |_| controls.select(
                     Some(activity),
@@ -192,6 +339,156 @@ fn ReviewMarkers(
             ></button> })
         })
         .collect_view()
+}
+
+/// The shortest window zooming can produce. A minute across the full track is
+/// roughly a tenth of a second per pixel on a phone, which is finer than the
+/// playhead's one-second step can address.
+const MINIMUM_VIEW_SECONDS: f64 = 60.0;
+
+/// Converts a wheel notch into a zoom factor. A notch is 100 pixels on most
+/// platforms, so this makes one notch change the window by about a fifth,
+/// small enough that a single flick does not overshoot the span being aimed at.
+const WHEEL_ZOOM_PER_PIXEL: f64 = 0.002;
+
+/// Two fingers closer together than this pinch too coarsely to derive a scale
+/// from, and at zero would divide by it.
+const MINIMUM_PINCH_SPAN_PIXELS: f64 = 8.0;
+
+/// Narrows or widens `view` within `bounds` by `scale`, keeping `anchor_time`
+/// under the same point on the track.
+///
+/// A `scale` below 1.0 zooms in. The result is never shorter than
+/// `MINIMUM_VIEW_SECONDS`, never longer than `bounds`, and never outside it.
+fn zoom_view(
+    view: TimelineView,
+    bounds: TimelineView,
+    scale: f64,
+    anchor_time: f64,
+) -> TimelineView {
+    let shortest = MINIMUM_VIEW_SECONDS.min(bounds.duration());
+    let duration = (view.duration() * scale).clamp(shortest, bounds.duration());
+    let anchor_fraction = view.fraction_of(anchor_time);
+    positioned_view(
+        anchor_fraction.mul_add(-duration, anchor_time),
+        duration,
+        bounds,
+    )
+}
+
+/// Moves `view` by `seconds` without changing its duration, stopping at the
+/// edges of `bounds`.
+fn pan_view(view: TimelineView, bounds: TimelineView, seconds: f64) -> TimelineView {
+    positioned_view(view.start_time + seconds, view.duration(), bounds)
+}
+
+fn positioned_view(start_time: f64, duration: f64, bounds: TimelineView) -> TimelineView {
+    // The clamp is well-formed only while duration fits inside bounds, which is
+    // what both callers guarantee before reaching here.
+    let start_time = start_time.clamp(bounds.start_time, bounds.end_time - duration);
+    TimelineView {
+        start_time,
+        end_time: start_time + duration,
+    }
+}
+
+/// Reads the time under a pointer, given the track's position and width on
+/// screen.
+fn time_at_client_x(view: TimelineView, track_left: f64, track_width: f64, client_x: f64) -> f64 {
+    let fraction = ((client_x - track_left) / track_width).clamp(0.0, 1.0);
+    fraction.mul_add(view.duration(), view.start_time)
+}
+
+/// The fingers of a two-finger gesture, tracked so that spreading them zooms
+/// the view and sliding them together moves it.
+#[derive(Clone, Copy, Default)]
+struct PinchGesture {
+    fingers: [Option<TrackedFinger>; 2],
+}
+
+#[derive(Clone, Copy)]
+struct TrackedFinger {
+    pointer_id: i32,
+    client_x: f64,
+}
+
+/// What one finger's movement changed about a two-finger gesture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PinchDelta {
+    /// Multiplier for the view's duration; below 1.0 the fingers spread apart.
+    scale: f64,
+    /// How far the fingers travelled together, in screen pixels.
+    pan_pixels: f64,
+    /// The point on screen the zoom keeps fixed.
+    anchor_client_x: f64,
+}
+
+impl PinchGesture {
+    fn press(mut self, pointer_id: i32, client_x: f64) -> Self {
+        let finger = TrackedFinger {
+            pointer_id,
+            client_x,
+        };
+        if let Some(slot) = self
+            .fingers
+            .iter_mut()
+            .find(|slot| slot.is_none_or(|tracked| tracked.pointer_id == pointer_id))
+        {
+            *slot = Some(finger);
+        }
+        self
+    }
+
+    fn tracks(self, pointer_id: i32) -> bool {
+        self.fingers
+            .iter()
+            .any(|slot| slot.is_some_and(|tracked| tracked.pointer_id == pointer_id))
+    }
+
+    fn release(mut self, pointer_id: i32) -> Self {
+        for slot in &mut self.fingers {
+            if slot.is_some_and(|tracked| tracked.pointer_id == pointer_id) {
+                *slot = None;
+            }
+        }
+        self
+    }
+
+    /// Moves one finger, reporting the zoom and pan the pair now describes.
+    ///
+    /// Reports nothing until both fingers are down, so a one-finger drag stays
+    /// with the playhead rather than moving the view under it.
+    fn slide(self, pointer_id: i32, client_x: f64) -> (Self, Option<PinchDelta>) {
+        if !self.tracks(pointer_id) {
+            return (self, None);
+        }
+
+        // A finger is followed even while it is alone on the track, so that a
+        // pinch beginning after a playhead drag measures from where that finger
+        // now is rather than from where it first landed.
+        let previous = self.fingers;
+        let moved = self.press(pointer_id, client_x);
+        let ([Some(first), Some(second)], [Some(next_first), Some(next_second)]) =
+            (previous, moved.fingers)
+        else {
+            return (moved, None);
+        };
+        let previous_span = (first.client_x - second.client_x).abs();
+        let current_span = (next_first.client_x - next_second.client_x).abs();
+        if previous_span < MINIMUM_PINCH_SPAN_PIXELS || current_span < MINIMUM_PINCH_SPAN_PIXELS {
+            return (moved, None);
+        }
+
+        let current_midpoint = next_first.client_x.midpoint(next_second.client_x);
+        (
+            moved,
+            Some(PinchDelta {
+                scale: previous_span / current_span,
+                pan_pixels: current_midpoint - first.client_x.midpoint(second.client_x),
+                anchor_client_x: current_midpoint,
+            }),
+        )
+    }
 }
 
 /// Playhead offsets closer together than this count as already positioned:
@@ -664,6 +961,156 @@ mod tests {
             Some(activities[2])
         );
         assert_eq!(next_timeline_activity(&activities, activities[2]), None);
+    }
+
+    /// A week-long selection, the range zoom exists for: a 30-second motion
+    /// span is 0.005% of it, which rounds to nothing the reader can hit.
+    const WEEK: TimelineView = TimelineView {
+        start_time: 0.0,
+        end_time: 604_800.0,
+    };
+
+    /// Compares view arithmetic well inside a millisecond, which is finer than
+    /// the playhead's one-second step or any label derived from it.
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 0.001,
+            "expected {expected}, got {actual}",
+        );
+    }
+
+    #[test]
+    fn zooming_in_keeps_the_anchored_time_under_the_same_point() {
+        let zoomed = zoom_view(WEEK, WEEK, 0.5, 302_400.0);
+
+        assert_close(zoomed.duration(), 302_400.0);
+        assert_close(zoomed.fraction_of(302_400.0), WEEK.fraction_of(302_400.0));
+
+        let off_centre = zoom_view(WEEK, WEEK, 0.5, 151_200.0);
+        assert_close(off_centre.fraction_of(151_200.0), 0.25);
+    }
+
+    #[test]
+    fn zooming_stops_at_one_minute_and_at_the_whole_selection() {
+        let deep = zoom_view(WEEK, WEEK, 0.000_001, 302_400.0);
+        assert_close(deep.duration(), MINIMUM_VIEW_SECONDS);
+
+        assert_eq!(zoom_view(deep, WEEK, 1_000_000.0, 302_400.0), WEEK);
+    }
+
+    #[test]
+    fn a_selection_shorter_than_the_minimum_window_still_zooms_to_itself() {
+        let minute = TimelineView {
+            start_time: 0.0,
+            end_time: 30.0,
+        };
+
+        assert_eq!(zoom_view(minute, minute, 0.1, 15.0), minute);
+    }
+
+    #[test]
+    fn panning_and_zooming_never_leave_the_selection() {
+        let window = zoom_view(WEEK, WEEK, 0.25, 302_400.0);
+
+        assert_close(
+            pan_view(window, WEEK, -f64::MAX).start_time,
+            WEEK.start_time,
+        );
+        assert_close(pan_view(window, WEEK, f64::MAX).end_time, WEEK.end_time);
+
+        let at_start = zoom_view(WEEK, WEEK, 0.5, WEEK.start_time);
+        assert_close(at_start.start_time, WEEK.start_time);
+        let at_end = zoom_view(WEEK, WEEK, 0.5, WEEK.end_time);
+        assert_close(at_end.end_time, WEEK.end_time);
+    }
+
+    #[test]
+    fn a_wheel_notch_zooms_by_about_a_fifth_in_each_direction() {
+        let out = zoom_view(WEEK, WEEK, (100.0 * WHEEL_ZOOM_PER_PIXEL).exp(), 302_400.0);
+        let half = TimelineView {
+            start_time: 0.0,
+            end_time: 302_400.0,
+        };
+        let into = zoom_view(half, WEEK, (-100.0 * WHEEL_ZOOM_PER_PIXEL).exp(), 151_200.0);
+
+        // Clamped to the whole selection, which one notch out already exceeds.
+        assert_eq!(out, WEEK);
+        assert!((into.duration() / half.duration() - 0.818_7).abs() < 0.001);
+    }
+
+    #[test]
+    fn one_finger_reports_nothing_until_a_second_joins_it() {
+        let (dragged, delta) = PinchGesture::default().press(1, 100.0).slide(1, 200.0);
+        assert_eq!(delta, None);
+
+        // The lone finger was still followed to 200, so the pinch measures its
+        // span from there rather than from where it first landed.
+        let (_, delta) = dragged.press(2, 400.0).slide(2, 600.0);
+        assert_eq!(
+            delta,
+            Some(PinchDelta {
+                scale: 0.5,
+                pan_pixels: 100.0,
+                anchor_client_x: 400.0,
+            })
+        );
+    }
+
+    #[test]
+    fn spreading_the_fingers_zooms_in_and_pinching_them_zooms_out() {
+        let pinched = PinchGesture::default().press(1, 100.0).press(2, 200.0);
+
+        let (_, spread) = pinched.slide(2, 300.0);
+        assert_close(spread.expect("two fingers are down").scale, 0.5);
+
+        let (_, squeezed) = pinched.slide(2, 150.0);
+        assert_close(squeezed.expect("two fingers are down").scale, 2.0);
+    }
+
+    #[test]
+    fn fingers_travelling_together_move_the_view_by_what_they_travelled() {
+        let pinched = PinchGesture::default().press(1, 100.0).press(2, 200.0);
+
+        // A browser reports one pointer at a time, so a 50-pixel two-finger
+        // slide arrives as two events that each move the midpoint half as far.
+        let (moved, first_step) = pinched.slide(1, 150.0);
+        let (_, second_step) = moved.slide(2, 250.0);
+
+        assert_close(first_step.expect("two fingers are down").pan_pixels, 25.0);
+        assert_close(second_step.expect("two fingers are down").pan_pixels, 25.0);
+    }
+
+    #[test]
+    fn a_lifted_finger_stops_reporting_a_pinch() {
+        let (_, delta) = PinchGesture::default()
+            .press(1, 100.0)
+            .press(2, 200.0)
+            .release(2)
+            .slide(1, 150.0);
+
+        assert_eq!(delta, None);
+    }
+
+    #[test]
+    fn a_pointer_the_track_never_saw_does_not_move_the_view() {
+        let (_, delta) = PinchGesture::default()
+            .press(1, 100.0)
+            .press(2, 200.0)
+            .slide(9, 400.0);
+
+        assert_eq!(delta, None);
+    }
+
+    #[test]
+    fn the_time_under_a_pointer_is_read_from_the_track_geometry() {
+        let window = TimelineView {
+            start_time: 100.0,
+            end_time: 200.0,
+        };
+
+        assert_close(time_at_client_x(window, 40.0, 400.0, 240.0), 150.0);
+        assert_close(time_at_client_x(window, 40.0, 400.0, 0.0), 100.0);
+        assert_close(time_at_client_x(window, 40.0, 400.0, 1_000.0), 200.0);
     }
 
     #[test]
