@@ -74,6 +74,18 @@ pub struct ReviewSegment {
     pub severity: ReviewSeverity,
 }
 
+/// A retained media segment returned by Frigate's recordings endpoint.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct RecordingSegment {
+    /// Segment start as Unix seconds.
+    pub start_time: f64,
+    /// Segment end as Unix seconds.
+    pub end_time: f64,
+    /// Amount of motion Frigate measured in the segment.
+    #[serde(default)]
+    pub motion: Option<f64>,
+}
+
 /// Frigate's ordered review activity classifications.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -243,6 +255,28 @@ mod tests {
         assert_eq!(
             ReviewSeverity::Detection.highest(ReviewSeverity::Alert),
             ReviewSeverity::Alert
+        );
+    }
+
+    #[test]
+    fn recording_segment_ignores_unneeded_metadata() {
+        let segment: RecordingSegment = serde_json::from_str(
+            r#"{
+                "id": "recording-id",
+                "start_time": 1722690000.0,
+                "end_time": 1722690010.0,
+                "duration": 10.0,
+                "segment_size": 123456,
+                "motion": 4,
+                "objects": 1
+            }"#,
+        )
+        .expect("Frigate recording segment should deserialize");
+
+        assert!((segment.start_time - 1_722_690_000.0).abs() < f64::EPSILON);
+        assert!((segment.end_time - 1_722_690_010.0).abs() < f64::EPSILON);
+        assert!(
+            (segment.motion.expect("segment should include motion") - 4.0).abs() < f64::EPSILON
         );
     }
 }

@@ -434,13 +434,6 @@ main {
   color: #69d1ba;
 }
 
-.calendar-actions {
-  display: flex;
-  gap: 0.25rem;
-  flex-wrap: wrap;
-  justify-content: end;
-}
-
 .calendar-grid {
   display: grid;
   grid-template-columns: repeat(7, minmax(3.25rem, 1fr));
@@ -466,15 +459,19 @@ main {
   outline: none;
 }
 
+.calendar-grid button:disabled {
+  color: #60706e;
+  border-color: #253031;
+  cursor: default;
+}
+
+.calendar-grid button:disabled:hover {
+  border-color: #253031;
+}
+
 .calendar-grid button.in-range {
   border-color: #39776a;
   background: #1c3a34;
-}
-
-.calendar-grid button.range-start {
-  color: #0d1715;
-  border-color: #69d1ba;
-  background: #69d1ba;
 }
 
 .calendar-grid span,
@@ -518,6 +515,12 @@ main {
   margin-top: 0.8rem;
   color: #8fa09e;
   font-size: 0.75rem;
+}
+
+.calendar-status {
+  margin: 0.75rem 0 0;
+  color: #8fa09e;
+  font-size: 0.8rem;
 }
 
 .activity-legend span {
@@ -582,6 +585,101 @@ main {
   border: 1px solid #2b3838;
   border-radius: 0.9rem;
   background: #050808;
+  object-fit: cover;
+}
+
+.recording-list {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.recording-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 1rem;
+}
+
+.recording-filters button {
+  padding: 0.5rem 0.8rem;
+  border: 1px solid #2f3c3d;
+  border-radius: 999px;
+  color: #aab9b7;
+  background: #12191a;
+  cursor: pointer;
+}
+
+.recording-filters button:hover,
+.recording-filters button:focus-visible,
+.recording-filters button.active {
+  color: #0d1715;
+  border-color: #69d1ba;
+  background: #69d1ba;
+  outline: none;
+}
+
+.recording-list article,
+.recording-list h3 {
+  margin: 0;
+}
+
+.recording-preview {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #2b3838;
+  border-radius: 0.9rem;
+  background: #050808;
+  cursor: pointer;
+}
+
+.recording-preview img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+
+.recording-preview span {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: 50%;
+  background: rgb(13 23 21 / 82%);
+  box-shadow: 0 0 0 1px rgb(105 209 186 / 65%);
+  transform: translate(-50%, -50%);
+}
+
+.recording-preview span::after {
+  position: absolute;
+  top: 50%;
+  left: 54%;
+  border-top: 0.55rem solid transparent;
+  border-bottom: 0.55rem solid transparent;
+  border-left: 0.85rem solid #69d1ba;
+  content: "";
+  transform: translate(-50%, -50%);
+}
+
+.recording-preview:hover,
+.recording-preview:focus-visible {
+  border-color: #69d1ba;
+  outline: none;
+}
+
+.recording-empty {
+  color: #8fa09e;
+}
+
+.recording-list h3 {
+  margin-bottom: 0.5rem;
+  color: #aab9b7;
+  font-size: 0.85rem;
+  font-weight: 500;
 }
 
 .recording-error {

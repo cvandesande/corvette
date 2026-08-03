@@ -52,9 +52,14 @@ The first reviewable foundation is complete:
 - Events with retained recordings open in a native browser video player through
   Frigate's authenticated clip endpoint.
 - Continuous recordings can be selected by camera with common range shortcuts
-  or a two-click day range, using the same native fragmented-MP4 playback path.
+  or by clicking a calendar day. Each contiguous recording in the range gets a native
+  fragmented-MP4 player, ordered from newest to oldest and loaded on demand.
+  Playback can be narrowed to recordings with motion, detections or alerts; the
+  unfiltered view remains the default. Idle recordings show a lazily loaded
+  frame from the footage and become video players when selected.
 - Calendar selections accept start/end times and summarize each day's highest
-  review severity as motion, detection or alert.
+  review severity as motion, detection or alert. Days without retained footage
+  are disabled using Frigate's camera-specific recording summary.
 - `make serve-ui` forwards Frigate and go2rtc from Kubernetes and serves the UI
   with live reload; camera discovery, playback and recent events are verified
   against the running `icams` deployment in Chromium through Playwright.
@@ -69,9 +74,6 @@ editing remains deliberately open pending the schema decision described below.
 
 Known recording-browser issues:
 
-- Calendar activity colors come from review history, which can outlive retained
-  footage. The picker needs recording-availability data before treating a day as
-  playable.
 - Frigate returns a JSON `400` when a selected range has no recordings, but a
   `<video>` element reports that as an unsupported MIME type. Preflight the VOD
   mapping and show Frigate's actual error before assigning the media URL.
