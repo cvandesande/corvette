@@ -48,3 +48,19 @@ is not enabled as a group, on upstream's own advice. See the bottom of
 | `scripts/` | the harness that runs both implementations over one input and compares them |
 | `flake.nix` | pinned toolchain, a Vulkan-enabled ncnn, and a dev shell |
 | `docs/ncnn-spike.md` | findings |
+
+## License
+
+MIT, in `LICENSE`.
+
+ncnn is BSD-3-Clause, which is attribution-only, so linking it carries no
+further obligation -- but a redistributed binary has to carry the notice. The
+spike image ships it under `/usr/share/licenses/`. Note that the container build
+links glslang (Apache-2.0 and others) *into* `libncnn.so`, so that image carries
+both notices; the Nix build leaves glslang as separate libraries.
+
+**Models are not covered by any of this.** Nothing here ships model weights, and
+neither does `frigate-vulkan` -- both gitignore `models/`. Ultralytics' YOLOv9
+weights are AGPL-3.0, and upstream YOLOv9 is GPL-3.0, so exported `.param`/`.bin`
+files are copyleft artifacts. Export your own; see `frigate-vulkan`'s
+`docs/free-yolov9-model-guide.md`.

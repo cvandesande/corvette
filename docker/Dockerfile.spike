@@ -60,6 +60,12 @@ RUN apt-get update \
         libgomp1 libvulkan1 mesa-vulkan-drivers \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ncnn-builder /opt/ncnn/lib /opt/ncnn/lib
+# BSD-3-Clause wants its notice carried with the binary, and this build links
+# glslang *into* libncnn.so -- so the image ships code under both licences even
+# though only one library is visible. (The Nix build keeps glslang separate.)
+COPY --from=ncnn-builder /src/ncnn/LICENSE.txt /usr/share/licenses/ncnn/LICENSE.txt
+COPY --from=ncnn-builder /src/ncnn/glslang/LICENSE.txt /usr/share/licenses/glslang/LICENSE.txt
+COPY LICENSE /usr/share/licenses/corvette/LICENSE
 COPY --from=rust-builder /src/target/release/ncnn-spike /usr/local/bin/ncnn-spike
 ENV LD_LIBRARY_PATH=/opt/ncnn/lib
 ENTRYPOINT ["/usr/local/bin/ncnn-spike"]
