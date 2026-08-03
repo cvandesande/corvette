@@ -304,6 +304,22 @@ down:
   Corvette must answer every activity range with one documented semantic --
   half-open `[after, before)` on overlap -- so that adjacent ranges partition the
   timeline instead of dropping the rows between them.
+- **A range default is computed per request, not per process.**
+  `/api/{camera}/recordings` declares its window as
+  `after: float = (datetime.now() - timedelta(hours=1)).timestamp()` and
+  `before: float = datetime.now().timestamp()`. Python evaluates a default
+  argument once, when the function is defined, and FastAPI takes it from the
+  signature as a fixed value -- so both bounds freeze at import and the
+  docstring's promise of "the last hour" is false after the first hour of
+  uptime. On a long-lived deployment the implicit window is days or weeks stale.
+  It is the only range endpoint written this way; every other one uses the
+  per-request `params.before or datetime.now().timestamp()` idiom, so it reads
+  as an oversight rather than a convention. Corvette's clients always send both
+  bounds, and this repository's recording-availability preflight is no
+  exception, so nothing here depends on the default -- but Corvette's own API
+  must resolve a defaulted range at request time, and should prefer refusing an
+  unbounded query to answering one with a window whose age is an accident of
+  process lifetime.
 - **`vod_mode mapped` + `vod_upstream_location /api`.** nginx-vod asks `/api` for
   a JSON mapping of a playback request to files on disk, then reads them itself.
   Whatever serves `/api` has to answer that, or recording playback stops working.
