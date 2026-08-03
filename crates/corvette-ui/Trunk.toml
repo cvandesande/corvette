@@ -1,0 +1,12 @@
+[[proxy]]
+backend = "http://127.0.0.1:5000/api/"
+rewrite = "/api/"
+
+[[proxy]]
+backend = "ws://127.0.0.1:11984/api/ws"
+rewrite = "/go2rtc/api/ws"
+ws = true
+
+[[proxy]]
+backend = "http://127.0.0.1:11984/"
+rewrite = "/go2rtc/"

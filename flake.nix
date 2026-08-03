@@ -122,12 +122,20 @@
             pkgs.cmake
             pkgs.gnumake
             pkgs.nixfmt
+            pkgs.nodejs_24
             pkgs.pkg-config
+            pkgs.playwright-driver
             pkgs.shellcheck
+            pkgs.trunk
             pkgs.vulkan-loader
             pkgs.vulkan-tools
           ];
           NCNN_DIR = "${self.packages.${pkgs.stdenv.hostPlatform.system}.ncnn}";
+          PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.selectBrowsers {
+            withFirefox = false;
+            withWebkit = false;
+          }}";
+          PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
         };
       });
 

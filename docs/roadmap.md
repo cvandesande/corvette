@@ -15,7 +15,7 @@ and nothing there is pinned to a Rust toolchain.
 | | State |
 | --- | --- |
 | **Stage 2, the ncnn-from-Rust spike** | **Done, 2026-08-03.** The premise holds; see [ncnn-spike.md](ncnn-spike.md) |
-| Stage 0, the Leptos UI | Next, and worth doing on its own merits |
+| **Stage 0, the Leptos UI** | **In progress, started 2026-08-03.** Live view, recent events and time-range recording playback work; timeline navigation is next. |
 
 Packaging work -- the distroless split pod, retiring the Frigate donor image --
 belongs to `frigate-vulkan` and is parked there, not tracked here. It does not
@@ -37,11 +37,54 @@ because nginx is already the router either way.
 | 4 | Rust detection pipeline: frame ingest, motion, ncnn, tracking | **this repo** | detector retired |
 | 5 | Rust recording, events, retention | **this repo** | Frigate retired |
 
+### Stage 0 progress
+
+The first reviewable foundation is complete:
+
+- `crates/corvette-ui` provides a responsive Leptos CSR application shell.
+- `crates/corvette-api` owns the shared subset of Frigate's `/api/config`
+  contract, and the UI discovers and orders enabled cameras through it.
+- Camera cards use go2rtc's maintained MSE player, keeping media decode outside
+  WASM and the stream inside one TCP connection.
+- The event history shows the 10 most recent detections with retained recordings,
+  cropped event snapshots, unambiguous browser-local timestamps, camera names
+  and entered zones. Mobile layouts initially collapse the list to four events.
+- Events with retained recordings open in a native browser video player through
+  Frigate's authenticated clip endpoint.
+- Continuous recordings can be selected by camera with common range shortcuts
+  or a two-click day range, using the same native fragmented-MP4 playback path.
+- Calendar selections accept start/end times and summarize each day's highest
+  review severity as motion, detection or alert.
+- `make serve-ui` forwards Frigate and go2rtc from Kubernetes and serves the UI
+  with live reload; camera discovery, playback and recent events are verified
+  against the running `icams` deployment in Chromium through Playwright.
+- The pinned Rust toolchain includes `wasm32-unknown-unknown`, and the Nix
+  development shell provides Trunk, Node.js and a Chromium-only Playwright
+  browser bundle.
+- `make check` builds an optimized WASM bundle in addition to running the
+  repository's Rust, C++, shell, Nix and whitespace checks.
+
+The next slice is timeline navigation over recording availability. Config
+editing remains deliberately open pending the schema decision described below.
+
+Known recording-browser issues:
+
+- Calendar activity colors come from review history, which can outlive retained
+  footage. The picker needs recording-availability data before treating a day as
+  playable.
+- Frigate returns a JSON `400` when a selected range has no recordings, but a
+  `<video>` element reports that as an unsupported MIME type. Preflight the VOD
+  mapping and show Frigate's actual error before assigning the media URL.
+- A reported July 31 selection requested August 1. Verify date-to-timestamp
+  conversion across the browser timezone and daylight-saving boundaries when
+  the first committed Playwright regression suite is added.
+
 Stage 0 is worth doing on its own merits even if nothing after it happens: it
-replaces 21MB of React, proves the trunk/wasm build, and it is what makes stage 1
-safe, since a UI you own is a contract you own. Note the dependency though --
-stage 0 is where the Leptos bet is placed, and the case for Leptos over a
-TypeScript framework rests on stages 3-5 actually landing. See "UI stack" below.
+replaces 21MB of React, and it is what makes stage 1 safe, since a UI you own is
+a contract you own. The trunk/wasm build is now proved; replacing the React
+application is not. Note the dependency though -- stage 0 is where the Leptos
+bet is placed, and the case for Leptos over a TypeScript framework rests on
+stages 3-5 actually landing. See "UI stack" below.
 
 Two facts make the whole thing stageable rather than a rewrite-or-nothing bet.
 
@@ -120,15 +163,16 @@ which run in the browser's native media pipeline. The framework creates a
 the browser's C++ stack whether the app is React, Leptos or vanilla JS. The
 question is ecosystem access, not throughput.
 
-**Decision: drive MSE with fMP4 directly, and do not take a dependency on
-hls.js.** `RTCPeerConnection` and `MediaSource` are browser APIs that `web-sys`
-binds natively, so live (go2rtc WebRTC/MSE) needs no JS wrapper at all.
-Recordings are the only reason Frigate needs `hls.js` -- Chrome and Firefox will
-not play HLS natively in `<video>`, only Safari will. But the nginx config already
-sets `vod_hls_container_format fmp4`, and the `/stream/` location already
-advertises `application/dash+xml`, so the segments can be fed to `MediaSource`
-from Rust directly. That removes the single largest JS dependency the UI would
-otherwise have to wrap.
+**Decision: use go2rtc's maintained WebRTC player for live video, drive recording
+MSE with fMP4 directly, and do not take a dependency on hls.js.** Frigate already
+proxies go2rtc's player and signalling socket through authenticated nginx routes,
+so embedding that player keeps stream negotiation with the component that owns
+the protocol. Recordings are the only reason Frigate needs `hls.js` -- Chrome and
+Firefox will not play HLS natively in `<video>`, only Safari will. But the nginx
+config already sets `vod_hls_container_format fmp4`, and the `/stream/` location
+already advertises `application/dash+xml`, so the segments can be fed to
+`MediaSource` from Rust directly. That removes the largest JS dependency the UI
+would otherwise have to wrap.
 
 **The ecosystem gap is in the config editor and charts, not video.** In the
 current bundle `ConfigEditor-*.js` is 3.0MB and its two Monaco workers add another

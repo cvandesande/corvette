@@ -1,8 +1,8 @@
 # corvette
 
-Rust work for the frigate-vulkan project: eventually a Leptos UI and an NVR
-behind it, with Frigate retired piece by piece. Today it is one thing only --
-the spike that decides whether any of that is worth starting.
+Rust work for the frigate-vulkan project: a Leptos UI and, eventually, an NVR
+behind it, with Frigate retired piece by piece. The ncnn/Vulkan spike has proved
+the detector path and the first UI foundation is now in place.
 
 The plan is [docs/roadmap.md](docs/roadmap.md) -- moved here from the sibling
 `frigate-vulkan` repository once the spike proved the premise. That repo keeps
@@ -29,9 +29,17 @@ paths -- rustup reads it directly, `flake.nix` feeds it to rust-overlay, and
 ```
 nix develop                          # toolchain + ncnn
 make check                           # format, lint, and test everything
+make serve-ui                        # port-forward Frigate and serve the UI
 nix build .#ncnn-spike               # or .#ncnn for the pinned ncnn alone
 docker build -f docker/Dockerfile.spike --target lint .   # clippy + rustfmt gate
 ```
+
+`serve-ui` defaults to the `icams/frigate` service and the kubeconfig at
+`~/dockers/talos/tirnanog/generated/kubeconfig`. It forwards Frigate's API and
+go2rtc, using MSE so live media stays inside the TCP tunnel. Override
+`FRIGATE_KUBECONFIG`, `FRIGATE_NAMESPACE`, `FRIGATE_SERVICE`, or
+`FRIGATE_POD_SELECTOR` for another deployment. Press Ctrl-C to stop Trunk and
+both port-forwards.
 
 Lints are deliberately loud: clippy's `pedantic`, `nursery` and `cargo` groups
 are **denied** workspace-wide, along with `undocumented_unsafe_blocks` -- in an
@@ -43,6 +51,8 @@ is not enabled as a group, on upstream's own advice. See the bottom of
 
 | Path | What |
 | --- | --- |
+| `crates/corvette-api` | shared HTTP wire contracts for the UI and future Rust service |
+| `crates/corvette-ui` | Leptos client-side UI, built to WebAssembly with Trunk |
 | `crates/ncnn-sys` | raw FFI over ncnn's C API, plus `csrc/c_api_ext.cpp` -- the GPU enumeration the C API is missing |
 | `crates/ncnn-spike` | the benchmark/parity binary |
 | `docker/Dockerfile.spike` | builds ncnn from source with `NCNN_VULKAN=ON`, then the Rust binary |

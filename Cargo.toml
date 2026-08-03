@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/ncnn-sys", "crates/ncnn-spike"]
+members = [
+    "crates/corvette-api",
+    "crates/corvette-ui",
+    "crates/ncnn-sys",
+    "crates/ncnn-spike",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +15,11 @@ license = "MIT"
 
 [profile.release]
 debug = 1
+
+# Leptos still relies on the archived 2.0.1 release. The local copy preserves
+# that release and applies rust-lang/rust#127909's required public re-export.
+[patch.crates-io]
+proc-macro-error2 = { path = "vendor/proc-macro-error2" }
 
 # Everything clippy has that is meant to be enabled as a group. `restriction` is
 # deliberately not among them -- upstream says so itself, since it contains

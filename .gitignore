@@ -1,4 +1,8 @@
 target/
+node_modules/
+playwright-report/
+test-results/
+crates/corvette-ui/dist/
 out*/
 models/
 *.f32
