@@ -110,6 +110,17 @@ pub struct ReviewEventData {
     pub zones: Vec<String>,
 }
 
+/// A time bucket returned by Frigate's motion-activity endpoint.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct MotionActivity {
+    /// Bucket start as Unix seconds.
+    pub start_time: f64,
+    /// Highest motion percentage recorded within the bucket.
+    pub motion: f64,
+    /// Comma-separated cameras that recorded motion within the bucket.
+    pub camera: String,
+}
+
 /// A retained media segment returned by Frigate's recordings endpoint.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct RecordingSegment {
@@ -330,6 +341,22 @@ mod tests {
         assert!(
             (segment.motion.expect("segment should include motion") - 4.0).abs() < f64::EPSILON
         );
+    }
+
+    #[test]
+    fn motion_activity_deserializes_frigate_time_bucket() {
+        let activity: MotionActivity = serde_json::from_str(
+            r#"{
+                "start_time": 1785770490,
+                "motion": 100.0,
+                "camera": "back,front"
+            }"#,
+        )
+        .expect("Frigate motion activity should deserialize");
+
+        assert!((activity.start_time - 1_785_770_490.0).abs() < f64::EPSILON);
+        assert!((activity.motion - 100.0).abs() < f64::EPSILON);
+        assert_eq!(activity.camera, "back,front");
     }
 
     #[test]

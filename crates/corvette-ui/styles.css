@@ -768,8 +768,29 @@ main {
   background: rgb(24 32 33 / 72%);
 }
 
+.playback-modal {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow-y: auto;
+  padding: clamp(1rem, 4vw, 3rem);
+  background: rgb(4 8 9 / 82%);
+  backdrop-filter: blur(0.5rem);
+}
+
 .review-playback {
-  margin-top: 1.5rem;
+  width: min(64rem, 100%);
+  padding: clamp(1rem, 3vw, 2rem);
+  border: 1px solid #344445;
+  border-radius: 1rem;
+  background: #101718;
+  box-shadow: 0 1.5rem 5rem rgb(0 0 0 / 55%);
+}
+
+.review-playback .recording-player {
+  max-height: calc(100dvh - 12rem);
 }
 
 .activity-filters button {
@@ -868,6 +889,22 @@ main {
   .event-toggle:focus-visible {
     border-color: #69d1ba;
     outline: none;
+  }
+
+  .playback-modal {
+    place-items: stretch;
+    padding: 0;
+  }
+
+  .review-playback {
+    min-height: 100dvh;
+    padding: 1rem;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .review-playback .recording-player {
+    max-height: calc(100dvh - 8rem);
   }
 
   main {

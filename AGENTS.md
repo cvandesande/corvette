@@ -13,6 +13,12 @@ Frigate's source is available locally at `~/github/frigate`. Consult that checko
 for upstream API contracts and implementation details before using an external
 copy or inferring Frigate behavior.
 
+When a change uncovers a Frigate API incompatibility, ambiguous contract,
+surprising behavior, or upstream defect that should influence Corvette's own API,
+record the finding and the intended Corvette contract in `docs/roadmap.md`. Keep
+the note with the relevant API contract rather than leaving the rationale only in
+an issue, commit message, or compatibility workaround.
+
 When changing this repository:
 
 - Inspect nearby code and existing project-wide helpers before introducing a new

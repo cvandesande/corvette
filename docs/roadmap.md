@@ -49,7 +49,11 @@ The first reviewable foundation is complete:
 - The event history shows Frigate review activity from the last six hours with
   review thumbnails, unambiguous browser-local timestamps, camera names and
   entered zones. It can be filtered to alerts, detections or significant motion;
-  mobile layouts initially collapse the list to four entries.
+  mobile layouts initially collapse the list to four entries. Consecutive
+  30-second motion samples from the same camera are presented as one continuous
+  motion event, with zero-motion gaps kept as boundaries. Selecting any activity
+  opens playback in a viewport-level dialog rather than placing the player after
+  the potentially long event grid; the dialog becomes full-screen on mobile.
 - Events is also a distinct `/events` route with an uncollapsed review feed, a
   touch-friendly 21-day range calendar with highest-severity activity dots, and
   the same activity filters. Days without retained footage are dimmed using the
@@ -232,9 +236,24 @@ down:
 - **Review media availability is explicit and independent.** A review record can
   outlive its thumbnail, snapshot or recording, and each asset can have a
   different retention policy. Corvette's API must report thumbnail/snapshot and
-  playable-clip availability as separate current capabilities. Clients must not
-  infer video availability from the existence of a review or discover it by
-  assigning a media URL and interpreting a `404`.
+  playable-clip availability as separate current capabilities, including the
+  playback URL when a clip is available. Clients must not synthesize media URLs
+  from review IDs or timestamps, infer video availability from the existence of
+  a review, or discover it by assigning a media URL and interpreting a `404`.
+  Frigate demonstrates the failure mode: its deployed API can retain and play a
+  review's recording by camera and timestamp while rejecting the same review ID
+  at `/api/review/{id}/clip.mp4`; newer Frigate source adds that route, so its
+  presence is also version-dependent.
+- **Motion activity and review records are different resources.** Frigate's
+  `/api/review` records classify only alerts and detections; significant motion
+  is sampled separately by `/api/review/activity/motion` from retained recording
+  metadata. Corvette's API should expose one explicit activity model to clients,
+  while preserving whether an entry is a review decision or a sampled motion
+  interval. A client-side severity filter must not imply that motion is present
+  in the review-record response. Frigate's motion timestamp identifies the start
+  of a sampling bucket, not an exact retained frame: media for that bucket must be
+  addressed as a range. A point-in-time snapshot can land in a recording gap even
+  though the bucket contains playable footage.
 - **`vod_mode mapped` + `vod_upstream_location /api`.** nginx-vod asks `/api` for
   a JSON mapping of a playback request to files on disk, then reads them itself.
   Whatever serves `/api` has to answer that, or recording playback stops working.

@@ -10,7 +10,8 @@ use leptos_router::path;
 use wasm_bindgen::JsValue;
 
 use corvette_api::{
-    Camera, Event, PreviewClip, RecordingSegment, ReviewEvent, ReviewSegment, ReviewSeverity,
+    Camera, Event, MotionActivity, PreviewClip, RecordingSegment, ReviewEvent, ReviewSegment,
+    ReviewSeverity,
 };
 
 mod api;
@@ -27,6 +28,7 @@ const NAVIGATION: [(&str, &str); 4] = [
     ("System", "/#system"),
 ];
 const RECENT_ACTIVITY_HOURS: u32 = 6;
+const MOTION_BUCKET_SECONDS: f64 = 30.0;
 
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn mount() {
@@ -72,6 +74,11 @@ fn Dashboard() -> impl IntoView {
         let before = js_sys::Date::now() / 1_000.0;
         let after = f64::from(RECENT_ACTIVITY_HOURS).mul_add(-3_600.0, before);
         api::fetch_reviews(after, before)
+    });
+    let recent_motion = LocalResource::new(|| {
+        let before = js_sys::Date::now() / 1_000.0;
+        let after = f64::from(RECENT_ACTIVITY_HOURS).mul_add(-3_600.0, before);
+        api::fetch_motion_activity(after, before)
     });
     let active_section = RwSignal::new("/#live");
     let activity_filter = RwSignal::new(ActivityFilter::All);
@@ -142,16 +149,16 @@ fn Dashboard() -> impl IntoView {
                     <p class="eyebrow">"History"</p>
                     <h1 id="events-heading">"Recent events"</h1>
                     <ActivityFilters filter=activity_filter/>
-                    {move || match recent_activity.get() {
-                        None => view! { <Status heading="Loading events" detail="Fetching recent activity." glyph=StatusGlyph::Event/> }.into_any(),
-                        Some(Err(error)) => view! { <Status heading="Events unavailable" detail=error glyph=StatusGlyph::Event/> }.into_any(),
-                        Some(Ok(events)) if events.is_empty() => view! { <Status
+                    {move || match (recent_activity.get(), recent_motion.get()) {
+                        (None, _) | (_, None) => view! { <Status heading="Loading events" detail="Fetching recent activity." glyph=StatusGlyph::Event/> }.into_any(),
+                        (Some(Err(error)), _) | (_, Some(Err(error))) => view! { <Status heading="Events unavailable" detail=error glyph=StatusGlyph::Event/> }.into_any(),
+                        (Some(Ok(events)), Some(Ok(motion))) if events.is_empty() && motion.is_empty() => view! { <Status
                             heading=recent_activity_empty_heading()
-                            detail="Frigate reported no review activity during this period."
+                            detail="Frigate reported no activity during this period."
                             glyph=StatusGlyph::Event
                         /> }.into_any(),
-                        Some(Ok(events)) => view! { <ReviewEventList
-                            events
+                        (Some(Ok(events)), Some(Ok(motion))) => view! { <ReviewEventList
+                            events=review_and_motion_events(events, &motion)
                             filter=activity_filter
                             layout=EventListLayout::Compact
                             empty_heading=recent_activity_empty_heading()
@@ -276,23 +283,56 @@ fn ReviewPlayback(
     selected_review: RwSignal<Option<ReviewEvent>>,
 ) -> impl IntoView {
     let playback_failed = RwSignal::new(false);
-    let clip_url = format!("/api/review/{}/clip.mp4", review.id);
+    let close_button = NodeRef::<leptos::html::Button>::new();
+    Effect::new(move |_| {
+        if let Some(button) = close_button.get() {
+            _ = button.focus();
+        }
+    });
+    let clip_url = RecordingRange {
+        camera: review.camera.clone(),
+        start_time: review.start_time,
+        end_time: review
+            .end_time
+            .unwrap_or_else(|| js_sys::Date::now() / 1_000.0),
+    }
+    .clip_url();
     let heading = review_event_title(&review);
     view! {
-        <section class="review-playback" aria-label="Selected event playback">
-            <div class="recording-heading playback-heading">
-                <div><h2>{heading}</h2><p>{format_event_time(review.start_time)}</p></div>
-                <button type="button" on:click=move |_| selected_review.set(None)>"Close"</button>
-            </div>
-            <video class="recording-player" src=clip_url controls autoplay playsinline
-                on:error=move |_| playback_failed.set(true)
-            >"This browser cannot play the event recording."</video>
-            {move || playback_failed.get().then(|| view! {
-                <p class="recording-error" role="alert">
-                    "The high-resolution clip is not available from Frigate."
-                </p>
-            })}
-        </section>
+        <div
+            class="playback-modal"
+            on:click=move |_| selected_review.set(None)
+            on:keydown=move |event| {
+                if event.key() == "Escape" {
+                    selected_review.set(None);
+                }
+            }
+        >
+            <section
+                class="review-playback"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Selected event playback"
+                on:click=|event| event.stop_propagation()
+            >
+                <div class="recording-heading playback-heading">
+                    <div><h2>{heading}</h2><p>{format_event_time(review.start_time)}</p></div>
+                    <button
+                        type="button"
+                        node_ref=close_button
+                        on:click=move |_| selected_review.set(None)
+                    >"Close"</button>
+                </div>
+                <video class="recording-player" src=clip_url controls autoplay playsinline
+                    on:error=move |_| playback_failed.set(true)
+                >"This browser cannot play the event recording."</video>
+                {move || playback_failed.get().then(|| view! {
+                    <p class="recording-error" role="alert">
+                        "The high-resolution clip is not available from Frigate."
+                    </p>
+                })}
+            </section>
+        </div>
     }
 }
 
@@ -316,6 +356,12 @@ fn EventBrowser() -> impl IntoView {
             .get()
             .unwrap_or_else(|| CalendarSelection::single(default_day));
         api::fetch_reviews(selection.start_day, next_local_day(selection.end_day))
+    });
+    let motion_events = LocalResource::new(move || {
+        let selection = calendar_selection
+            .get()
+            .unwrap_or_else(|| CalendarSelection::single(default_day));
+        api::fetch_motion_activity(selection.start_day, next_local_day(selection.end_day))
     });
 
     view! {
@@ -378,19 +424,19 @@ fn EventBrowser() -> impl IntoView {
                     <ActivityLegend/>
                 </div>
                 <ActivityFilters filter=activity_filter/>
-                {move || match events.get() {
-                    None => view! { <Status
+                {move || match (events.get(), motion_events.get()) {
+                    (None, _) | (_, None) => view! { <Status
                         heading="Loading events"
                         detail="Fetching review activity for the selected day."
                         glyph=StatusGlyph::Event
                     /> }.into_any(),
-                    Some(Err(error)) => view! { <Status
+                    (Some(Err(error)), _) | (_, Some(Err(error))) => view! { <Status
                         heading="Events unavailable"
                         detail=error
                         glyph=StatusGlyph::Event
                     /> }.into_any(),
-                    Some(Ok(events)) => view! { <ReviewEventList
-                        events
+                    (Some(Ok(events)), Some(Ok(motion))) => view! { <ReviewEventList
+                        events=review_and_motion_events(events, &motion)
                         filter=activity_filter
                         layout=EventListLayout::Complete
                         empty_heading=if calendar_selection.get()
@@ -415,6 +461,75 @@ fn review_events_for_filter(events: Vec<ReviewEvent>, filter: ActivityFilter) ->
         .into_iter()
         .filter(|event| event.severity == severity)
         .collect()
+}
+
+fn review_and_motion_events(
+    mut reviews: Vec<ReviewEvent>,
+    motion: &[MotionActivity],
+) -> Vec<ReviewEvent> {
+    reviews.extend(
+        consolidated_motion_ranges(motion)
+            .into_iter()
+            .map(motion_review_event),
+    );
+    reviews.sort_by(|left, right| right.start_time.total_cmp(&left.start_time));
+    reviews
+}
+
+fn consolidated_motion_ranges(motion: &[MotionActivity]) -> Vec<RecordingRange> {
+    let mut ranges = motion
+        .iter()
+        .filter(|activity| activity.motion > 0.0)
+        .flat_map(|activity| {
+            activity
+                .camera
+                .split(',')
+                .filter(|camera| !camera.is_empty())
+                .map(|camera| RecordingRange {
+                    camera: camera.to_owned(),
+                    start_time: activity.start_time,
+                    end_time: activity.start_time + MOTION_BUCKET_SECONDS,
+                })
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_by(|left, right| {
+        left.camera
+            .cmp(&right.camera)
+            .then_with(|| left.start_time.total_cmp(&right.start_time))
+    });
+
+    let mut consolidated = Vec::<RecordingRange>::new();
+    for range in ranges {
+        match consolidated.last_mut() {
+            Some(previous) if motion_ranges_touch(previous, &range) => {
+                previous.end_time = previous.end_time.max(range.end_time);
+            }
+            _ => consolidated.push(range),
+        }
+    }
+    consolidated
+}
+
+fn motion_ranges_touch(previous: &RecordingRange, next: &RecordingRange) -> bool {
+    let same_camera = previous.camera == next.camera;
+    let intervals_touch = next.start_time <= previous.end_time;
+    same_camera && intervals_touch
+}
+
+fn motion_review_event(range: RecordingRange) -> ReviewEvent {
+    let encoded_camera = js_sys::encode_uri_component(&range.camera);
+    ReviewEvent {
+        id: format!("motion-{}-{}", range.camera, range.start_time),
+        camera: range.camera,
+        start_time: range.start_time,
+        end_time: Some(range.end_time),
+        severity: ReviewSeverity::SignificantMotion,
+        thumb_path: format!(
+            "/api/{encoded_camera}/start/{}/end/{}/preview.gif",
+            range.start_time, range.end_time
+        ),
+        data: corvette_api::ReviewEventData::default(),
+    }
 }
 
 fn review_event_day_severity(
@@ -1969,6 +2084,53 @@ mod tests {
         assert_eq!(
             recent_activity_empty_heading(),
             "No events in the last 6 hours"
+        );
+    }
+
+    #[test]
+    fn adjacent_motion_buckets_merge_per_camera_but_gaps_remain() {
+        let motion = [
+            MotionActivity {
+                start_time: 100.0,
+                motion: 10.0,
+                camera: "front,back".to_owned(),
+            },
+            MotionActivity {
+                start_time: 130.0,
+                motion: 20.0,
+                camera: "front".to_owned(),
+            },
+            MotionActivity {
+                start_time: 160.0,
+                motion: 0.0,
+                camera: String::new(),
+            },
+            MotionActivity {
+                start_time: 190.0,
+                motion: 30.0,
+                camera: "front".to_owned(),
+            },
+        ];
+
+        assert_eq!(
+            consolidated_motion_ranges(&motion),
+            [
+                RecordingRange {
+                    camera: "back".to_owned(),
+                    start_time: 100.0,
+                    end_time: 130.0,
+                },
+                RecordingRange {
+                    camera: "front".to_owned(),
+                    start_time: 100.0,
+                    end_time: 160.0,
+                },
+                RecordingRange {
+                    camera: "front".to_owned(),
+                    start_time: 190.0,
+                    end_time: 220.0,
+                },
+            ]
         );
     }
 

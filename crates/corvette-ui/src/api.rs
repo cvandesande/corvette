@@ -1,7 +1,8 @@
 //! Browser access to the Frigate API boundary.
 
 use corvette_api::{
-    Camera, Event, FrigateConfig, PreviewClip, RecordingSegment, ReviewEvent, ReviewSegment,
+    Camera, Event, FrigateConfig, MotionActivity, PreviewClip, RecordingSegment, ReviewEvent,
+    ReviewSegment,
 };
 use gloo_net::http::Request;
 use std::collections::BTreeMap;
@@ -80,6 +81,37 @@ pub(super) async fn fetch_reviews(after: f64, before: f64) -> Result<Vec<ReviewE
 
     response
         .json::<Vec<ReviewEvent>>()
+        .await
+        .map_err(|error| format!("decode {path} response: {error}"))
+}
+
+/// Fetches significant recording motion within a timestamp range.
+// Browser fetch futures are confined to the WASM thread and cannot implement Send.
+#[allow(clippy::future_not_send)]
+// The parent component is the only caller across this private module boundary.
+#[allow(clippy::redundant_pub_crate)]
+pub(super) async fn fetch_motion_activity(
+    after: f64,
+    before: f64,
+) -> Result<Vec<MotionActivity>, String> {
+    const MOTION_BUCKET_SECONDS: u32 = 30;
+    let path = format!(
+        "/api/review/activity/motion?cameras=all&after={after}&before={before}&scale={MOTION_BUCKET_SECONDS}"
+    );
+    let response = Request::get(&path)
+        .send()
+        .await
+        .map_err(|error| format!("request {path}: {error}"))?;
+
+    if !response.ok() {
+        return Err(format!(
+            "request {path}: server returned HTTP {}",
+            response.status()
+        ));
+    }
+
+    response
+        .json::<Vec<MotionActivity>>()
         .await
         .map_err(|error| format!("decode {path} response: {error}"))
 }

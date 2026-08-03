@@ -159,12 +159,15 @@ test("recording timeline exposes availability and review activity", async ({ pag
 });
 
 test("recent events are filtered review activity from the last six hours", async ({ page }) => {
+  let alertClipPath;
+  let mergedMotionPreviewPath;
   await page.route("**/api/config", (route) => route.fulfill({ json: { cameras: {} } }));
   await page.route("**/api/review?*", (route) => {
     const url = new URL(route.request().url());
     const after = Number(url.searchParams.get("after"));
     const before = Number(url.searchParams.get("before"));
     expect(before - after).toBeCloseTo(6 * 60 * 60, 0);
+    alertClipPath = `/api/front/start/${before - 60}/end/${before - 50}/clip.mp4`;
     return route.fulfill({
       json: [
         {
@@ -176,31 +179,54 @@ test("recent events are filtered review activity from the last six hours", async
           thumb_path: "/media/frigate/clips/review/alert.webp",
           data: { objects: ["person"], zones: ["drive"], audio: [] },
         },
-        {
-          id: "motion-review",
-          camera: "back",
-          start_time: before - 120,
-          end_time: before - 110,
-          severity: "significant_motion",
-          thumb_path: "/media/frigate/clips/review/motion.webp",
-          data: { objects: [], zones: [], audio: [] },
-        },
+      ],
+    });
+  });
+  await page.route("**/api/review/activity/motion?*", (route) => {
+    const before = Number(new URL(route.request().url()).searchParams.get("before"));
+    mergedMotionPreviewPath =
+      `/api/back/start/${before - 180}/end/${before - 120}/preview.gif`;
+    return route.fulfill({
+      json: [
+        { start_time: before - 180, motion: 42, camera: "back" },
+        { start_time: before - 150, motion: 21, camera: "back" },
+        { start_time: before - 120, motion: 0, camera: "" },
+        { start_time: before - 60, motion: 12, camera: "back" },
       ],
     });
   });
   await page.route("**/clips/review/*.webp", (route) =>
     route.fulfill({ contentType: "image/webp", body: Buffer.alloc(0) }),
   );
+  await page.route("**/api/*/start/*/end/*/preview.gif", (route) =>
+    route.fulfill({ contentType: "image/gif", body: Buffer.alloc(0) }),
+  );
+  await page.route("**/api/front/start/*/end/*/clip.mp4", (route) =>
+    route.fulfill({ contentType: "video/mp4", body: Buffer.alloc(0) }),
+  );
 
   await page.goto("/");
   const cards = page.locator(".event-card");
-  await expect(cards).toHaveCount(2);
+  await expect(cards).toHaveCount(3);
   await page.getByRole("button", { name: "Motion", exact: true }).click();
-  await expect(cards).toHaveCount(1);
-  await expect(cards).toContainText("Motion");
+  await expect(cards).toHaveCount(2);
+  await expect(cards).toContainText(["Motion", "Motion"]);
+  await expect(cards.nth(1).locator("img")).toHaveAttribute(
+    "src",
+    mergedMotionPreviewPath,
+  );
   await page.getByRole("button", { name: "Alerts", exact: true }).click();
   await expect(cards).toHaveCount(1);
   await expect(cards).toContainText("person");
+  await cards.getByRole("button").click();
+  await expect(page.getByRole("dialog", { name: "Selected event playback" })).toBeVisible();
+  await expect(page.locator(".playback-modal")).toHaveCSS("position", "fixed");
+  await expect(page.locator(".review-playback video")).toHaveAttribute(
+    "src",
+    alertClipPath,
+  );
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Selected event playback" })).toHaveCount(0);
   await page.getByRole("button", { name: "Detections", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "No events in the last 6 hours" }),
@@ -208,6 +234,7 @@ test("recent events are filtered review activity from the last six hours", async
 });
 
 test("events route browses a selected day and filters severity", async ({ page }) => {
+  let alertClipPath;
   await page.setViewportSize({ width: 390, height: 844 });
   await page.route("**/api/recordings/summary?*", (route) =>
     route.fulfill({ json: recentRecordingDays(20) }),
@@ -221,6 +248,7 @@ test("events route browses a selected day and filters severity", async ({ page }
       expect(rangeDuration).toBeGreaterThanOrEqual(23 * 60 * 60);
       expect(rangeDuration).toBeLessThanOrEqual(25 * 60 * 60);
     }
+    alertClipPath = `/api/front/start/${after + 60}/end/${after + 70}/clip.mp4`;
     return route.fulfill({
       json: [
         {
@@ -244,10 +272,19 @@ test("events route browses a selected day and filters severity", async ({ page }
       ],
     });
   });
+  await page.route("**/api/review/activity/motion?*", (route) => {
+    const after = Number(new URL(route.request().url()).searchParams.get("after"));
+    return route.fulfill({
+      json: [{ start_time: after + 180, motion: 25, camera: "front" }],
+    });
+  });
   await page.route("**/clips/review/*.webp", (route) =>
     route.fulfill({ contentType: "image/webp", body: Buffer.alloc(0) }),
   );
-  await page.route("**/api/review/*/clip.mp4", (route) =>
+  await page.route("**/api/*/start/*/end/*/preview.gif", (route) =>
+    route.fulfill({ contentType: "image/gif", body: Buffer.alloc(0) }),
+  );
+  await page.route("**/api/front/start/*/end/*/clip.mp4", (route) =>
     route.fulfill({ contentType: "video/mp4", body: Buffer.alloc(0) }),
   );
 
@@ -270,15 +307,18 @@ test("events route browses a selected day and filters severity", async ({ page }
   await eventDays.nth(2).click();
   await expect(page.locator(".calendar-grid button[aria-pressed='true']")).toHaveCount(2);
   const cards = page.locator(".event-card");
-  await expect(cards).toHaveCount(2);
-  await cards.nth(0).getByRole("button").click();
-  await expect(page.getByRole("region", { name: "Selected event playback" })).toBeVisible();
+  await expect(cards).toHaveCount(3);
+  await cards.filter({ hasText: "person" }).getByRole("button").click();
+  await expect(page.getByRole("dialog", { name: "Selected event playback" })).toBeVisible();
   await expect(page.locator(".review-playback video")).toHaveAttribute(
     "src",
-    "/api/review/alert-review/clip.mp4",
+    alertClipPath,
   );
   await page.getByRole("button", { name: "Close" }).click();
   await page.getByRole("button", { name: "Detections", exact: true }).click();
   await expect(cards).toHaveCount(1);
   await expect(cards).toContainText("cat");
+  await page.getByRole("button", { name: "Motion", exact: true }).click();
+  await expect(cards).toHaveCount(1);
+  await expect(cards).toContainText("Motion");
 });
