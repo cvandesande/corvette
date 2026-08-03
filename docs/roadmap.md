@@ -15,7 +15,7 @@ and nothing there is pinned to a Rust toolchain.
 | | State |
 | --- | --- |
 | **Stage 2, the ncnn-from-Rust spike** | **Done, 2026-08-03.** The premise holds; see [ncnn-spike.md](ncnn-spike.md) |
-| **Stage 0, the Leptos UI** | **In progress, started 2026-08-03.** Live view, recent events and time-range recording playback work; timeline navigation is next. |
+| **Stage 0, the Leptos UI** | **In progress, started 2026-08-03.** Live view, recent events and recording playback work. Recordings now has a distinct route; migrating the build to split WASM is next. |
 
 Packaging work -- the distroless split pod, retiring the Frigate donor image --
 belongs to `frigate-vulkan` and is parked there, not tracked here. It does not
@@ -60,6 +60,9 @@ The first reviewable foundation is complete:
 - Calendar selections accept start/end times and summarize each day's highest
   review severity as motion, detection or alert. Days without retained footage
   are disabled using Frigate's camera-specific recording summary.
+- Recordings is a distinct `/recordings` client-side route. Event cards link to
+  the corresponding event playback on that page, while the dashboard keeps live
+  view and recent activity focused on initial navigation.
 - `make serve-ui` forwards Frigate and go2rtc from Kubernetes and serves the UI
   with live reload; camera discovery, playback and recent events are verified
   against the running `icams` deployment in Chromium through Playwright.
@@ -69,8 +72,24 @@ The first reviewable foundation is complete:
 - `make check` builds an optimized WASM bundle in addition to running the
   repository's Rust, C++, shell, Nix and whitespace checks.
 
-The next slice is timeline navigation over recording availability. Config
-editing remains deliberately open pending the schema decision described below.
+The next slice is migrating the UI build from Trunk to `cargo leptos --split`.
+The recording page already has a Leptos `#[lazy_route]` boundary behind the
+`split` Cargo feature, but the feature must remain disabled in Trunk builds:
+Trunk leaves Leptos's generated `__wasm_split_placeholder__` module unresolved
+and the application cannot mount. The migration is complete when:
+
+- development serving and the release build use Cargo Leptos with `--split`;
+- the existing Frigate and go2rtc development proxies still work;
+- direct navigation to `/recordings` works through the development and deployed
+  static-file fallback;
+- the release output contains a separate recording-route WASM payload, and a
+  browser network test proves it is not fetched on the dashboard but is fetched
+  when Recordings is opened; and
+- `make check`, the Nix development shell and the repository documentation no
+  longer depend on Trunk.
+
+After the split-build migration, continue with timeline navigation over recording
+availability.
 
 Known recording-browser issues:
 
@@ -176,14 +195,6 @@ already advertises `application/dash+xml`, so the segments can be fed to
 `MediaSource` from Rust directly. That removes the largest JS dependency the UI
 would otherwise have to wrap.
 
-**The ecosystem gap is in the config editor and charts, not video.** In the
-current bundle `ConfigEditor-*.js` is 3.0MB and its two Monaco workers add another
-2.0MB -- about 5MB of 21MB is the YAML editor alone -- plus 524K of
-`react-apexcharts`. There is no Rust Monaco, and Rust charting (plotters,
-charming) is thinner than the JS options. This is the real cost to plan around. It
-may also evaporate: a new UI licenses a smaller config schema, and a schema small
-enough to render as generated forms needs no YAML editor at all.
-
 **Leptos is justified by the Rust NVR, not by the UI.** The compounding win is
 shared serde types across the boundary that is today pydantic on one side and
 hand-written TypeScript on the other; fine-grained reactivity also suits a live
@@ -260,12 +271,6 @@ is worth being clear-eyed about which parts are hard:
   the spike: `c_api_ext` compiled against ncnn's installed headers, in
   `crates/ncnn-sys/csrc`. No fork, and `GpuInfo::type()` came with it. See
   [ncnn-spike.md](ncnn-spike.md).
-- How much of Frigate's config schema the Leptos UI should expose, and whether it
-  needs a text editor at all. This has a concrete stake at both ends: Monaco is
-  ~5MB of the current 21MB bundle and has no Rust equivalent, and every field
-  dropped is a field the Rust NVR does not have to reimplement in stage 5.
-  Generated forms over a small serde schema would settle both. Worth deciding
-  deliberately rather than by accretion.
 - **Which model, and under what licence.** The detector currently runs YOLOv9
   weights that are AGPL-3.0 from Ultralytics (GPL-3.0 upstream), which is fine for
   a private deployment and a real constraint on anything shipped. A permissive

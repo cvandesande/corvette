@@ -29,3 +29,7 @@ When changing this repository:
 Do not weaken tests, lint levels, safety checks, or error reporting merely to
 make a check pass. Do not add exceptions to mechanical checks without an adjacent
 rationale that explains why the flagged construct is correct here.
+
+Every Clippy bypass, including item-level `allow` attributes and project lint
+configuration changes, requires explicit human review. Use a bypass only when
+there is no reasonable code or design change that resolves the warning.

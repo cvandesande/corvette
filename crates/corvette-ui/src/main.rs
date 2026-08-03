@@ -6,17 +6,24 @@
 
 use leptos::mount::mount_to_body;
 use leptos::prelude::*;
+use leptos_router::components::{Route, Router, Routes};
+use leptos_router::path;
 use wasm_bindgen::JsValue;
 
-use corvette_api::{RecordingSegment, ReviewSegment, ReviewSeverity};
+use corvette_api::{Camera, Event, RecordingSegment, ReviewSegment, ReviewSeverity};
 
 mod api;
+#[cfg(feature = "split")]
+mod recordings;
+
+#[cfg(feature = "split")]
+struct RecordingsRoute;
 
 const NAVIGATION: [(&str, &str); 4] = [
-    ("Live", "#live"),
-    ("Events", "#events"),
-    ("Recordings", "#recordings"),
-    ("System", "#system"),
+    ("Live", "/#live"),
+    ("Events", "/#events"),
+    ("Recordings", "/recordings"),
+    ("System", "/#system"),
 ];
 
 fn main() {
@@ -25,74 +32,40 @@ fn main() {
 
 /// Renders the top-level Corvette application shell.
 #[component]
+#[cfg(not(feature = "split"))]
 fn App() -> impl IntoView {
+    view! {
+        <Router>
+            <Routes fallback=|| "Page not found">
+                <Route path=path!("") view=Dashboard/>
+                <Route path=path!("recordings") view=RecordingBrowser/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+#[cfg(feature = "split")]
+fn App() -> impl IntoView {
+    view! {
+        <Router>
+            <Routes fallback=|| "Page not found">
+                <Route path=path!("") view=Dashboard/>
+                <Route
+                    path=path!("recordings")
+                    view={leptos_router::Lazy::<RecordingsRoute>::new()}
+                />
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+fn Dashboard() -> impl IntoView {
     let cameras = LocalResource::new(api::fetch_cameras);
     let events = LocalResource::new(api::fetch_events);
-    let active_section = RwSignal::new("#live");
+    let active_section = RwSignal::new("/#live");
     let events_expanded = RwSignal::new(false);
-    let selected_event = RwSignal::new(None);
-    let recording_range = RwSignal::new(None::<RecordingRange>);
-    let recording_failed = RwSignal::new(false);
-    let recording_error = RwSignal::new(None::<String>);
-    let recording_camera = RwSignal::new(String::new());
-    let recording_filter = RwSignal::new(RecordingFilter::All);
-    let calendar_days = recent_calendar_days(21);
-    let calendar_after = calendar_days.first().map_or(0.0, |day| day.start_time);
-    let timezone = browser_timezone();
-    let start_clock = RwSignal::new("00:00".to_owned());
-    let end_clock = RwSignal::new("23:59".to_owned());
-    let review_activity = LocalResource::new(move || {
-        let camera = recording_camera.get();
-        async move {
-            api::fetch_review_activity(&camera, calendar_after, js_sys::Date::now() / 1_000.0).await
-        }
-    });
-    let recording_days = LocalResource::new(move || {
-        let camera = recording_camera.get();
-        let timezone = timezone.clone();
-        async move { api::fetch_recording_days(&camera, &timezone).await }
-    });
-    let recording_clips = LocalResource::new(move || {
-        let range = recording_range.get();
-        async move {
-            let Some(range) = range else {
-                return Ok(Vec::new());
-            };
-            api::fetch_recording_segments(&range.camera, range.start_time, range.end_time)
-                .await
-                .map(|segments| contiguous_recordings(&range, segments))
-        }
-    });
-
-    let load_recording = move |start_time, end_time| {
-        recording_failed.set(false);
-        recording_error.set(None);
-        let camera = recording_camera.get_untracked();
-        if camera.is_empty() {
-            recording_error.set(Some(
-                "Choose a camera before loading a recording.".to_owned(),
-            ));
-            return;
-        }
-        selected_event.set(None);
-        recording_range.set(Some(RecordingRange {
-            camera,
-            start_time,
-            end_time,
-        }));
-    };
-
-    Effect::new(move |_| {
-        if !recording_camera.get().is_empty() {
-            return;
-        }
-        let Some(Ok(cameras)) = cameras.get() else {
-            return;
-        };
-        if let Some(camera) = cameras.first() {
-            recording_camera.set(camera.name.clone());
-        }
-    });
 
     view! {
         <header class="site-header">
@@ -189,13 +162,10 @@ fn App() -> impl IntoView {
                                         >
                                             <a
                                                 class="event-card-link"
-                                                href="#recordings"
-                                                    on:click=move |_| {
-                                                        recording_failed.set(false);
-                                                        recording_error.set(None);
-                                                        recording_range.set(None);
-                                                        selected_event.set(Some(event_for_selection.clone()));
-                                                    }
+                                                href=format!(
+                                                    "/recordings?event={}",
+                                                    event_for_selection.id,
+                                                )
                                             >
                                                 <img src=snapshot_url alt=thumbnail_alt loading="lazy"/>
                                                 <div class="event-card-body">
@@ -229,313 +199,437 @@ fn App() -> impl IntoView {
                         },
                     }}
                 </section>
-
-                <section id="recordings" class="page-section" aria-label="Recording playback">
-                    <p class="eyebrow">"Playback"</p>
-                    <h1>"Recordings"</h1>
-                    <div class="recording-browser">
-                        <aside class="recording-presets" aria-label="Recording shortcuts">
-                            <h2>"Quick ranges"</h2>
-                            {RECORDING_PRESETS.map(|preset| view! {
-                                <button type="button" on:click=move |_| {
-                                    let (start_time, end_time) = preset.range();
-                                    load_recording(start_time, end_time);
-                                }>{preset.label()}</button>
-                            })}
-                        </aside>
-                        <div class="recording-calendar">
-                            <label>
-                                <span>"Camera"</span>
-                                <select
-                                    prop:value=move || recording_camera.get()
-                                    on:change=move |event| {
-                                        recording_camera.set(event_target_value(&event));
-                                        recording_range.set(None);
-                                    }
-                                >
-                                    {move || cameras.get().and_then(Result::ok).unwrap_or_default().into_iter().map(|camera| view! {
-                                        <option value=camera.name>{camera.display_name}</option>
-                                    }).collect_view()}
-                                </select>
-                            </label>
-                            <div class="calendar-heading">
-                                <div>
-                                    <h2>"Choose a day"</h2>
-                                    <p>"Select a date to load its recordings."</p>
-                                </div>
-                            </div>
-                            <div class="recording-times">
-                                <label>
-                                    <span>"From"</span>
-                                    <input
-                                        type="time"
-                                        prop:value=move || start_clock.get()
-                                        on:input=move |event| start_clock.set(event_target_value(&event))
-                                    />
-                                </label>
-                                <label>
-                                    <span>"To"</span>
-                                    <input
-                                        type="time"
-                                        prop:value=move || end_clock.get()
-                                        on:input=move |event| end_clock.set(event_target_value(&event))
-                                    />
-                                </label>
-                            </div>
-                            <div class="calendar-grid" role="group" aria-label="Recent days">
-                                {calendar_days.into_iter().map(|day| {
-                                    let day_start = day.start_time;
-                                    let date_key = day.date_key.clone();
-                                    let date_key_for_label = date_key.clone();
-                                    let accessible_label = day.accessible_label.clone();
-                                    view! {
-                                        <button
-                                            type="button"
-                                            disabled=move || !recording_days
-                                                .get()
-                                                .and_then(Result::ok)
-                                                .is_some_and(|days| has_recording(&days, &date_key))
-                                            class:in-range=move || recording_range.get().is_some_and(|range| {
-                                                range.start_time < next_local_day(day_start)
-                                                    && range.end_time > day_start
-                                            })
-                                            on:click=move |_| {
-                                                let start_time = local_day_time(
-                                                    day_start,
-                                                    &start_clock.get_untracked(),
-                                                );
-                                                let end_time = local_day_time(
-                                                    day_start,
-                                                    &end_clock.get_untracked(),
-                                                );
-                                                if start_time < end_time {
-                                                    load_recording(start_time, end_time);
-                                                } else {
-                                                    recording_error.set(Some(
-                                                        "The end time must be later than the start time."
-                                                            .to_owned(),
-                                                    ));
-                                                }
-                                            }
-                                            aria-label=move || {
-                                                match recording_days.get() {
-                                                    None => format!(
-                                                        "{accessible_label}, checking recording availability"
-                                                    ),
-                                                    Some(Err(_)) => format!(
-                                                        "{accessible_label}, recording availability unavailable"
-                                                    ),
-                                                    Some(Ok(days)) if has_recording(
-                                                        &days,
-                                                        &date_key_for_label,
-                                                    ) => format!(
-                                                        "{accessible_label}, recordings available"
-                                                    ),
-                                                    Some(Ok(_)) => format!(
-                                                        "{accessible_label}, no recordings"
-                                                    ),
-                                                }
-                                            }
-                                        >
-                                            <span>{day.weekday}</span>
-                                            <strong>{day.day_number}</strong>
-                                            <small>{day.month}</small>
-                                            <i
-                                                class=move || review_activity
-                                                    .get()
-                                                    .and_then(Result::ok)
-                                                    .and_then(|reviews| day_severity(
-                                                        &reviews,
-                                                        day_start,
-                                                        next_local_day(day_start),
-                                                    ))
-                                                    .map_or("activity-none", severity_class)
-                                                aria-hidden="true"
-                                            ></i>
-                                        </button>
-                                    }
-                                }).collect_view()}
-                            </div>
-                            {move || match recording_days.get() {
-                                None => view! { <p class="calendar-status">"Checking recording availability…"</p> }.into_any(),
-                                Some(Err(error)) => view! { <p class="recording-error" role="alert">{error}</p> }.into_any(),
-                                Some(Ok(days)) if days.is_empty() => view! { <p class="calendar-status">"No retained recordings are available for this camera."</p> }.into_any(),
-                                Some(Ok(_)) => view! { <p class="calendar-status">"Dimmed dates have no retained recordings."</p> }.into_any(),
-                            }}
-                            <div class="activity-legend" aria-label="Activity colors">
-                                <span><i class="activity-motion"></i>"Motion"</span>
-                                <span><i class="activity-detection"></i>"Detection"</span>
-                                <span><i class="activity-alert"></i>"Alert"</span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="recording-filters" aria-label="Recording activity filter">
-                        {RecordingFilter::ALL.map(|filter| view! {
-                            <button
-                                type="button"
-                                class:active=move || recording_filter.get() == filter
-                                aria-pressed=move || {
-                                    (recording_filter.get() == filter).to_string()
-                                }
-                                on:click=move |_| recording_filter.set(filter)
-                            >
-                                {filter.label()}
-                            </button>
-                        })}
-                    </div>
-
-                    {move || recording_error.get().map(|error| view! {
-                        <p class="recording-error" role="alert">{error}</p>
-                    })}
-
-                    {move || {
-                        if let Some(event) = selected_event.get() {
-                            let clip_url = format!("/api/events/{}/clip.mp4", event.id);
-                            let heading = format!(
-                                "{} on {}",
-                                event.sub_label.as_deref().unwrap_or(&event.label),
-                                event.camera,
-                            );
-                            view! {
-                                <div class="recording-heading playback-heading">
-                                    <div>
-                                        <h2>{heading}</h2>
-                                        <p>{format_event_time(event.start_time)}</p>
-                                    </div>
-                                    <button type="button" on:click=move |_| {
-                                        recording_failed.set(false);
-                                        selected_event.set(None);
-                                    }>
-                                        "Close"
-                                    </button>
-                                </div>
-                                <video
-                                    class="recording-player"
-                                    src=clip_url
-                                    controls
-                                    autoplay
-                                    playsinline
-                                    on:error=move |_| recording_failed.set(true)
-                                >
-                                    "This browser cannot play the event recording."
-                                </video>
-                                {move || recording_failed.get().then(|| view! {
-                                    <p class="recording-error" role="alert">
-                                        "The recording could not be loaded. It may have expired or still be processing."
-                                    </p>
-                                })}
-                            }.into_any()
-                        } else if let Some(range) = recording_range.get() {
-                            let heading = format!("{} recording", range.camera);
-                            let detail = format!(
-                                "{} – {}",
-                                format_event_time(range.start_time),
-                                format_event_time(range.end_time),
-                            );
-                            view! {
-                                <div class="playback-heading">
-                                    <h2>{heading}</h2>
-                                    <p>{detail}</p>
-                                </div>
-                                {move || match (recording_clips.get(), review_activity.get()) {
-                                    (None, _) | (_, None) => view! {
-                                        <Status
-                                            heading="Loading recordings"
-                                            detail="Checking retained footage and activity in the selected range."
-                                            glyph=StatusGlyph::Recording
-                                        />
-                                    }.into_any(),
-                                    (Some(Err(error)), _) | (_, Some(Err(error))) => view! {
-                                        <p class="recording-error" role="alert">{error}</p>
-                                    }.into_any(),
-                                    (Some(Ok(clips)), Some(Ok(_))) if clips.is_empty() => view! {
-                                        <p class="recording-error" role="alert">
-                                            "Frigate has no retained recordings for this camera and time range."
-                                        </p>
-                                    }.into_any(),
-                                    (Some(Ok(clips)), Some(Ok(reviews))) => {
-                                        let filter = recording_filter.get();
-                                        let clips = recordings_for_filter(clips, &reviews, filter);
-                                        if clips.is_empty() {
-                                            return view! {
-                                                <p class="recording-empty" role="status">
-                                                    {format!(
-                                                        "No recordings overlap {} activity in this range.",
-                                                        filter.label().to_lowercase(),
-                                                    )}
-                                                </p>
-                                            }.into_any();
-                                        }
-                                        view! {
-                                        <div class="recording-list" aria-label="Selected recordings">
-                                            {clips.into_iter().map(|clip| {
-                                                let clip_url = clip.range.clip_url();
-                                                let poster_url = clip.range.poster_url();
-                                                let detail = format!(
-                                                    "{} – {}",
-                                                    format_event_time(clip.range.start_time),
-                                                    format_event_time(clip.range.end_time),
-                                                );
-                                                let play_label = format!("Play recording from {detail}");
-                                                let is_playing = RwSignal::new(false);
-                                                view! {
-                                                    <article>
-                                                        <h3>{detail}</h3>
-                                                        {move || if is_playing.get() {
-                                                            view! {
-                                                                <video
-                                                                    class="recording-player"
-                                                                    src=clip_url.clone()
-                                                                    poster=poster_url.clone()
-                                                                    controls
-                                                                    autoplay
-                                                                    playsinline
-                                                                    on:error=move |_| recording_failed.set(true)
-                                                                >
-                                                                    "This browser cannot play the selected recording."
-                                                                </video>
-                                                            }.into_any()
-                                                        } else {
-                                                            view! {
-                                                                <button
-                                                                    class="recording-preview"
-                                                                    type="button"
-                                                                    aria-label=play_label.clone()
-                                                                    on:click=move |_| is_playing.set(true)
-                                                                >
-                                                                    <img src=poster_url.clone() alt="" loading="lazy"/>
-                                                                    <span aria-hidden="true"></span>
-                                                                </button>
-                                                            }.into_any()
-                                                        }}
-                                                    </article>
-                                                }
-                                            }).collect_view()}
-                                        </div>
-                                        {move || recording_failed.get().then(|| view! {
-                                            <p class="recording-error" role="alert">
-                                                "One or more recordings could not be loaded."
-                                            </p>
-                                        })}
-                                        }.into_any()
-                                    },
-                                }}
-                            }.into_any()
-                        } else {
-                            view! {
-                                <Status
-                                    heading="Choose a time range"
-                                    detail="Load continuous footage above, or choose a recent event."
-                                    glyph=StatusGlyph::Recording
-                                />
-                            }.into_any()
-                        }
-                    }}
-                </section>
             </main>
         </div>
     }
+}
+
+/// Renders the recording browser behind the route-level lazy boundary.
+#[component]
+pub(crate) fn RecordingBrowser() -> impl IntoView {
+    let cameras = LocalResource::new(api::fetch_cameras);
+    let events = LocalResource::new(api::fetch_events);
+    let selected_event = RwSignal::new(None);
+    let recording_range = RwSignal::new(None::<RecordingRange>);
+    let recording_failed = RwSignal::new(false);
+    let recording_error = RwSignal::new(None::<String>);
+    let recording_camera = RwSignal::new(String::new());
+    let recording_filter = RwSignal::new(RecordingFilter::All);
+    let calendar_days = recent_calendar_days(21);
+    let calendar_after = calendar_days.first().map_or(0.0, |day| day.start_time);
+    let timezone = browser_timezone();
+    let start_clock = RwSignal::new("00:00".to_owned());
+    let end_clock = RwSignal::new("23:59".to_owned());
+    let review_activity = LocalResource::new(move || {
+        let camera = recording_camera.get();
+        async move {
+            api::fetch_review_activity(&camera, calendar_after, js_sys::Date::now() / 1_000.0).await
+        }
+    });
+    let recording_days = LocalResource::new(move || {
+        let camera = recording_camera.get();
+        let timezone = timezone.clone();
+        async move { api::fetch_recording_days(&camera, &timezone).await }
+    });
+    let recording_clips = LocalResource::new(move || {
+        let range = recording_range.get();
+        async move {
+            let Some(range) = range else {
+                return Ok(Vec::new());
+            };
+            api::fetch_recording_segments(&range.camera, range.start_time, range.end_time)
+                .await
+                .map(|segments| contiguous_recordings(&range, segments))
+        }
+    });
+
+    Effect::new(move |_| {
+        if recording_camera.get().is_empty()
+            && let Some(Ok(cameras)) = cameras.get()
+            && let Some(camera) = cameras.first()
+        {
+            recording_camera.set(camera.name.clone());
+        }
+    });
+
+    Effect::new(move |_| {
+        let event_id = web_sys::window()
+            .and_then(|window| window.location().search().ok())
+            .and_then(|query| query.strip_prefix("?event=").map(str::to_owned));
+        let Some(event_id) = event_id else {
+            return;
+        };
+        let Some(Ok(events)) = events.get() else {
+            return;
+        };
+        selected_event.set(events.into_iter().find(|event| event.id == event_id));
+    });
+
+    provide_context(RecordingContext {
+        cameras,
+        selected_event,
+        recording_range,
+        recording_failed,
+        recording_error,
+        recording_camera,
+        recording_filter,
+        calendar_days,
+        start_clock,
+        end_clock,
+        review_activity,
+        recording_days,
+        recording_clips,
+    });
+
+    view! {
+        <RecordingPageShell>
+            <section id="recordings" class="page-section" aria-label="Recording playback">
+                <p class="eyebrow">"Playback"</p>
+                <h1>"Recordings"</h1>
+                <RecordingControls/>
+                <RecordingFilters/>
+                <RecordingPlayback/>
+            </section>
+        </RecordingPageShell>
+    }
+}
+
+#[derive(Clone)]
+struct RecordingContext {
+    cameras: LocalResource<Result<Vec<Camera>, String>>,
+    selected_event: RwSignal<Option<Event>>,
+    recording_range: RwSignal<Option<RecordingRange>>,
+    recording_failed: RwSignal<bool>,
+    recording_error: RwSignal<Option<String>>,
+    recording_camera: RwSignal<String>,
+    recording_filter: RwSignal<RecordingFilter>,
+    calendar_days: Vec<CalendarDay>,
+    start_clock: RwSignal<String>,
+    end_clock: RwSignal<String>,
+    review_activity: LocalResource<Result<Vec<ReviewSegment>, String>>,
+    recording_days: LocalResource<Result<std::collections::BTreeMap<String, bool>, String>>,
+    recording_clips: LocalResource<Result<Vec<RecordingClip>, String>>,
+}
+
+impl RecordingContext {
+    fn load(&self, start_time: f64, end_time: f64) {
+        self.recording_failed.set(false);
+        self.recording_error.set(None);
+        let camera = self.recording_camera.get_untracked();
+        if camera.is_empty() {
+            self.recording_error.set(Some(
+                "Choose a camera before loading a recording.".to_owned(),
+            ));
+            return;
+        }
+        self.selected_event.set(None);
+        self.recording_range.set(Some(RecordingRange {
+            camera,
+            start_time,
+            end_time,
+        }));
+    }
+}
+
+#[component]
+fn RecordingPageShell(children: Children) -> impl IntoView {
+    view! {
+        <header class="site-header">
+            <a class="wordmark" href="/" aria-label="Corvette home">
+                <span class="wordmark-mark" aria-hidden="true">"C"</span>
+                <span>"Corvette"</span>
+            </a>
+            <span class="connection-state">"Frigate API"</span>
+        </header>
+        <div class="app-frame">
+            <nav aria-label="Primary navigation">
+                <ul>{NAVIGATION.map(|(label, href)| view! {
+                    <li><a
+                        href=href
+                        class:active=move || href == "/recordings"
+                        aria-current=(href == "/recordings").then_some("page")
+                    >{label}</a></li>
+                })}</ul>
+            </nav>
+            <main>{children()}</main>
+        </div>
+    }
+}
+
+#[component]
+fn RecordingControls() -> impl IntoView {
+    let context = expect_context::<RecordingContext>();
+    view! {
+        <div class="recording-browser">
+            <aside class="recording-presets" aria-label="Recording shortcuts">
+                <h2>"Quick ranges"</h2>
+                {RECORDING_PRESETS.map(|preset| {
+                    let context = context.clone();
+                    view! { <button type="button" on:click=move |_| {
+                        let (start_time, end_time) = preset.range();
+                        context.load(start_time, end_time);
+                    }>{preset.label()}</button> }
+                })}
+            </aside>
+            <div class="recording-calendar">
+                <CameraAndTimeControls/>
+                <div class="calendar-heading"><div>
+                    <h2>"Choose a day"</h2>
+                    <p>"Select a date to load its recordings."</p>
+                </div></div>
+                <RecordingCalendarDays/>
+                <RecordingCalendarStatus/>
+                <div class="activity-legend" aria-label="Activity colors">
+                    <span><i class="activity-motion"></i>"Motion"</span>
+                    <span><i class="activity-detection"></i>"Detection"</span>
+                    <span><i class="activity-alert"></i>"Alert"</span>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+#[component]
+fn CameraAndTimeControls() -> impl IntoView {
+    let context = expect_context::<RecordingContext>();
+    let camera_context = context.clone();
+    view! {
+        <label><span>"Camera"</span><select
+            prop:value=move || context.recording_camera.get()
+            on:change=move |event| {
+                context.recording_camera.set(event_target_value(&event));
+                context.recording_range.set(None);
+            }
+        >{move || camera_context.cameras.get().and_then(Result::ok).unwrap_or_default()
+            .into_iter().map(|camera| view! {
+                <option value=camera.name>{camera.display_name}</option>
+            }).collect_view()}</select></label>
+        <div class="recording-times">
+            <label><span>"From"</span><input type="time"
+                prop:value=move || context.start_clock.get()
+                on:input=move |event| context.start_clock.set(event_target_value(&event))
+            /></label>
+            <label><span>"To"</span><input type="time"
+                prop:value=move || context.end_clock.get()
+                on:input=move |event| context.end_clock.set(event_target_value(&event))
+            /></label>
+        </div>
+    }
+}
+
+#[component]
+fn RecordingCalendarDays() -> impl IntoView {
+    let context = expect_context::<RecordingContext>();
+    view! { <div class="calendar-grid" role="group" aria-label="Recent days">
+        {context.calendar_days.clone().into_iter().map(|day| {
+            let day_start = day.start_time;
+            let date_key = day.date_key.clone();
+            let label_key = date_key.clone();
+            let accessible_label = day.accessible_label.clone();
+            let click_context = context.clone();
+            view! { <button type="button"
+                disabled=move || !context.recording_days.get().and_then(Result::ok)
+                    .is_some_and(|days| has_recording(&days, &date_key))
+                class:in-range=move || context.recording_range.get().is_some_and(|range| {
+                    range.start_time < next_local_day(day_start) && range.end_time > day_start
+                })
+                on:click=move |_| select_calendar_day(&click_context, day_start)
+                aria-label=move || calendar_day_label(
+                    context.recording_days.get(), &accessible_label, &label_key,
+                )
+            >
+                <span>{day.weekday}</span><strong>{day.day_number}</strong><small>{day.month}</small>
+                <i class=move || context.review_activity.get().and_then(Result::ok)
+                    .and_then(|reviews| day_severity(&reviews, day_start, next_local_day(day_start)))
+                    .map_or("activity-none", severity_class) aria-hidden="true"></i>
+            </button> }
+        }).collect_view()}
+    </div> }
+}
+
+fn select_calendar_day(context: &RecordingContext, day_start: f64) {
+    let start_time = local_day_time(day_start, &context.start_clock.get_untracked());
+    let end_time = local_day_time(day_start, &context.end_clock.get_untracked());
+    if start_time < end_time {
+        context.load(start_time, end_time);
+    } else {
+        context.recording_error.set(Some(
+            "The end time must be later than the start time.".to_owned(),
+        ));
+    }
+}
+
+fn calendar_day_label(
+    days: Option<Result<std::collections::BTreeMap<String, bool>, String>>,
+    accessible_label: &str,
+    date_key: &str,
+) -> String {
+    match days {
+        None => format!("{accessible_label}, checking recording availability"),
+        Some(Err(_)) => format!("{accessible_label}, recording availability unavailable"),
+        Some(Ok(days)) if has_recording(&days, date_key) => {
+            format!("{accessible_label}, recordings available")
+        }
+        Some(Ok(_)) => format!("{accessible_label}, no recordings"),
+    }
+}
+
+#[component]
+fn RecordingCalendarStatus() -> impl IntoView {
+    let context = expect_context::<RecordingContext>();
+    move || {
+        match context.recording_days.get() {
+        None => view! { <p class="calendar-status">"Checking recording availability…"</p> }.into_any(),
+        Some(Err(error)) => view! { <p class="recording-error" role="alert">{error}</p> }.into_any(),
+        Some(Ok(days)) if days.is_empty() => view! { <p class="calendar-status">"No retained recordings are available for this camera."</p> }.into_any(),
+        Some(Ok(_)) => view! { <p class="calendar-status">"Dimmed dates have no retained recordings."</p> }.into_any(),
+    }
+    }
+}
+
+#[component]
+fn RecordingFilters() -> impl IntoView {
+    let context = expect_context::<RecordingContext>();
+    view! {
+        <div class="recording-filters" aria-label="Recording activity filter">
+            {RecordingFilter::ALL.map(|filter| view! {
+                <button type="button"
+                    class:active=move || context.recording_filter.get() == filter
+                    aria-pressed=move || (context.recording_filter.get() == filter).to_string()
+                    on:click=move |_| context.recording_filter.set(filter)
+                >{filter.label()}</button>
+            })}
+        </div>
+        {move || context.recording_error.get().map(|error| view! {
+            <p class="recording-error" role="alert">{error}</p>
+        })}
+    }
+}
+
+#[component]
+fn RecordingPlayback() -> impl IntoView {
+    let context = expect_context::<RecordingContext>();
+    move || {
+        if let Some(event) = context.selected_event.get() {
+            view! { <EventPlayback event/> }.into_any()
+        } else if let Some(range) = context.recording_range.get() {
+            view! { <RangePlayback range/> }.into_any()
+        } else {
+            view! { <Status
+                heading="Choose a time range"
+                detail="Load continuous footage above, or choose a recent event."
+                glyph=StatusGlyph::Recording
+            /> }
+            .into_any()
+        }
+    }
+}
+
+#[component]
+fn EventPlayback(event: Event) -> impl IntoView {
+    let context = expect_context::<RecordingContext>();
+    let clip_url = format!("/api/events/{}/clip.mp4", event.id);
+    let heading = format!(
+        "{} on {}",
+        event.sub_label.as_deref().unwrap_or(&event.label),
+        event.camera,
+    );
+    view! {
+        <div class="recording-heading playback-heading">
+            <div><h2>{heading}</h2><p>{format_event_time(event.start_time)}</p></div>
+            <button type="button" on:click=move |_| {
+                context.recording_failed.set(false);
+                context.selected_event.set(None);
+            }>"Close"</button>
+        </div>
+        <video class="recording-player" src=clip_url controls autoplay playsinline
+            on:error=move |_| context.recording_failed.set(true)
+        >"This browser cannot play the event recording."</video>
+        {move || context.recording_failed.get().then(|| view! {
+            <p class="recording-error" role="alert">
+                "The recording could not be loaded. It may have expired or still be processing."
+            </p>
+        })}
+    }
+}
+
+#[component]
+fn RangePlayback(range: RecordingRange) -> impl IntoView {
+    let context = expect_context::<RecordingContext>();
+    let heading = format!("{} recording", range.camera);
+    let detail = format!(
+        "{} – {}",
+        format_event_time(range.start_time),
+        format_event_time(range.end_time),
+    );
+    view! {
+        <div class="playback-heading"><h2>{heading}</h2><p>{detail}</p></div>
+        {move || match (context.recording_clips.get(), context.review_activity.get()) {
+            (None, _) | (_, None) => view! { <Status
+                heading="Loading recordings"
+                detail="Checking retained footage and activity in the selected range."
+                glyph=StatusGlyph::Recording
+            /> }.into_any(),
+            (Some(Err(error)), _) | (_, Some(Err(error))) => {
+                view! { <p class="recording-error" role="alert">{error}</p> }.into_any()
+            }
+            (Some(Ok(clips)), Some(Ok(_))) if clips.is_empty() => view! {
+                <p class="recording-error" role="alert">
+                    "Frigate has no retained recordings for this camera and time range."
+                </p>
+            }.into_any(),
+            (Some(Ok(clips)), Some(Ok(reviews))) => view! {
+                <RecordingList clips reviews/>
+            }.into_any(),
+        }}
+    }
+}
+
+#[component]
+fn RecordingList(clips: Vec<RecordingClip>, reviews: Vec<ReviewSegment>) -> impl IntoView {
+    let context = expect_context::<RecordingContext>();
+    let filter = context.recording_filter.get();
+    let clips = recordings_for_filter(clips, &reviews, filter);
+    if clips.is_empty() {
+        return view! { <p class="recording-empty" role="status">{format!(
+            "No recordings overlap {} activity in this range.",
+            filter.label().to_lowercase(),
+        )}</p> }
+        .into_any();
+    }
+    view! {
+        <div class="recording-list" aria-label="Selected recordings">
+            {clips.into_iter().map(|clip| view! { <RecordingPreview clip/> }).collect_view()}
+        </div>
+        {move || context.recording_failed.get().then(|| view! {
+            <p class="recording-error" role="alert">"One or more recordings could not be loaded."</p>
+        })}
+    }.into_any()
+}
+
+#[component]
+fn RecordingPreview(clip: RecordingClip) -> impl IntoView {
+    let context = expect_context::<RecordingContext>();
+    let clip_url = clip.range.clip_url();
+    let poster_url = clip.range.poster_url();
+    let detail = format!(
+        "{} – {}",
+        format_event_time(clip.range.start_time),
+        format_event_time(clip.range.end_time),
+    );
+    let play_label = format!("Play recording from {detail}");
+    let is_playing = RwSignal::new(false);
+    view! { <article><h3>{detail}</h3>{move || if is_playing.get() {
+        view! { <video class="recording-player" src=clip_url.clone()
+            poster=poster_url.clone() controls autoplay playsinline
+            on:error=move |_| context.recording_failed.set(true)
+        >"This browser cannot play the selected recording."</video> }.into_any()
+    } else {
+        view! { <button class="recording-preview" type="button" aria-label=play_label.clone()
+            on:click=move |_| is_playing.set(true)
+        ><img src=poster_url.clone() alt="" loading="lazy"/><span aria-hidden="true"></span></button> }
+            .into_any()
+    }}</article> }
 }
 
 #[derive(Clone, Copy)]
