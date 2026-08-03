@@ -9,7 +9,9 @@ use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
 use wasm_bindgen::JsValue;
 
-use corvette_api::{Camera, Event, RecordingSegment, ReviewSegment, ReviewSeverity};
+use corvette_api::{
+    Camera, Event, PreviewClip, RecordingSegment, ReviewEvent, ReviewSegment, ReviewSeverity,
+};
 
 mod api;
 #[cfg(feature = "split")]
@@ -20,10 +22,11 @@ struct RecordingsRoute;
 
 const NAVIGATION: [(&str, &str); 4] = [
     ("Live", "/#live"),
-    ("Events", "/#events"),
+    ("Events", "/events"),
     ("Recordings", "/recordings"),
     ("System", "/#system"),
 ];
+const RECENT_ACTIVITY_HOURS: u32 = 6;
 
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn mount() {
@@ -38,6 +41,7 @@ fn App() -> impl IntoView {
         <Router>
             <Routes fallback=|| "Page not found">
                 <Route path=path!("") view=Dashboard/>
+                <Route path=path!("events") view=EventBrowser/>
                 <Route path=path!("recordings") view=RecordingBrowser/>
             </Routes>
         </Router>
@@ -51,6 +55,7 @@ fn App() -> impl IntoView {
         <Router>
             <Routes fallback=|| "Page not found">
                 <Route path=path!("") view=Dashboard/>
+                <Route path=path!("events") view=EventBrowser/>
                 <Route
                     path=path!("recordings")
                     view={leptos_router::Lazy::<RecordingsRoute>::new()}
@@ -63,9 +68,13 @@ fn App() -> impl IntoView {
 #[component]
 fn Dashboard() -> impl IntoView {
     let cameras = LocalResource::new(api::fetch_cameras);
-    let events = LocalResource::new(api::fetch_events);
+    let recent_activity = LocalResource::new(|| {
+        let before = js_sys::Date::now() / 1_000.0;
+        let after = f64::from(RECENT_ACTIVITY_HOURS).mul_add(-3_600.0, before);
+        api::fetch_reviews(after, before)
+    });
     let active_section = RwSignal::new("/#live");
-    let events_expanded = RwSignal::new(false);
+    let activity_filter = RwSignal::new(ActivityFilter::All);
 
     view! {
         <header class="site-header">
@@ -132,76 +141,316 @@ fn Dashboard() -> impl IntoView {
                 <section id="events" class="page-section" aria-labelledby="events-heading">
                     <p class="eyebrow">"History"</p>
                     <h1 id="events-heading">"Recent events"</h1>
-                    {move || match events.get() {
+                    <ActivityFilters filter=activity_filter/>
+                    {move || match recent_activity.get() {
                         None => view! { <Status heading="Loading events" detail="Fetching recent activity." glyph=StatusGlyph::Event/> }.into_any(),
                         Some(Err(error)) => view! { <Status heading="Events unavailable" detail=error glyph=StatusGlyph::Event/> }.into_any(),
-                        Some(Ok(events)) if events.is_empty() => view! { <Status heading="No events yet" detail="Detected activity will appear here." glyph=StatusGlyph::Event/> }.into_any(),
-                        Some(Ok(events)) => {
-                            let hidden_event_count = events.len().saturating_sub(4);
-                            view! {
-                                <div class="event-grid" aria-label="Recent events">
-                                {events.into_iter().enumerate().map(|(index, event)| {
-                                    let snapshot_url = format!(
-                                        "/api/events/{}/snapshot.jpg?crop=1&height=360&quality=80",
-                                        event.id,
-                                    );
-                                    let thumbnail_alt = format!("{} event from {}", event.label, event.camera);
-                                    let detail = event.sub_label.as_deref().unwrap_or(&event.label).to_owned();
-                                    let zones = if event.zones.is_empty() {
-                                        "No zone".to_owned()
-                                    } else {
-                                        event.zones.join(", ")
-                                    };
-                                    let event_for_selection = event.clone();
-                                    view! {
-                                        <article
-                                            class="event-card"
-                                            class:mobile-hidden=move || {
-                                                index >= 4 && !events_expanded.get()
-                                            }
-                                        >
-                                            <a
-                                                class="event-card-link"
-                                                href=format!(
-                                                    "/recordings?event={}",
-                                                    event_for_selection.id,
-                                                )
-                                            >
-                                                <img src=snapshot_url alt=thumbnail_alt loading="lazy"/>
-                                                <div class="event-card-body">
-                                                    <div class="event-card-heading">
-                                                        <h2>{detail}</h2>
-                                                        <span>{format_event_time(event.start_time)}</span>
-                                                    </div>
-                                                    <p>{event.camera}</p>
-                                                    <p class="event-zone">{zones}</p>
-                                                </div>
-                                            </a>
-                                        </article>
-                                    }
-                                }).collect_view()}
-                                </div>
-                                {(hidden_event_count > 0).then(|| view! {
-                                    <button
-                                        class="event-toggle"
-                                        type="button"
-                                        aria-expanded=move || events_expanded.get().to_string()
-                                        on:click=move |_| events_expanded.update(|expanded| *expanded = !*expanded)
-                                    >
-                                        {move || if events_expanded.get() {
-                                            "Show fewer events".to_owned()
-                                        } else {
-                                            format!("Show {hidden_event_count} more events")
-                                        }}
-                                    </button>
-                                })}
-                            }.into_any()
-                        },
+                        Some(Ok(events)) if events.is_empty() => view! { <Status
+                            heading=recent_activity_empty_heading()
+                            detail="Frigate reported no review activity during this period."
+                            glyph=StatusGlyph::Event
+                        /> }.into_any(),
+                        Some(Ok(events)) => view! { <ReviewEventList
+                            events
+                            filter=activity_filter
+                            layout=EventListLayout::Compact
+                            empty_heading=recent_activity_empty_heading()
+                        /> }.into_any(),
                     }}
                 </section>
             </main>
         </div>
     }
+}
+
+#[component]
+fn ActivityFilters(filter: RwSignal<ActivityFilter>) -> impl IntoView {
+    view! {
+        <div class="activity-filters" aria-label="Recent event type">
+            {ActivityFilter::ALL.map(|choice| view! {
+                <button
+                    type="button"
+                    class:active=move || filter.get() == choice
+                    aria-pressed=move || (filter.get() == choice).to_string()
+                    on:click=move |_| filter.set(choice)
+                >{choice.label()}</button>
+            })}
+        </div>
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EventListLayout {
+    Compact,
+    Complete,
+}
+
+#[component]
+fn ReviewEventList(
+    events: Vec<ReviewEvent>,
+    filter: RwSignal<ActivityFilter>,
+    layout: EventListLayout,
+    empty_heading: String,
+) -> impl IntoView {
+    let expanded = RwSignal::new(false);
+    let selected_review = RwSignal::new(None::<ReviewEvent>);
+    move || {
+        let events = review_events_for_filter(events.clone(), filter.get());
+        if events.is_empty() {
+            return view! { <Status
+                heading=empty_heading.clone()
+                detail="Frigate reported no matching review activity during this period."
+                glyph=StatusGlyph::Event
+            /> }
+            .into_any();
+        }
+        let hidden_event_count = match layout {
+            EventListLayout::Compact => events.len().saturating_sub(4),
+            EventListLayout::Complete => 0,
+        };
+        view! {
+            <div class="event-grid" aria-label="Events">
+                {events.into_iter().enumerate().map(|(index, event)| {
+                    let snapshot_url = review_thumbnail_url(&event.thumb_path);
+                    let detail = review_event_title(&event);
+                    let thumbnail_alt = format!("{detail} activity from {}", event.camera);
+                    let event_for_selection = event.clone();
+                    let zones = if event.data.zones.is_empty() {
+                        "No zone".to_owned()
+                    } else {
+                        event.data.zones.join(", ")
+                    };
+                    view! {
+                        <article
+                            class="event-card"
+                            class:mobile-hidden=move || {
+                                hidden_event_count > 0 && index >= 4 && !expanded.get()
+                            }
+                        >
+                            <button
+                                class="event-card-link"
+                                type="button"
+                                on:click=move |_| selected_review.set(Some(event_for_selection.clone()))
+                            >
+                                <img src=snapshot_url alt=thumbnail_alt loading="lazy"/>
+                                <div class="event-card-body">
+                                    <div class="event-card-heading">
+                                        <h2>{detail}</h2>
+                                        <span>{format_event_time(event.start_time)}</span>
+                                    </div>
+                                    <p>{event.camera}</p>
+                                    <p class=format!(
+                                        "event-severity {}",
+                                        severity_class(event.severity),
+                                    )>{severity_label(event.severity)}</p>
+                                    <p class="event-zone">{zones}</p>
+                                </div>
+                            </button>
+                        </article>
+                    }
+                }).collect_view()}
+            </div>
+            {(hidden_event_count > 0).then(|| view! {
+                <button
+                    class="event-toggle"
+                    type="button"
+                    aria-expanded=move || expanded.get().to_string()
+                    on:click=move |_| expanded.update(|is_expanded| *is_expanded = !*is_expanded)
+                >{move || if expanded.get() {
+                    "Show fewer events".to_owned()
+                } else {
+                    format!("Show {hidden_event_count} more events")
+                }}</button>
+            })}
+            {selected_review.get().map(|review| view! {
+                <ReviewPlayback review selected_review/>
+            })}
+        }
+        .into_any()
+    }
+}
+
+#[component]
+fn ReviewPlayback(
+    review: ReviewEvent,
+    selected_review: RwSignal<Option<ReviewEvent>>,
+) -> impl IntoView {
+    let playback_failed = RwSignal::new(false);
+    let clip_url = format!("/api/review/{}/clip.mp4", review.id);
+    let heading = review_event_title(&review);
+    view! {
+        <section class="review-playback" aria-label="Selected event playback">
+            <div class="recording-heading playback-heading">
+                <div><h2>{heading}</h2><p>{format_event_time(review.start_time)}</p></div>
+                <button type="button" on:click=move |_| selected_review.set(None)>"Close"</button>
+            </div>
+            <video class="recording-player" src=clip_url controls autoplay playsinline
+                on:error=move |_| playback_failed.set(true)
+            >"This browser cannot play the event recording."</video>
+            {move || playback_failed.get().then(|| view! {
+                <p class="recording-error" role="alert">
+                    "The high-resolution clip is not available from Frigate."
+                </p>
+            })}
+        </section>
+    }
+}
+
+#[component]
+fn EventBrowser() -> impl IntoView {
+    let calendar_days = recent_calendar_days(21);
+    let calendar_after = calendar_days.first().map_or(0.0, |day| day.start_time);
+    let default_day = local_day_start(&js_sys::Date::new_0());
+    let calendar_selection = RwSignal::new(None::<CalendarSelection>);
+    let activity_filter = RwSignal::new(ActivityFilter::All);
+    let timezone = browser_timezone();
+    let recording_days = LocalResource::new(move || {
+        let timezone = timezone.clone();
+        async move { api::fetch_recording_days("all", &timezone).await }
+    });
+    let calendar_activity = LocalResource::new(move || {
+        api::fetch_reviews(calendar_after, js_sys::Date::now() / 1_000.0)
+    });
+    let events = LocalResource::new(move || {
+        let selection = calendar_selection
+            .get()
+            .unwrap_or_else(|| CalendarSelection::single(default_day));
+        api::fetch_reviews(selection.start_day, next_local_day(selection.end_day))
+    });
+
+    view! {
+        <PageShell active_path="/events">
+            <section class="page-section" aria-labelledby="all-events-heading">
+                <p class="eyebrow">"History"</p>
+                <h1 id="all-events-heading">"Events"</h1>
+                <div class="event-browser">
+                    <div class="calendar-heading"><div>
+                        <h2>"Choose dates"</h2>
+                        <p>"Tap a start day, then an end day to browse a range."</p>
+                    </div></div>
+                    <div class="calendar-grid" role="group" aria-label="Event days">
+                        {calendar_days.into_iter().map(|day| {
+                            let start_time = day.start_time;
+                            let end_time = next_local_day(start_time);
+                            let date_key = day.date_key.clone();
+                            let label_key = date_key.clone();
+                            let accessible_label = day.accessible_label.clone();
+                            view! { <button
+                                type="button"
+                                disabled=move || !recording_day_available(
+                                    recording_days.get(), &date_key,
+                                )
+                                class:in-range=move || {
+                                    calendar_selection.get()
+                                        .unwrap_or_else(|| CalendarSelection::single(default_day))
+                                        .contains(start_time)
+                                }
+                                aria-pressed=move || calendar_selection.get()
+                                    .unwrap_or_else(|| CalendarSelection::single(default_day))
+                                    .contains(start_time)
+                                    .to_string()
+                                aria-label=move || calendar_day_label(
+                                    recording_days.get(),
+                                    &accessible_label,
+                                    &label_key,
+                                )
+                                on:click=move |_| calendar_selection.update(|selection| {
+                                    *selection = Some(select_calendar_range(*selection, start_time));
+                                })
+                            >
+                                <span>{day.weekday}</span>
+                                <strong>{day.day_number}</strong>
+                                <small>{day.month}</small>
+                                <i class=move || calendar_activity.get().and_then(Result::ok)
+                                    .and_then(|reviews| review_event_day_severity(
+                                        &reviews, start_time, end_time,
+                                    ))
+                                    .map_or("activity-none", severity_class)
+                                    aria-hidden="true"
+                                ></i>
+                            </button> }
+                        }).collect_view()}
+                    </div>
+                    <CalendarRecordingStatus
+                        recording_days
+                        empty_detail="No retained recordings are available."
+                    />
+                    <ActivityLegend/>
+                </div>
+                <ActivityFilters filter=activity_filter/>
+                {move || match events.get() {
+                    None => view! { <Status
+                        heading="Loading events"
+                        detail="Fetching review activity for the selected day."
+                        glyph=StatusGlyph::Event
+                    /> }.into_any(),
+                    Some(Err(error)) => view! { <Status
+                        heading="Events unavailable"
+                        detail=error
+                        glyph=StatusGlyph::Event
+                    /> }.into_any(),
+                    Some(Ok(events)) => view! { <ReviewEventList
+                        events
+                        filter=activity_filter
+                        layout=EventListLayout::Complete
+                        empty_heading=if calendar_selection.get()
+                            .is_some_and(|selection| selection.start_day < selection.end_day)
+                        {
+                            "No events in this date range".to_owned()
+                        } else {
+                            "No events on this day".to_owned()
+                        }
+                    /> }.into_any(),
+                }}
+            </section>
+        </PageShell>
+    }
+}
+
+fn review_events_for_filter(events: Vec<ReviewEvent>, filter: ActivityFilter) -> Vec<ReviewEvent> {
+    let Some(severity) = filter.severity() else {
+        return events;
+    };
+    events
+        .into_iter()
+        .filter(|event| event.severity == severity)
+        .collect()
+}
+
+fn review_event_day_severity(
+    events: &[ReviewEvent],
+    day_start: f64,
+    day_end: f64,
+) -> Option<ReviewSeverity> {
+    day_severity_from_ranges(
+        events
+            .iter()
+            .map(|event| (event.start_time, event.end_time, event.severity)),
+        day_start,
+        day_end,
+    )
+}
+
+fn recent_activity_empty_heading() -> String {
+    format!("No events in the last {RECENT_ACTIVITY_HOURS} hours")
+}
+
+fn review_event_title(event: &ReviewEvent) -> String {
+    event
+        .data
+        .sub_labels
+        .first()
+        .or_else(|| event.data.objects.first())
+        .or_else(|| event.data.audio.first())
+        .cloned()
+        .unwrap_or_else(|| severity_label(event.severity).to_owned())
+}
+
+fn review_thumbnail_url(thumb_path: &str) -> String {
+    let relative_path = thumb_path
+        .strip_prefix("/media/frigate/")
+        .unwrap_or_else(|| thumb_path.trim_start_matches('/'));
+    format!("/{relative_path}")
 }
 
 /// Renders the recording browser behind the route-level lazy boundary.
@@ -211,10 +460,10 @@ pub(crate) fn RecordingBrowser() -> impl IntoView {
     let events = LocalResource::new(api::fetch_events);
     let selected_event = RwSignal::new(None);
     let recording_range = RwSignal::new(None::<RecordingRange>);
+    let calendar_selection = RwSignal::new(None::<CalendarSelection>);
     let recording_failed = RwSignal::new(false);
     let recording_error = RwSignal::new(None::<String>);
     let recording_camera = RwSignal::new(String::new());
-    let recording_filter = RwSignal::new(RecordingFilter::All);
     let calendar_days = recent_calendar_days(21);
     let calendar_after = calendar_days.first().map_or(0.0, |day| day.start_time);
     let timezone = browser_timezone();
@@ -235,11 +484,23 @@ pub(crate) fn RecordingBrowser() -> impl IntoView {
         let range = recording_range.get();
         async move {
             let Some(range) = range else {
-                return Ok(Vec::new());
+                return Ok(RecordingMedia {
+                    clips: Vec::new(),
+                    motion_ranges: Vec::new(),
+                });
             };
             api::fetch_recording_segments(&range.camera, range.start_time, range.end_time)
                 .await
-                .map(|segments| contiguous_recordings(&range, segments))
+                .map(|segments| recording_media(&range, segments))
+        }
+    });
+    let preview_clips = LocalResource::new(move || {
+        let range = recording_range.get();
+        async move {
+            let Some(range) = range else {
+                return Ok(Vec::new());
+            };
+            api::fetch_preview_clips(&range.camera, range.start_time, range.end_time).await
         }
     });
 
@@ -269,28 +530,28 @@ pub(crate) fn RecordingBrowser() -> impl IntoView {
         cameras,
         selected_event,
         recording_range,
+        calendar_selection,
         recording_failed,
         recording_error,
         recording_camera,
-        recording_filter,
         calendar_days,
         start_clock,
         end_clock,
         review_activity,
         recording_days,
         recording_clips,
+        preview_clips,
     });
 
     view! {
-        <RecordingPageShell>
+        <PageShell active_path="/recordings">
             <section id="recordings" class="page-section" aria-label="Recording playback">
                 <p class="eyebrow">"Playback"</p>
                 <h1>"Recordings"</h1>
                 <RecordingControls/>
-                <RecordingFilters/>
                 <RecordingPlayback/>
             </section>
-        </RecordingPageShell>
+        </PageShell>
     }
 }
 
@@ -299,16 +560,17 @@ struct RecordingContext {
     cameras: LocalResource<Result<Vec<Camera>, String>>,
     selected_event: RwSignal<Option<Event>>,
     recording_range: RwSignal<Option<RecordingRange>>,
+    calendar_selection: RwSignal<Option<CalendarSelection>>,
     recording_failed: RwSignal<bool>,
     recording_error: RwSignal<Option<String>>,
     recording_camera: RwSignal<String>,
-    recording_filter: RwSignal<RecordingFilter>,
     calendar_days: Vec<CalendarDay>,
     start_clock: RwSignal<String>,
     end_clock: RwSignal<String>,
     review_activity: LocalResource<Result<Vec<ReviewSegment>, String>>,
     recording_days: LocalResource<Result<std::collections::BTreeMap<String, bool>, String>>,
-    recording_clips: LocalResource<Result<Vec<RecordingClip>, String>>,
+    recording_clips: LocalResource<Result<RecordingMedia, String>>,
+    preview_clips: LocalResource<Result<Vec<PreviewClip>, String>>,
 }
 
 impl RecordingContext {
@@ -332,7 +594,7 @@ impl RecordingContext {
 }
 
 #[component]
-fn RecordingPageShell(children: Children) -> impl IntoView {
+fn PageShell(active_path: &'static str, children: Children) -> impl IntoView {
     view! {
         <header class="site-header">
             <a class="wordmark" href="/" aria-label="Corvette home">
@@ -346,8 +608,8 @@ fn RecordingPageShell(children: Children) -> impl IntoView {
                 <ul>{NAVIGATION.map(|(label, href)| view! {
                     <li><a
                         href=href
-                        class:active=move || href == "/recordings"
-                        aria-current=(href == "/recordings").then_some("page")
+                        class:active=move || href == active_path
+                        aria-current=(href == active_path).then_some("page")
                     >{label}</a></li>
                 })}</ul>
             </nav>
@@ -367,6 +629,7 @@ fn RecordingControls() -> impl IntoView {
                     let context = context.clone();
                     view! { <button type="button" on:click=move |_| {
                         let (start_time, end_time) = preset.range();
+                        context.calendar_selection.set(None);
                         context.load(start_time, end_time);
                     }>{preset.label()}</button> }
                 })}
@@ -374,19 +637,24 @@ fn RecordingControls() -> impl IntoView {
             <div class="recording-calendar">
                 <CameraAndTimeControls/>
                 <div class="calendar-heading"><div>
-                    <h2>"Choose a day"</h2>
-                    <p>"Select a date to load its recordings."</p>
+                    <h2>"Choose dates"</h2>
+                    <p>"Tap a start day, then an end day to load a range."</p>
                 </div></div>
                 <RecordingCalendarDays/>
                 <RecordingCalendarStatus/>
-                <div class="activity-legend" aria-label="Activity colors">
-                    <span><i class="activity-motion"></i>"Motion"</span>
-                    <span><i class="activity-detection"></i>"Detection"</span>
-                    <span><i class="activity-alert"></i>"Alert"</span>
-                </div>
+                <ActivityLegend/>
             </div>
         </div>
     }
+}
+
+#[component]
+fn ActivityLegend() -> impl IntoView {
+    view! { <div class="activity-legend" aria-label="Activity colors">
+        <span><i class="activity-motion"></i>"Motion"</span>
+        <span><i class="activity-detection"></i>"Detection"</span>
+        <span><i class="activity-alert"></i>"Alert"</span>
+    </div> }
 }
 
 #[component]
@@ -399,6 +667,7 @@ fn CameraAndTimeControls() -> impl IntoView {
             on:change=move |event| {
                 context.recording_camera.set(event_target_value(&event));
                 context.recording_range.set(None);
+                context.calendar_selection.set(None);
             }
         >{move || camera_context.cameras.get().and_then(Result::ok).unwrap_or_default()
             .into_iter().map(|camera| view! {
@@ -428,11 +697,14 @@ fn RecordingCalendarDays() -> impl IntoView {
             let accessible_label = day.accessible_label.clone();
             let click_context = context.clone();
             view! { <button type="button"
-                disabled=move || !context.recording_days.get().and_then(Result::ok)
-                    .is_some_and(|days| has_recording(&days, &date_key))
-                class:in-range=move || context.recording_range.get().is_some_and(|range| {
-                    range.start_time < next_local_day(day_start) && range.end_time > day_start
-                })
+                disabled=move || !recording_day_available(
+                    context.recording_days.get(), &date_key,
+                )
+                class:in-range=move || context.calendar_selection.get()
+                    .is_some_and(|selection| selection.contains(day_start))
+                aria-pressed=move || context.calendar_selection.get()
+                    .is_some_and(|selection| selection.contains(day_start))
+                    .to_string()
                 on:click=move |_| select_calendar_day(&click_context, day_start)
                 aria-label=move || calendar_day_label(
                     context.recording_days.get(), &accessible_label, &label_key,
@@ -448,9 +720,11 @@ fn RecordingCalendarDays() -> impl IntoView {
 }
 
 fn select_calendar_day(context: &RecordingContext, day_start: f64) {
-    let start_time = local_day_time(day_start, &context.start_clock.get_untracked());
-    let end_time = local_day_time(day_start, &context.end_clock.get_untracked());
+    let selection = select_calendar_range(context.calendar_selection.get_untracked(), day_start);
+    let start_time = local_day_time(selection.start_day, &context.start_clock.get_untracked());
+    let end_time = local_day_time(selection.end_day, &context.end_clock.get_untracked());
     if start_time < end_time {
+        context.calendar_selection.set(Some(selection));
         context.load(start_time, end_time);
     } else {
         context.recording_error.set(Some(
@@ -474,35 +748,42 @@ fn calendar_day_label(
     }
 }
 
-#[component]
-fn RecordingCalendarStatus() -> impl IntoView {
-    let context = expect_context::<RecordingContext>();
-    move || {
-        match context.recording_days.get() {
-        None => view! { <p class="calendar-status">"Checking recording availability…"</p> }.into_any(),
-        Some(Err(error)) => view! { <p class="recording-error" role="alert">{error}</p> }.into_any(),
-        Some(Ok(days)) if days.is_empty() => view! { <p class="calendar-status">"No retained recordings are available for this camera."</p> }.into_any(),
-        Some(Ok(_)) => view! { <p class="calendar-status">"Dimmed dates have no retained recordings."</p> }.into_any(),
-    }
-    }
+fn recording_day_available(
+    days: Option<Result<std::collections::BTreeMap<String, bool>, String>>,
+    date_key: &str,
+) -> bool {
+    days.and_then(Result::ok)
+        .is_some_and(|days| has_recording(&days, date_key))
 }
 
 #[component]
-fn RecordingFilters() -> impl IntoView {
+fn RecordingCalendarStatus() -> impl IntoView {
     let context = expect_context::<RecordingContext>();
-    view! {
-        <div class="recording-filters" aria-label="Recording activity filter">
-            {RecordingFilter::ALL.map(|filter| view! {
-                <button type="button"
-                    class:active=move || context.recording_filter.get() == filter
-                    aria-pressed=move || (context.recording_filter.get() == filter).to_string()
-                    on:click=move |_| context.recording_filter.set(filter)
-                >{filter.label()}</button>
-            })}
-        </div>
-        {move || context.recording_error.get().map(|error| view! {
-            <p class="recording-error" role="alert">{error}</p>
-        })}
+    view! { <CalendarRecordingStatus
+        recording_days=context.recording_days
+        empty_detail="No retained recordings are available for this camera."
+    /> }
+}
+
+#[component]
+fn CalendarRecordingStatus(
+    recording_days: LocalResource<Result<std::collections::BTreeMap<String, bool>, String>>,
+    empty_detail: &'static str,
+) -> impl IntoView {
+    move || match recording_days.get() {
+        None => {
+            view! { <p class="calendar-status">"Checking recording availability…"</p> }.into_any()
+        }
+        Some(Err(error)) => {
+            view! { <p class="recording-error" role="alert">{error}</p> }.into_any()
+        }
+        Some(Ok(days)) if days.is_empty() => {
+            view! { <p class="calendar-status">{empty_detail}</p> }.into_any()
+        }
+        Some(Ok(_)) => {
+            view! { <p class="calendar-status">"Dimmed dates have no retained recordings."</p> }
+                .into_any()
+        }
     }
 }
 
@@ -564,50 +845,48 @@ fn RangePlayback(range: RecordingRange) -> impl IntoView {
     );
     view! {
         <div class="playback-heading"><h2>{heading}</h2><p>{detail}</p></div>
-        {move || match (context.recording_clips.get(), context.review_activity.get()) {
-            (None, _) | (_, None) => view! { <Status
+        {move || match (
+            context.recording_clips.get(),
+            context.preview_clips.get(),
+            context.review_activity.get(),
+        ) {
+            (None, _, _) | (_, None, _) | (_, _, None) => view! { <Status
                 heading="Loading recordings"
                 detail="Checking retained footage and activity in the selected range."
                 glyph=StatusGlyph::Recording
             /> }.into_any(),
-            (Some(Err(error)), _) | (_, Some(Err(error))) => {
+            (Some(Err(error)), _, _) | (_, Some(Err(error)), _) | (_, _, Some(Err(error))) => {
                 view! { <p class="recording-error" role="alert">{error}</p> }.into_any()
             }
-            (Some(Ok(clips)), Some(Ok(_))) if clips.is_empty() => view! {
+            (Some(Ok(media)), _, Some(Ok(_))) if media.clips.is_empty() => view! {
                 <p class="recording-error" role="alert">
                     "Frigate has no retained recordings for this camera and time range."
                 </p>
             }.into_any(),
-            (Some(Ok(clips)), Some(Ok(reviews))) => view! {
-                <RecordingList clips reviews/>
+            (Some(Ok(media)), Some(Ok(previews)), Some(Ok(reviews))) => view! {
+                <RecordingList
+                    selection=range.clone()
+                    clips=media.clips
+                    motion_ranges=media.motion_ranges
+                    previews
+                    reviews
+                />
             }.into_any(),
         }}
     }
 }
 
 #[component]
-fn RecordingList(clips: Vec<RecordingClip>, reviews: Vec<ReviewSegment>) -> impl IntoView {
+fn RecordingList(
+    selection: RecordingRange,
+    clips: Vec<RecordingClip>,
+    motion_ranges: Vec<RecordingRange>,
+    previews: Vec<PreviewClip>,
+    reviews: Vec<ReviewSegment>,
+) -> impl IntoView {
     let context = expect_context::<RecordingContext>();
-    let filter_context = context.clone();
     view! {
-        {move || {
-            let filter = filter_context.recording_filter.get();
-            let clips = recordings_for_filter(clips.clone(), &reviews, filter);
-            if clips.is_empty() {
-                return view! { <p class="recording-empty" role="status">{format!(
-                    "No recordings overlap {} activity in this range.",
-                    filter.label().to_lowercase(),
-                )}</p> }
-                .into_any();
-            }
-            view! {
-                <div class="recording-list" aria-label="Selected recordings">
-                    {clips.into_iter().map(|clip| view! {
-                        <RecordingPreview clip/>
-                    }).collect_view()}
-                </div>
-            }.into_any()
-        }}
+        <RecordingTimeline selection clips motion_ranges previews reviews/>
         {move || context.recording_failed.get().then(|| view! {
             <p class="recording-error" role="alert">"One or more recordings could not be loaded."</p>
         })}
@@ -615,28 +894,501 @@ fn RecordingList(clips: Vec<RecordingClip>, reviews: Vec<ReviewSegment>) -> impl
 }
 
 #[component]
-fn RecordingPreview(clip: RecordingClip) -> impl IntoView {
-    let context = expect_context::<RecordingContext>();
-    let clip_url = clip.range.clip_url();
-    let poster_url = clip.range.poster_url();
-    let detail = format!(
-        "{} – {}",
-        format_event_time(clip.range.start_time),
-        format_event_time(clip.range.end_time),
-    );
-    let play_label = format!("Play recording from {detail}");
+fn RecordingTimeline(
+    selection: RecordingRange,
+    clips: Vec<RecordingClip>,
+    motion_ranges: Vec<RecordingRange>,
+    previews: Vec<PreviewClip>,
+    reviews: Vec<ReviewSegment>,
+) -> impl IntoView {
+    let range_start = selection.start_time;
+    let range_end = selection.end_time;
+    let timeline_clips = clips.clone();
+    let selectable_clips = clips.clone();
+    let activity_clips = clips.clone();
+    let playback_activities = timeline_activities(&motion_ranges, &reviews, range_start, range_end);
+    let active_activity = RwSignal::new(None::<TimelineActivity>);
+    let selected_time = RwSignal::new(playable_time(&clips, range_start));
+    let uses_preview = RwSignal::new(true);
+
+    view! {
+        <section class="recording-timeline" aria-label="Recording timeline">
+            <div class="timeline-heading">
+                <h3>"Timeline"</h3>
+                <output>{move || format_event_time(selected_time.get())}</output>
+            </div>
+            <div class="timeline-track">
+                {timeline_clips.into_iter().map(|clip| {
+                    let style = timeline_segment_style(&clip.range, range_start, range_end);
+                    let start_time = clip.range.start_time;
+                    let label = format!("Play from {}", format_event_time(start_time));
+                    view! { <button
+                        type="button"
+                        class="timeline-availability"
+                        style=style
+                        aria-label=label
+                        on:click=move |_| {
+                            active_activity.set(None);
+                            uses_preview.set(true);
+                            selected_time.set(start_time);
+                        }
+                    ></button> }
+                }).collect_view()}
+                {motion_ranges.into_iter().map(|range| {
+                    let style = timeline_segment_style(&range, range_start, range_end);
+                    let start_time = range.start_time;
+                    let click_clips = activity_clips.clone();
+                    let label = format!(
+                        "Motion recording at {}",
+                        format_event_time(start_time),
+                    );
+                    view! { <button
+                        type="button"
+                        class="timeline-activity timeline-motion-recording activity-motion"
+                        style=style
+                        aria-label=label
+                        on:click=move |_| {
+                            active_activity.set(Some(TimelineActivity {
+                                start_time,
+                                end_time: range.end_time,
+                            }));
+                            uses_preview.set(true);
+                            selected_time.set(playable_time(&click_clips, start_time));
+                        }
+                    ></button> }
+                }).collect_view()}
+                {reviews.into_iter().filter_map(|review| {
+                    let is_point = review.end_time.is_some_and(|end_time| {
+                        end_time <= review.start_time
+                    });
+                    let (start_time, end_time) = review_timeline_bounds(
+                        review.start_time,
+                        review.end_time,
+                        range_start,
+                        range_end,
+                    )?;
+                    let range = RecordingRange {
+                        camera: String::new(),
+                        start_time,
+                        end_time,
+                    };
+                    let style = timeline_segment_style(&range, range_start, range_end);
+                    let severity = review.severity;
+                    let click_clips = activity_clips.clone();
+                    let label = format!(
+                        "{} activity at {}",
+                        severity_label(severity),
+                        format_event_time(start_time),
+                    );
+                    Some(view! { <button
+                        type="button"
+                        class=format!(
+                            "timeline-activity {}{}",
+                            severity_class(severity),
+                            if is_point { " timeline-point" } else { "" },
+                        )
+                        style=style
+                        aria-label=label
+                        on:click=move |_| {
+                            active_activity.set(Some(TimelineActivity {
+                                start_time,
+                                end_time,
+                            }));
+                            uses_preview.set(true);
+                            selected_time.set(playable_time(&click_clips, start_time));
+                        }
+                    ></button> })
+                }).collect_view()}
+                <input
+                    type="range"
+                    min=range_start
+                    max=range_end
+                    step="1"
+                    prop:value=move || selected_time.get()
+                    aria-label="Recording playhead"
+                    on:input=move |event| {
+                        active_activity.set(None);
+                        uses_preview.set(true);
+                        let requested_time = event_target_value(&event)
+                            .parse::<f64>()
+                            .unwrap_or(range_start);
+                        selected_time.set(playable_time(&selectable_clips, requested_time));
+                    }
+                />
+            </div>
+            <TimelinePlayer
+                clips
+                previews
+                activities=playback_activities
+                active_activity
+                selected_time
+                uses_preview
+            />
+        </section>
+    }
+}
+
+#[component]
+fn TimelinePlayer(
+    clips: Vec<RecordingClip>,
+    previews: Vec<PreviewClip>,
+    activities: Vec<TimelineActivity>,
+    active_activity: RwSignal<Option<TimelineActivity>>,
+    selected_time: RwSignal<f64>,
+    uses_preview: RwSignal<bool>,
+) -> impl IntoView {
+    let video = NodeRef::<leptos::html::Video>::new();
+    let initial_source = playback_source(&clips, &previews, selected_time.get_untracked(), true);
+    let sources = StoredValue::new((clips, previews));
+    let activities = StoredValue::new(activities);
+    let active_source = RwSignal::new(initial_source);
+    let pending_seek = RwSignal::new(None::<f64>);
     let is_playing = RwSignal::new(false);
-    view! { <article><h3>{detail}</h3>{move || if is_playing.get() {
-        view! { <video class="recording-player" src=clip_url.clone()
-            poster=poster_url.clone() controls autoplay playsinline
-            on:error=move |_| context.recording_failed.set(true)
-        >"This browser cannot play the selected recording."</video> }.into_any()
-    } else {
-        view! { <button class="recording-preview" type="button" aria-label=play_label.clone()
-            on:click=move |_| is_playing.set(true)
-        ><img src=poster_url.clone() alt="" loading="lazy"/><span aria-hidden="true"></span></button> }
-            .into_any()
-    }}</article> }
+    let playback_error = RwSignal::new(None::<String>);
+    let starts_after_load = RwSignal::new(false);
+    let tracks_playback = RwSignal::new(false);
+    let activity_playback = ActivityPlaybackState {
+        sources,
+        activities,
+        active_source,
+        active_activity,
+        selected_time,
+        starts_after_load,
+        tracks_playback,
+        playback_error,
+    };
+
+    Effect::new(move |_| {
+        let selected_time = selected_time.get();
+        let uses_preview = uses_preview.get();
+        let next_source = sources.with_value(|(clips, previews)| {
+            playback_source(clips, previews, selected_time, uses_preview)
+        });
+        let source_changed = active_source.with_untracked(|active| {
+            active.as_ref().map(|source| &source.url)
+                != next_source.as_ref().map(|source| &source.url)
+        });
+        if source_changed {
+            tracks_playback.set(false);
+            active_source.set(next_source);
+            return;
+        }
+
+        let Some(video) = video.get() else {
+            return;
+        };
+        if video.ready_state() == 0 {
+            return;
+        }
+        active_source.with_untracked(|source| {
+            let Some(source) = source else {
+                return;
+            };
+            let requested_offset = selected_time - source.start_time;
+            if (video.current_time() - requested_offset).abs() < 0.25 {
+                return;
+            }
+            if video.seeking() {
+                pending_seek.set(Some(requested_offset));
+            } else {
+                tracks_playback.set(false);
+                video.set_current_time(requested_offset);
+            }
+        });
+    });
+
+    view! {
+        <div class="timeline-player-controls">
+            <button type="button" on:click=move |_| {
+                let Some(video) = video.get() else {
+                    return;
+                };
+                playback_error.set(None);
+                if video.paused() {
+                    if uses_preview.get_untracked() {
+                        starts_after_load.set(true);
+                        uses_preview.set(false);
+                        return;
+                    }
+                    if let Err(error) = video.play() {
+                        playback_error.set(Some(format!(
+                            "The recording could not start: {error:?}",
+                        )));
+                    }
+                } else if let Err(error) = video.pause() {
+                    playback_error.set(Some(format!(
+                        "The recording could not pause: {error:?}",
+                    )));
+                }
+            }>{move || if is_playing.get() { "Pause" } else { "Play" }}</button>
+        </div>
+        <video
+            node_ref=video
+            class="recording-player timeline-player"
+            src=move || active_source.get().map(|source| source.url)
+            poster=move || active_source.get().and_then(|source| source.poster)
+            preload="auto"
+            muted
+            controls
+            playsinline
+            on:play=move |_| {
+                if uses_preview.get_untracked() {
+                    if let Some(video) = video.get()
+                        && let Err(error) = video.pause()
+                    {
+                        playback_error.set(Some(format!(
+                            "The preview could not pause: {error:?}",
+                        )));
+                        return;
+                    }
+                    starts_after_load.set(true);
+                    uses_preview.set(false);
+                    return;
+                }
+                is_playing.set(true);
+            }
+            on:pause=move |_| is_playing.set(false)
+            on:ended=move |_| {
+                if let Some(video) = video.get() {
+                    activity_playback.advance(&video, true);
+                }
+            }
+            on:loadedmetadata=move |_| {
+            let Some(video) = video.get() else {
+                return;
+            };
+            active_source.with_untracked(|source| {
+                if let Some(source) = source {
+                    let requested_offset =
+                        (selected_time.get_untracked() - source.start_time).max(0.0);
+                    if (video.current_time() - requested_offset).abs() >= 0.25 {
+                        tracks_playback.set(false);
+                        video.set_current_time(requested_offset);
+                    } else {
+                        tracks_playback.set(true);
+                    }
+                }
+            });
+            if starts_after_load.get_untracked() {
+                starts_after_load.set(false);
+                if let Err(error) = video.play() {
+                    playback_error.set(Some(format!(
+                        "The recording could not start: {error:?}",
+                    )));
+                }
+            }
+            }
+            on:seeked=move |_| {
+            let Some(video) = video.get() else {
+                return;
+            };
+            let Some(requested_offset) = pending_seek.get_untracked() else {
+                return;
+            };
+            if (video.current_time() - requested_offset).abs() >= 0.5 {
+                video.set_current_time(requested_offset);
+            } else {
+                pending_seek.set(None);
+                tracks_playback.set(true);
+            }
+            }
+            on:timeupdate=move |_| {
+            if !tracks_playback.get_untracked() {
+                return;
+            }
+            let Some(video) = video.get() else {
+                return;
+            };
+            if activity_playback.advance(&video, false) {
+                return;
+            }
+            active_source.with_untracked(|source| {
+                if let Some(source) = source {
+                    let playback_time = source.start_time + video.current_time();
+                    selected_time.set(playback_time.min(source.end_time - 1.0));
+                }
+            });
+            }
+        >"This browser cannot play the selected recording."</video>
+        {move || playback_error.get().map(|error| view! {
+            <p class="recording-error" role="alert">{error}</p>
+        })}
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ActivityPlaybackState {
+    sources: StoredValue<(Vec<RecordingClip>, Vec<PreviewClip>)>,
+    activities: StoredValue<Vec<TimelineActivity>>,
+    active_source: RwSignal<Option<PlaybackSource>>,
+    active_activity: RwSignal<Option<TimelineActivity>>,
+    selected_time: RwSignal<f64>,
+    starts_after_load: RwSignal<bool>,
+    tracks_playback: RwSignal<bool>,
+    playback_error: RwSignal<Option<String>>,
+}
+
+impl ActivityPlaybackState {
+    fn advance(self, video: &web_sys::HtmlVideoElement, media_ended: bool) -> bool {
+        let Some(activity) = self.active_activity.get_untracked() else {
+            return false;
+        };
+        let Some(source) = self.active_source.get_untracked() else {
+            return false;
+        };
+        let playback_time = source.start_time + video.current_time();
+        if !media_ended && playback_time < activity.end_time {
+            return false;
+        }
+
+        let next_activity = self
+            .activities
+            .with_value(|activities| next_timeline_activity(activities, activity));
+        if let Some(next_activity) = next_activity {
+            let next_time = self
+                .sources
+                .with_value(|(clips, _)| playable_time(clips, next_activity.start_time));
+            let source_changes = self
+                .sources
+                .with_value(|(clips, previews)| playback_source(clips, previews, next_time, false))
+                .is_some_and(|next_source| next_source.url != source.url);
+            if source_changes {
+                self.starts_after_load.set(true);
+            }
+            self.active_activity.set(Some(next_activity));
+            self.selected_time.set(next_time);
+        } else {
+            self.tracks_playback.set(false);
+            let final_time = activity.end_time.min(source.end_time - 0.001);
+            self.selected_time.set(final_time);
+            if let Err(error) = video.pause() {
+                self.playback_error
+                    .set(Some(format!("The recording could not stop: {error:?}")));
+            }
+        }
+        true
+    }
+}
+
+#[derive(Clone)]
+struct PlaybackSource {
+    url: String,
+    poster: Option<String>,
+    start_time: f64,
+    end_time: f64,
+}
+
+fn playback_source(
+    clips: &[RecordingClip],
+    previews: &[PreviewClip],
+    time: f64,
+    uses_preview: bool,
+) -> Option<PlaybackSource> {
+    if uses_preview
+        && let Some(preview) = previews
+            .iter()
+            .find(|preview| preview.start <= time && time < preview.end)
+    {
+        return Some(PlaybackSource {
+            url: preview.src.clone(),
+            poster: None,
+            start_time: preview.start,
+            end_time: preview.end,
+        });
+    }
+
+    clip_at_time(clips, time).map(|clip| PlaybackSource {
+        url: clip.range.clip_url(),
+        poster: Some(clip.range.poster_url()),
+        start_time: clip.range.start_time,
+        end_time: clip.range.end_time,
+    })
+}
+
+fn clip_at_time(clips: &[RecordingClip], time: f64) -> Option<RecordingClip> {
+    clips
+        .iter()
+        .find(|clip| clip.range.start_time <= time && time < clip.range.end_time)
+        .cloned()
+}
+
+fn playable_time(clips: &[RecordingClip], requested_time: f64) -> f64 {
+    if clip_at_time(clips, requested_time).is_some() {
+        return requested_time;
+    }
+
+    clips
+        .iter()
+        .map(|clip| {
+            let last_playable_time = (clip.range.end_time - 1.0).max(clip.range.start_time);
+            requested_time.clamp(clip.range.start_time, last_playable_time)
+        })
+        .min_by(|left, right| {
+            (left - requested_time)
+                .abs()
+                .total_cmp(&(right - requested_time).abs())
+        })
+        .expect("recording timeline requires at least one clip")
+}
+
+fn timeline_segment_style(range: &RecordingRange, start_time: f64, end_time: f64) -> String {
+    let duration = end_time - start_time;
+    let left = (range.start_time - start_time) / duration * 100.0;
+    let width = (range.end_time - range.start_time) / duration * 100.0;
+    format!("left: {left:.4}%; width: {width:.4}%")
+}
+
+fn review_timeline_bounds(
+    review_start: f64,
+    review_end: Option<f64>,
+    range_start: f64,
+    range_end: f64,
+) -> Option<(f64, f64)> {
+    let review_end = review_end.unwrap_or(range_end);
+    if review_start >= range_end || review_end < range_start {
+        return None;
+    }
+    let start_time = review_start.max(range_start);
+    let end_time = review_end
+        .min(range_end)
+        .max((start_time + 1.0).min(range_end));
+    (start_time < end_time).then_some((start_time, end_time))
+}
+
+fn timeline_activities(
+    motion_ranges: &[RecordingRange],
+    reviews: &[ReviewSegment],
+    range_start: f64,
+    range_end: f64,
+) -> Vec<TimelineActivity> {
+    let mut activities = motion_ranges
+        .iter()
+        .map(|range| TimelineActivity {
+            start_time: range.start_time,
+            end_time: range.end_time,
+        })
+        .chain(reviews.iter().filter_map(|review| {
+            review_timeline_bounds(review.start_time, review.end_time, range_start, range_end).map(
+                |(start_time, end_time)| TimelineActivity {
+                    start_time,
+                    end_time,
+                },
+            )
+        }))
+        .collect::<Vec<_>>();
+    activities.sort_by(|left, right| left.start_time.total_cmp(&right.start_time));
+    activities.dedup();
+    activities
+}
+
+fn next_timeline_activity(
+    activities: &[TimelineActivity],
+    current: TimelineActivity,
+) -> Option<TimelineActivity> {
+    activities
+        .iter()
+        .copied()
+        .find(|activity| activity.start_time >= current.end_time)
 }
 
 #[derive(Clone, Copy)]
@@ -648,7 +1400,7 @@ enum StatusGlyph {
 
 /// Renders an asynchronous content state with a consistent accessible heading.
 #[component]
-fn Status(heading: &'static str, detail: impl IntoView, glyph: StatusGlyph) -> impl IntoView {
+fn Status(heading: impl IntoView, detail: impl IntoView, glyph: StatusGlyph) -> impl IntoView {
     let glyph_class = match glyph {
         StatusGlyph::Camera => "status-glyph camera-glyph",
         StatusGlyph::Event => "status-glyph event-glyph",
@@ -691,18 +1443,29 @@ struct RecordingRange {
 #[derive(Clone, Debug, PartialEq)]
 struct RecordingClip {
     range: RecordingRange,
-    has_motion: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RecordingMedia {
+    clips: Vec<RecordingClip>,
+    motion_ranges: Vec<RecordingRange>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TimelineActivity {
+    start_time: f64,
+    end_time: f64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RecordingFilter {
+enum ActivityFilter {
     All,
     SignificantMotion,
     Detection,
     Alert,
 }
 
-impl RecordingFilter {
+impl ActivityFilter {
     const ALL: [Self; 4] = [
         Self::All,
         Self::Alert,
@@ -745,14 +1508,15 @@ impl RecordingRange {
     }
 }
 
-fn contiguous_recordings(
+fn recording_media(
     selection: &RecordingRange,
     mut segments: Vec<RecordingSegment>,
-) -> Vec<RecordingClip> {
+) -> RecordingMedia {
     const MAX_SEGMENT_GAP_SECONDS: f64 = 1.0;
 
     segments.sort_by(|left, right| left.start_time.total_cmp(&right.start_time));
-    let mut recordings = Vec::<RecordingClip>::new();
+    let mut clip_ranges = Vec::<RecordingRange>::new();
+    let mut motion_ranges = Vec::<RecordingRange>::new();
     for segment in segments {
         let start_time = segment.start_time.max(selection.start_time);
         let end_time = segment.end_time.min(selection.end_time);
@@ -761,55 +1525,52 @@ fn contiguous_recordings(
             continue;
         }
 
-        if let Some(recording) = recordings.last_mut()
-            && start_time <= recording.range.end_time + MAX_SEGMENT_GAP_SECONDS
-        {
-            recording.range.end_time = recording.range.end_time.max(end_time);
-            recording.has_motion |= has_motion;
-            continue;
-        }
-
-        recordings.push(RecordingClip {
-            range: RecordingRange {
-                camera: selection.camera.clone(),
+        if has_motion {
+            push_contiguous_range(
+                &mut motion_ranges,
+                selection,
                 start_time,
                 end_time,
-            },
-            has_motion,
-        });
+                MAX_SEGMENT_GAP_SECONDS,
+            );
+        }
+        push_contiguous_range(
+            &mut clip_ranges,
+            selection,
+            start_time,
+            end_time,
+            MAX_SEGMENT_GAP_SECONDS,
+        );
     }
-    recordings.reverse();
-    recordings
+    let mut clips = clip_ranges
+        .into_iter()
+        .map(|range| RecordingClip { range })
+        .collect::<Vec<_>>();
+    clips.reverse();
+    RecordingMedia {
+        clips,
+        motion_ranges,
+    }
 }
 
-fn recordings_for_filter(
-    recordings: Vec<RecordingClip>,
-    reviews: &[ReviewSegment],
-    filter: RecordingFilter,
-) -> Vec<RecordingClip> {
-    if filter == RecordingFilter::All {
-        return recordings;
+fn push_contiguous_range(
+    ranges: &mut Vec<RecordingRange>,
+    selection: &RecordingRange,
+    start_time: f64,
+    end_time: f64,
+    maximum_gap: f64,
+) {
+    if let Some(range) = ranges.last_mut()
+        && start_time <= range.end_time + maximum_gap
+    {
+        range.end_time = range.end_time.max(end_time);
+        return;
     }
-    if filter == RecordingFilter::SignificantMotion {
-        return recordings
-            .into_iter()
-            .filter(|recording| recording.has_motion)
-            .collect();
-    }
-    let severity = filter
-        .severity()
-        .expect("non-motion activity filter should have a review severity");
-    recordings
-        .into_iter()
-        .filter(|recording| {
-            reviews.iter().any(|review| {
-                review.severity == severity
-                    && review.start_time < recording.range.end_time
-                    && review.end_time.unwrap_or(recording.range.end_time)
-                        > recording.range.start_time
-            })
-        })
-        .collect()
+    ranges.push(RecordingRange {
+        camera: selection.camera.clone(),
+        start_time,
+        end_time,
+    });
 }
 
 const RECORDING_PRESETS: [RecordingPreset; 5] = [
@@ -865,6 +1626,41 @@ struct CalendarDay {
     day_number: u32,
     month: String,
     accessible_label: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CalendarSelection {
+    start_day: f64,
+    end_day: f64,
+    awaiting_end: bool,
+}
+
+impl CalendarSelection {
+    const fn single(day: f64) -> Self {
+        Self {
+            start_day: day,
+            end_day: day,
+            awaiting_end: true,
+        }
+    }
+
+    fn contains(self, day: f64) -> bool {
+        day >= self.start_day && day <= self.end_day
+    }
+}
+
+fn select_calendar_range(
+    current: Option<CalendarSelection>,
+    selected_day: f64,
+) -> CalendarSelection {
+    let Some(current) = current.filter(|selection| selection.awaiting_end) else {
+        return CalendarSelection::single(selected_day);
+    };
+    CalendarSelection {
+        start_day: current.start_day.min(selected_day),
+        end_day: current.start_day.max(selected_day),
+        awaiting_end: false,
+    }
 }
 
 fn recent_calendar_days(count: u32) -> Vec<CalendarDay> {
@@ -941,12 +1737,25 @@ fn next_local_day(day_start: f64) -> f64 {
 }
 
 fn day_severity(reviews: &[ReviewSegment], day_start: f64, day_end: f64) -> Option<ReviewSeverity> {
-    reviews
-        .iter()
-        .filter(|review| {
-            review.start_time < day_end && review.end_time.unwrap_or(day_end) > day_start
+    day_severity_from_ranges(
+        reviews
+            .iter()
+            .map(|review| (review.start_time, review.end_time, review.severity)),
+        day_start,
+        day_end,
+    )
+}
+
+fn day_severity_from_ranges(
+    ranges: impl Iterator<Item = (f64, Option<f64>, ReviewSeverity)>,
+    day_start: f64,
+    day_end: f64,
+) -> Option<ReviewSeverity> {
+    ranges
+        .filter(|(start_time, end_time, _)| {
+            *start_time < day_end && end_time.unwrap_or(day_end) > day_start
         })
-        .map(|review| review.severity)
+        .map(|(_, _, severity)| severity)
         .reduce(ReviewSeverity::highest)
 }
 
@@ -955,6 +1764,14 @@ const fn severity_class(severity: ReviewSeverity) -> &'static str {
         ReviewSeverity::SignificantMotion => "activity-motion",
         ReviewSeverity::Detection => "activity-detection",
         ReviewSeverity::Alert => "activity-alert",
+    }
+}
+
+const fn severity_label(severity: ReviewSeverity) -> &'static str {
+    match severity {
+        ReviewSeverity::SignificantMotion => "Motion",
+        ReviewSeverity::Detection => "Detection",
+        ReviewSeverity::Alert => "Alert",
     }
 }
 
@@ -1071,80 +1888,209 @@ mod tests {
         ];
 
         assert_eq!(
-            contiguous_recordings(&selection, segments),
-            [
-                RecordingClip {
-                    range: RecordingRange {
-                        camera: "front".to_owned(),
-                        start_time: 150.0,
-                        end_time: 170.0,
+            recording_media(&selection, segments),
+            RecordingMedia {
+                clips: vec![
+                    RecordingClip {
+                        range: RecordingRange {
+                            camera: "front".to_owned(),
+                            start_time: 150.0,
+                            end_time: 170.0,
+                        },
                     },
-                    has_motion: true,
-                },
-                RecordingClip {
-                    range: RecordingRange {
+                    RecordingClip {
+                        range: RecordingRange {
+                            camera: "front".to_owned(),
+                            start_time: 100.0,
+                            end_time: 110.0,
+                        },
+                    },
+                ],
+                motion_ranges: vec![
+                    RecordingRange {
                         camera: "front".to_owned(),
                         start_time: 100.0,
                         end_time: 110.0,
                     },
-                    has_motion: true,
-                },
-            ]
+                    RecordingRange {
+                        camera: "front".to_owned(),
+                        start_time: 160.5,
+                        end_time: 170.0,
+                    },
+                ],
+            }
         );
     }
 
     #[test]
-    fn activity_filter_keeps_only_overlapping_severity() {
-        let recordings = vec![
+    fn recent_activity_filter_keeps_only_the_selected_severity() {
+        let events = [ReviewSeverity::Alert, ReviewSeverity::Detection]
+            .into_iter()
+            .enumerate()
+            .map(|(index, severity)| ReviewEvent {
+                id: index.to_string(),
+                camera: "front".to_owned(),
+                start_time: 100.0,
+                end_time: Some(110.0),
+                severity,
+                thumb_path: "/media/frigate/clips/review/thumb.webp".to_owned(),
+                data: corvette_api::ReviewEventData::default(),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            review_events_for_filter(events.clone(), ActivityFilter::All),
+            events
+        );
+        assert_eq!(
+            review_events_for_filter(events.clone(), ActivityFilter::Alert),
+            [events[0].clone()]
+        );
+        assert_eq!(
+            review_event_day_severity(&events, 90.0, 120.0),
+            Some(ReviewSeverity::Alert)
+        );
+        assert_eq!(
+            review_events_for_filter(events, ActivityFilter::Detection),
+            [ReviewEvent {
+                id: "1".to_owned(),
+                camera: "front".to_owned(),
+                start_time: 100.0,
+                end_time: Some(110.0),
+                severity: ReviewSeverity::Detection,
+                thumb_path: "/media/frigate/clips/review/thumb.webp".to_owned(),
+                data: corvette_api::ReviewEventData::default(),
+            }]
+        );
+        assert_eq!(
+            review_thumbnail_url("/media/frigate/clips/review/thumb.webp"),
+            "/clips/review/thumb.webp"
+        );
+        assert_eq!(
+            recent_activity_empty_heading(),
+            "No events in the last 6 hours"
+        );
+    }
+
+    #[test]
+    fn calendar_taps_choose_a_range_then_start_a_new_one() {
+        let start = select_calendar_range(None, 200.0);
+        assert_eq!(start, CalendarSelection::single(200.0));
+
+        let completed = select_calendar_range(Some(start), 100.0);
+        assert_eq!(
+            completed,
+            CalendarSelection {
+                start_day: 100.0,
+                end_day: 200.0,
+                awaiting_end: false,
+            }
+        );
+        assert!(completed.contains(150.0));
+
+        assert_eq!(
+            select_calendar_range(Some(completed), 300.0),
+            CalendarSelection::single(300.0)
+        );
+    }
+
+    #[test]
+    fn playhead_keeps_available_times_and_snaps_gaps_to_the_nearest_clip() {
+        let clips = vec![
             RecordingClip {
                 range: RecordingRange {
                     camera: "front".to_owned(),
                     start_time: 100.0,
                     end_time: 120.0,
                 },
-                has_motion: true,
             },
             RecordingClip {
                 range: RecordingRange {
                     camera: "front".to_owned(),
-                    start_time: 200.0,
-                    end_time: 220.0,
+                    start_time: 150.0,
+                    end_time: 180.0,
                 },
-                has_motion: false,
             },
         ];
-        let reviews = [
-            ReviewSegment {
-                start_time: 105.0,
-                end_time: Some(110.0),
-                severity: ReviewSeverity::Detection,
+
+        assert!((playable_time(&clips, 110.0) - 110.0).abs() < f64::EPSILON);
+        assert!((playable_time(&clips, 140.0) - 150.0).abs() < f64::EPSILON);
+        assert!((playable_time(&clips, 125.0) - 119.0).abs() < f64::EPSILON);
+        assert!((playable_time(&clips, 180.0) - 179.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn timeline_segments_are_positioned_within_the_available_span() {
+        let range = RecordingRange {
+            camera: "front".to_owned(),
+            start_time: 125.0,
+            end_time: 150.0,
+        };
+
+        assert_eq!(
+            timeline_segment_style(&range, 100.0, 200.0),
+            "left: 25.0000%; width: 25.0000%"
+        );
+    }
+
+    #[test]
+    fn timeline_keeps_zero_duration_review_markers() {
+        assert_eq!(
+            review_timeline_bounds(125.0, Some(125.0), 100.0, 200.0),
+            Some((125.0, 126.0))
+        );
+        assert_eq!(
+            review_timeline_bounds(250.0, Some(250.0), 100.0, 200.0),
+            None
+        );
+    }
+
+    #[test]
+    fn activity_playback_advances_after_the_current_event() {
+        let activities = [
+            TimelineActivity {
+                start_time: 100.0,
+                end_time: 110.0,
             },
-            ReviewSegment {
-                start_time: 205.0,
-                end_time: Some(210.0),
-                severity: ReviewSeverity::Alert,
+            TimelineActivity {
+                start_time: 105.0,
+                end_time: 115.0,
+            },
+            TimelineActivity {
+                start_time: 120.0,
+                end_time: 130.0,
             },
         ];
 
         assert_eq!(
-            recordings_for_filter(recordings.clone(), &reviews, RecordingFilter::All),
-            recordings
+            next_timeline_activity(&activities, activities[0]),
+            Some(activities[2])
         );
-        assert_eq!(
-            recordings_for_filter(recordings.clone(), &reviews, RecordingFilter::Detection),
-            [recordings[0].clone()]
-        );
-        assert_eq!(
-            recordings_for_filter(recordings.clone(), &reviews, RecordingFilter::Alert),
-            [recordings[1].clone()]
-        );
-        assert_eq!(
-            recordings_for_filter(
-                recordings.clone(),
-                &reviews,
-                RecordingFilter::SignificantMotion
-            ),
-            [recordings[0].clone()]
-        );
+        assert_eq!(next_timeline_activity(&activities, activities[2]), None);
+    }
+
+    #[test]
+    fn timeline_prefers_frigate_preview_media_for_scrubbing() {
+        let clips = vec![RecordingClip {
+            range: RecordingRange {
+                camera: "front".to_owned(),
+                start_time: 100.0,
+                end_time: 200.0,
+            },
+        }];
+        let previews = vec![PreviewClip {
+            camera: "front".to_owned(),
+            src: "/clips/previews/front/hour.mp4".to_owned(),
+            media_type: "video/mp4".to_owned(),
+            start: 90.0,
+            end: 210.0,
+        }];
+
+        let source = playback_source(&clips, &previews, 150.0, true)
+            .expect("recorded timestamp should have a playback source");
+
+        assert_eq!(source.url, "/clips/previews/front/hour.mp4");
+        assert!(source.poster.is_none());
+        assert!((source.start_time - 90.0).abs() < f64::EPSILON);
     }
 }

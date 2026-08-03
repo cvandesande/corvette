@@ -1,6 +1,8 @@
 //! Browser access to the Frigate API boundary.
 
-use corvette_api::{Camera, Event, FrigateConfig, RecordingSegment, ReviewSegment};
+use corvette_api::{
+    Camera, Event, FrigateConfig, PreviewClip, RecordingSegment, ReviewEvent, ReviewSegment,
+};
 use gloo_net::http::Request;
 use std::collections::BTreeMap;
 
@@ -55,6 +57,31 @@ pub(super) async fn fetch_events() -> Result<Vec<Event>, String> {
         .json::<Vec<Event>>()
         .await
         .map_err(|error| format!("decode {EVENTS_PATH} response: {error}"))
+}
+
+/// Fetches review activity within the dashboard's recent time window.
+// Browser fetch futures are confined to the WASM thread and cannot implement Send.
+#[allow(clippy::future_not_send)]
+// The parent component is the only caller across this private module boundary.
+#[allow(clippy::redundant_pub_crate)]
+pub(super) async fn fetch_reviews(after: f64, before: f64) -> Result<Vec<ReviewEvent>, String> {
+    let path = format!("/api/review?cameras=all&after={after}&before={before}&limit=1000");
+    let response = Request::get(&path)
+        .send()
+        .await
+        .map_err(|error| format!("request {path}: {error}"))?;
+
+    if !response.ok() {
+        return Err(format!(
+            "request {path}: server returned HTTP {}",
+            response.status()
+        ));
+    }
+
+    response
+        .json::<Vec<ReviewEvent>>()
+        .await
+        .map_err(|error| format!("decode {path} response: {error}"))
 }
 
 /// Fetches review activity for one camera and timestamp range.
@@ -151,6 +178,39 @@ pub(super) async fn fetch_recording_segments(
 
     response
         .json::<Vec<RecordingSegment>>()
+        .await
+        .map_err(|error| format!("decode {path} response: {error}"))
+}
+
+/// Fetches Frigate's low-resolution preview videos for timeline scrubbing.
+// Browser fetch futures are confined to the WASM thread and cannot implement Send.
+#[allow(clippy::future_not_send)]
+// The parent component is the only caller across this private module boundary.
+#[allow(clippy::redundant_pub_crate)]
+pub(super) async fn fetch_preview_clips(
+    camera: &str,
+    after: f64,
+    before: f64,
+) -> Result<Vec<PreviewClip>, String> {
+    let camera = js_sys::encode_uri_component(camera);
+    let path = format!("/api/preview/{camera}/start/{after}/end/{before}");
+    let response = Request::get(&path)
+        .send()
+        .await
+        .map_err(|error| format!("request {path}: {error}"))?;
+
+    if response.status() == 404 {
+        return Ok(Vec::new());
+    }
+    if !response.ok() {
+        return Err(format!(
+            "request {path}: server returned HTTP {}",
+            response.status()
+        ));
+    }
+
+    response
+        .json::<Vec<PreviewClip>>()
         .await
         .map_err(|error| format!("decode {path} response: {error}"))
 }

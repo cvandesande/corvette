@@ -112,6 +112,12 @@ http {{
             proxy_set_header Host $host;
         }}
 
+        location /clips/ {{
+            proxy_pass http://{frigate_address};
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+        }}
+
         location = /go2rtc/api/ws {{
             proxy_pass http://{go2rtc_address}/api/ws;
             proxy_http_version 1.1;
@@ -167,6 +173,7 @@ mod tests {
         );
 
         assert!(config.contains("location /api/"));
+        assert!(config.contains("location /clips/"));
         assert!(config.contains("location = /go2rtc/api/ws"));
         assert!(config.contains("proxy_pass http://127.0.0.1:11984/api/ws"));
         assert!(config.contains("try_files $uri @application_shell"));

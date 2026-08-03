@@ -15,7 +15,7 @@ and nothing there is pinned to a Rust toolchain.
 | | State |
 | --- | --- |
 | **Stage 2, the ncnn-from-Rust spike** | **Done, 2026-08-03.** The premise holds; see [ncnn-spike.md](ncnn-spike.md) |
-| **Stage 0, the Leptos UI** | **In progress, started 2026-08-03.** Live view, recent events and recording playback work. Cargo Leptos now splits the recording route into a lazy WASM payload; timeline navigation is next. |
+| **Stage 0, the Leptos UI** | **In progress, started 2026-08-03.** Live view, event browsing and availability-aware recording playback work. Cargo Leptos splits the recording route into a lazy WASM payload; timeline zoom is next. |
 
 Packaging work -- the distroless split pod, retiring the Frigate donor image --
 belongs to `frigate-vulkan` and is parked there, not tracked here. It does not
@@ -46,23 +46,29 @@ The first reviewable foundation is complete:
   contract, and the UI discovers and orders enabled cameras through it.
 - Camera cards use go2rtc's maintained MSE player, keeping media decode outside
   WASM and the stream inside one TCP connection.
-- The event history shows the 10 most recent detections with retained recordings,
-  cropped event snapshots, unambiguous browser-local timestamps, camera names
-  and entered zones. Mobile layouts initially collapse the list to four events.
-- Events with retained recordings open in a native browser video player through
-  Frigate's authenticated clip endpoint.
+- The event history shows Frigate review activity from the last six hours with
+  review thumbnails, unambiguous browser-local timestamps, camera names and
+  entered zones. It can be filtered to alerts, detections or significant motion;
+  mobile layouts initially collapse the list to four entries.
+- Events is also a distinct `/events` route with an uncollapsed review feed, a
+  touch-friendly 21-day range calendar with highest-severity activity dots, and
+  the same activity filters. Days without retained footage are dimmed using the
+  shared recording-availability contract, and selected reviews play Frigate's
+  high-resolution review clip. Calendar queries use local-day boundaries,
+  including 23- and 25-hour daylight-saving days.
 - Continuous recordings can be selected by camera with common range shortcuts
-  or by clicking a calendar day. Each contiguous recording in the range gets a native
-  fragmented-MP4 player, ordered from newest to oldest and loaded on demand.
-  Playback can be narrowed to recordings with motion, detections or alerts; the
-  unfiltered view remains the default. Idle recordings show a lazily loaded
-  frame from the footage and become video players when selected.
+  or by tapping the start and end of a calendar range. A single player follows
+  the selected point on the availability timeline.
 - Calendar selections accept start/end times and summarize each day's highest
   review severity as motion, detection or alert. Days without retained footage
   are disabled using Frigate's camera-specific recording summary.
-- Recordings is a distinct `/recordings` client-side route. Event cards link to
-  the corresponding event playback on that page, while the dashboard keeps live
-  view and recent activity focused on initial navigation.
+- Recordings is a distinct `/recordings` client-side route, while the dashboard
+  keeps live view and recent activity focused on initial navigation.
+- Selected recording ranges expose retained spans on a timeline. Its playhead
+  snaps gaps to available footage, shows review activity and playable motion
+  recording ranges across the full selection, and uses Frigate's low-resolution
+  preview videos for responsive seeking. Activity playback advances through the
+  next chronological motion, detection or alert and stops after the final item.
 - `make serve-ui` forwards Frigate and go2rtc from Kubernetes and serves the UI
   with live reload; camera discovery, playback and recent events are verified
   against the running `icams` deployment in Chromium through Playwright.
@@ -78,7 +84,7 @@ as the fallback for direct client-side route navigation. The release artifact is
 plain static content under `target/site`, including a separate recording-route
 WASM payload that is fetched only when Recordings is opened.
 
-The next slice is timeline navigation over recording availability.
+The next timeline slice is adding zoom for long recording ranges.
 
 Known recording-browser issues:
 
@@ -223,6 +229,12 @@ driver.
 These are what the rest of the pod depends on, and they are small enough to write
 down:
 
+- **Review media availability is explicit and independent.** A review record can
+  outlive its thumbnail, snapshot or recording, and each asset can have a
+  different retention policy. Corvette's API must report thumbnail/snapshot and
+  playable-clip availability as separate current capabilities. Clients must not
+  infer video availability from the existence of a review or discover it by
+  assigning a media URL and interpreting a `404`.
 - **`vod_mode mapped` + `vod_upstream_location /api`.** nginx-vod asks `/api` for
   a JSON mapping of a playback request to files on disk, then reads them itself.
   Whatever serves `/api` has to answer that, or recording playback stops working.
