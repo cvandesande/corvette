@@ -1,0 +1,10 @@
+[package]
+name = "ncnn-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Raw FFI over ncnn's C API, plus the GPU enumeration it is missing"
+links = "ncnn"
+
+[build-dependencies]
+cc = "1"

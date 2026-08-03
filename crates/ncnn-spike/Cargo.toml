@@ -1,0 +1,9 @@
+[package]
+name = "ncnn-spike"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Runs the frigate-vulkan detector's inference path through ncnn's C API from Rust"
+
+[dependencies]
+ncnn-sys = { path = "../ncnn-sys" }

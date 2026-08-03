@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1.7
+#
+# ncnn-from-Rust spike. Three stages: ncnn built from source with Vulkan, the
+# Rust binary linked against it, and a runtime carrying only the Mesa/Vulkan
+# stack. Trixie throughout, matching the Python image the results are compared
+# against (frigate-vulkan's docker/Dockerfile.py313) so Mesa and glibc are the
+# same generation on both sides of the comparison.
+ARG NCNN_TAG=20260526
+ARG DEBIAN_IMAGE=debian:trixie
+ARG RUST_IMAGE=rust:1-trixie
+
+FROM ${DEBIAN_IMAGE} AS ncnn-builder
+ARG NCNN_TAG
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates cmake git libvulkan-dev ninja-build pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+# --recursive: glslang is a submodule, and Vulkan builds need it to compile
+# shaders at load time.
+RUN git clone --depth 1 --branch "${NCNN_TAG}" --recursive https://github.com/Tencent/ncnn /src/ncnn
+WORKDIR /src/ncnn
+# Shared rather than static so glslang and the Vulkan loader stay ncnn's link
+# problem rather than becoming build.rs's.
+RUN cmake -G Ninja -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/ncnn \
+        -DNCNN_VULKAN=ON \
+        -DNCNN_SHARED_LIB=ON \
+        -DNCNN_BUILD_EXAMPLES=OFF \
+        -DNCNN_BUILD_TOOLS=OFF \
+        -DNCNN_BUILD_BENCHMARK=OFF \
+        -DNCNN_BUILD_TESTS=OFF \
+    && cmake --build build -j"$(nproc)" \
+    && cmake --install build
+
+FROM ${RUST_IMAGE} AS rust-builder
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libvulkan-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=ncnn-builder /opt/ncnn /opt/ncnn
+ENV NCNN_DIR=/opt/ncnn
+WORKDIR /src
+COPY Cargo.toml ./
+COPY crates crates
+RUN cargo build --release --bin ncnn-spike
+
+FROM ${DEBIAN_IMAGE} AS spike
+# mesa-vulkan-drivers is both RADV and lavapipe -- the point, not an accident:
+# the spike has to prove it can tell them apart.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libgomp1 libvulkan1 mesa-vulkan-drivers \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=ncnn-builder /opt/ncnn/lib /opt/ncnn/lib
+COPY --from=rust-builder /src/target/release/ncnn-spike /usr/local/bin/ncnn-spike
+ENV LD_LIBRARY_PATH=/opt/ncnn/lib
+ENTRYPOINT ["/usr/local/bin/ncnn-spike"]
