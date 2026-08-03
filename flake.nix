@@ -16,10 +16,11 @@
       rust-overlay,
     }:
     let
-      # amd64 only, matching the packaging decision in docs/roadmap.md -- the
-      # Vulkan behaviour this project exists to pin down is AMD-discrete-GPU
-      # behaviour.
-      systems = [ "x86_64-linux" ];
+      # arm64 is unvalidated rather than unsupported; see docs/roadmap.md.
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
       forAllSystems =
         f:
         nixpkgs.lib.genAttrs systems (

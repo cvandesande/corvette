@@ -152,19 +152,30 @@ Worth keeping in proportion: an NVR UI is lists, a grid of `<video>` elements an
 a timeline scrubber. It is not a heavy reactive application, and the framework
 choice should not become the project.
 
-## Architecture: amd64-only
+## Architecture: x86_64 and aarch64, one of them tested
 
-`flake.nix` declares `systems = [ "x86_64-linux" ]` deliberately. Revisit only if
-an arm64 machine actually becomes a deployment target rather than a machine that
-happens to be arm64.
+`flake.nix` builds for both. **arm64 is unvalidated, not unsupported**, and the
+distinction is the whole of this section: what is missing is hardware to test on,
+not code.
 
-The cost is not evenly spread, and the expensive part is ours: ncnn is a
-from-source CMake build with `NCNN_VULKAN=ON` and no cross-compilation setup, so
-arm64 means either a native arm64 builder or QEMU emulation for the longest stage
-in the build. Multi-arch also doubles the validation surface -- the spike harness
-and any soak would both need an arm64 run to mean anything, and the Vulkan/RADV
-behaviour this project exists to pin down is AMD-GPU behaviour that an arm64
-machine here does not have.
+Nothing here is x86-specific. The FFI is `c_int`- and pointer-shaped, the C++ shim
+touches no intrinsics, and ncnn's Vulkan backend is mobile-first -- if anything it
+is better exercised on ARM than on desktop x86. A Nix build on an aarch64 host
+compiles ncnn natively, so the cross-compilation problem never arises; it is only
+the *container* path that would need a native arm64 builder or QEMU for the
+longest stage of the build.
+
+The amd64-only decision this inherited belonged to `frigate-vulkan`, and does not
+transfer. That repo exists to pin down RADV behaviour on specific AMD discrete
+cards -- gfx803, gfx906 -- so for it, multi-arch doubles a soak matrix whose whole
+point is hardware that no arm64 machine has. Neither of those is true here: this
+repo is bindings and an NVR, and its correctness is not a property of one vendor's
+driver.
+
+One concrete gap if anyone runs this on arm64: `scripts/run_spike.sh` needs
+`frigate-vulkan:py313` for the Python side of the comparison, and that image is
+built amd64-only. The Rust binary runs fine; the *parity* half of the harness
+needs that image built for arm64 first.
 
 ## Contracts a Rust NVR must honour
 
