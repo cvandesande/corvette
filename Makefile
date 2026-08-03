@@ -18,7 +18,9 @@ check-nix:
 	nixfmt --check flake.nix
 
 check-ui:
-	cd crates/corvette-ui && NO_COLOR=false trunk build --release
+	NO_COLOR=false cargo leptos build --release --split
+	cp crates/corvette-ui/public/app.html target/site/index.html
+	playwright test
 
 check-whitespace:
 	git diff --check

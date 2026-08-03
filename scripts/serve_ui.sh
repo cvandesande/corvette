@@ -63,5 +63,9 @@ if ! curl --fail --silent --output /dev/null \
 fi
 
 echo "Open http://$UI_ADDRESS:$UI_PORT/ in your browser."
-cd "$REPO/crates/corvette-ui"
-NO_COLOR=false trunk serve --address "$UI_ADDRESS" --port "$UI_PORT"
+cd "$REPO"
+NO_COLOR=false \
+  LEPTOS_SITE_ADDR="$UI_ADDRESS:$UI_PORT" \
+  FRIGATE_ADDRESS="127.0.0.1:$FRIGATE_LOCAL_PORT" \
+  GO2RTC_ADDRESS="127.0.0.1:$GO2RTC_LOCAL_PORT" \
+  cargo leptos watch --split

@@ -3,9 +3,25 @@ resolver = "3"
 members = [
     "crates/corvette-api",
     "crates/corvette-ui",
+    "crates/corvette-ui-server",
     "crates/ncnn-sys",
     "crates/ncnn-spike",
 ]
+
+[[workspace.metadata.leptos]]
+name = "corvette-ui"
+bin-package = "corvette-ui-server"
+lib-package = "corvette-ui"
+output-name = "corvette"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "crates/corvette-ui/styles.css"
+assets-dir = "crates/corvette-ui/public"
+lib-features = ["split"]
+lib-default-features = false
+bin-default-features = false
+site-addr = "127.0.0.1:8080"
+reload-port = 8081
 
 [workspace.package]
 version = "0.1.0"

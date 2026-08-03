@@ -15,7 +15,7 @@ and nothing there is pinned to a Rust toolchain.
 | | State |
 | --- | --- |
 | **Stage 2, the ncnn-from-Rust spike** | **Done, 2026-08-03.** The premise holds; see [ncnn-spike.md](ncnn-spike.md) |
-| **Stage 0, the Leptos UI** | **In progress, started 2026-08-03.** Live view, recent events and recording playback work. Recordings now has a distinct route; migrating the build to split WASM is next. |
+| **Stage 0, the Leptos UI** | **In progress, started 2026-08-03.** Live view, recent events and recording playback work. Cargo Leptos now splits the recording route into a lazy WASM payload; timeline navigation is next. |
 
 Packaging work -- the distroless split pod, retiring the Frigate donor image --
 belongs to `frigate-vulkan` and is parked there, not tracked here. It does not
@@ -67,29 +67,18 @@ The first reviewable foundation is complete:
   with live reload; camera discovery, playback and recent events are verified
   against the running `icams` deployment in Chromium through Playwright.
 - The pinned Rust toolchain includes `wasm32-unknown-unknown`, and the Nix
-  development shell provides Trunk, Node.js and a Chromium-only Playwright
+  development shell provides Cargo Leptos, Node.js and a Chromium-only Playwright
   browser bundle.
 - `make check` builds an optimized WASM bundle in addition to running the
   repository's Rust, C++, shell, Nix and whitespace checks.
 
-The next slice is migrating the UI build from Trunk to `cargo leptos --split`.
-The recording page already has a Leptos `#[lazy_route]` boundary behind the
-`split` Cargo feature, but the feature must remain disabled in Trunk builds:
-Trunk leaves Leptos's generated `__wasm_split_placeholder__` module unresolved
-and the application cannot mount. The migration is complete when:
+Cargo Leptos builds the UI with `--split` for development and release. The local
+server preserves the Frigate and go2rtc proxies and serves the application shell
+as the fallback for direct client-side route navigation. The release artifact is
+plain static content under `target/site`, including a separate recording-route
+WASM payload that is fetched only when Recordings is opened.
 
-- development serving and the release build use Cargo Leptos with `--split`;
-- the existing Frigate and go2rtc development proxies still work;
-- direct navigation to `/recordings` works through the development and deployed
-  static-file fallback;
-- the release output contains a separate recording-route WASM payload, and a
-  browser network test proves it is not fetched on the dashboard but is fetched
-  when Recordings is opened; and
-- `make check`, the Nix development shell and the repository documentation no
-  longer depend on Trunk.
-
-After the split-build migration, continue with timeline navigation over recording
-availability.
+The next slice is timeline navigation over recording availability.
 
 Known recording-browser issues:
 
@@ -102,7 +91,7 @@ Known recording-browser issues:
 
 Stage 0 is worth doing on its own merits even if nothing after it happens: it
 replaces 21MB of React, and it is what makes stage 1 safe, since a UI you own is
-a contract you own. The trunk/wasm build is now proved; replacing the React
+a contract you own. The split-WASM build is now proved; replacing the React
 application is not. Note the dependency though -- stage 0 is where the Leptos
 bet is placed, and the case for Leptos over a TypeScript framework rests on
 stages 3-5 actually landing. See "UI stack" below.

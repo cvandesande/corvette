@@ -118,23 +118,28 @@
           packages = [
             (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
             self.packages.${pkgs.stdenv.hostPlatform.system}.ncnn
+            pkgs.binaryen
+            pkgs.cargo-leptos
             pkgs.clang-tools
             pkgs.cmake
             pkgs.gnumake
             pkgs.nixfmt
+            pkgs.nginx
             pkgs.nodejs_24
             pkgs.pkg-config
             pkgs.playwright-driver
+            pkgs.playwright-test
             pkgs.shellcheck
-            pkgs.trunk
             pkgs.vulkan-loader
             pkgs.vulkan-tools
+            pkgs.wasm-bindgen-cli
           ];
           NCNN_DIR = "${self.packages.${pkgs.stdenv.hostPlatform.system}.ncnn}";
           PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.selectBrowsers {
             withFirefox = false;
             withWebkit = false;
           }}";
+          PLAYWRIGHT_TEST_PATH = "${pkgs.playwright-test}/lib/node_modules/@playwright/test";
           PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
         };
       });

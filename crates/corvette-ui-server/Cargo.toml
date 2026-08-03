@@ -1,0 +1,10 @@
+[package]
+name = "corvette-ui-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Development server for the Corvette browser interface"
+
+[lints]
+workspace = true

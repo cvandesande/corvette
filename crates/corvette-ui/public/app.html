@@ -6,7 +6,11 @@
     <meta name="theme-color" content="#101516">
     <meta name="description" content="Corvette network video recorder">
     <title>Corvette</title>
-    <link data-trunk rel="css" href="styles.css">
+    <link rel="stylesheet" href="/pkg/corvette.css">
+    <script type="module">
+      import init from "/pkg/corvette.js";
+      init("/pkg/corvette.wasm");
+    </script>
   </head>
   <body></body>
 </html>

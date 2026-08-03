@@ -38,7 +38,7 @@ docker build -f docker/Dockerfile.spike --target lint .   # clippy + rustfmt gat
 `~/dockers/talos/tirnanog/generated/kubeconfig`. It forwards Frigate's API and
 go2rtc, using MSE so live media stays inside the TCP tunnel. Override
 `FRIGATE_KUBECONFIG`, `FRIGATE_NAMESPACE`, `FRIGATE_SERVICE`, or
-`FRIGATE_POD_SELECTOR` for another deployment. Press Ctrl-C to stop Trunk and
+`FRIGATE_POD_SELECTOR` for another deployment. Press Ctrl-C to stop Cargo Leptos and
 both port-forwards.
 
 Lints are deliberately loud: clippy's `pedantic`, `nursery` and `cargo` groups
@@ -52,7 +52,8 @@ is not enabled as a group, on upstream's own advice. See the bottom of
 | Path | What |
 | --- | --- |
 | `crates/corvette-api` | shared HTTP wire contracts for the UI and future Rust service |
-| `crates/corvette-ui` | Leptos client-side UI, built to WebAssembly with Trunk |
+| `crates/corvette-ui` | Leptos client-side UI, built as split WebAssembly with Cargo Leptos |
+| `crates/corvette-ui-server` | static fallback and Frigate/go2rtc proxies used by local UI development |
 | `crates/ncnn-sys` | raw FFI over ncnn's C API, plus `csrc/c_api_ext.cpp` -- the GPU enumeration the C API is missing |
 | `crates/ncnn-spike` | the benchmark/parity binary |
 | `docker/Dockerfile.spike` | builds ncnn from source with `NCNN_VULKAN=ON`, then the Rust binary |

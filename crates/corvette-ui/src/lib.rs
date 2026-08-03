@@ -4,7 +4,6 @@
 // syn, thiserror, and convert_case; this binary does not select any of them directly.
 #![allow(clippy::multiple_crate_versions)]
 
-use leptos::mount::mount_to_body;
 use leptos::prelude::*;
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
@@ -26,8 +25,9 @@ const NAVIGATION: [(&str, &str); 4] = [
     ("System", "/#system"),
 ];
 
-fn main() {
-    mount_to_body(App);
+#[wasm_bindgen::prelude::wasm_bindgen(start)]
+pub fn mount() {
+    leptos::mount::mount_to_body(App);
 }
 
 /// Renders the top-level Corvette application shell.
@@ -588,19 +588,26 @@ fn RangePlayback(range: RecordingRange) -> impl IntoView {
 #[component]
 fn RecordingList(clips: Vec<RecordingClip>, reviews: Vec<ReviewSegment>) -> impl IntoView {
     let context = expect_context::<RecordingContext>();
-    let filter = context.recording_filter.get();
-    let clips = recordings_for_filter(clips, &reviews, filter);
-    if clips.is_empty() {
-        return view! { <p class="recording-empty" role="status">{format!(
-            "No recordings overlap {} activity in this range.",
-            filter.label().to_lowercase(),
-        )}</p> }
-        .into_any();
-    }
+    let filter_context = context.clone();
     view! {
-        <div class="recording-list" aria-label="Selected recordings">
-            {clips.into_iter().map(|clip| view! { <RecordingPreview clip/> }).collect_view()}
-        </div>
+        {move || {
+            let filter = filter_context.recording_filter.get();
+            let clips = recordings_for_filter(clips.clone(), &reviews, filter);
+            if clips.is_empty() {
+                return view! { <p class="recording-empty" role="status">{format!(
+                    "No recordings overlap {} activity in this range.",
+                    filter.label().to_lowercase(),
+                )}</p> }
+                .into_any();
+            }
+            view! {
+                <div class="recording-list" aria-label="Selected recordings">
+                    {clips.into_iter().map(|clip| view! {
+                        <RecordingPreview clip/>
+                    }).collect_view()}
+                </div>
+            }.into_any()
+        }}
         {move || context.recording_failed.get().then(|| view! {
             <p class="recording-error" role="alert">"One or more recordings could not be loaded."</p>
         })}
