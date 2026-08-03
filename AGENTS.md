@@ -9,6 +9,10 @@ control flow, state, contracts, error handling, comments, tests, change hygiene,
 and file layout. More specific conventions already established in a file or
 subtree take precedence, as the guide itself specifies.
 
+Frigate's source is available locally at `~/github/frigate`. Consult that checkout
+for upstream API contracts and implementation details before using an external
+copy or inferring Frigate behavior.
+
 When changing this repository:
 
 - Inspect nearby code and existing project-wide helpers before introducing a new
