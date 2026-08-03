@@ -41,7 +41,10 @@ because nginx is already the router either way.
 
 The first reviewable foundation is complete:
 
-- `crates/corvette-ui` provides a responsive Leptos CSR application shell.
+- `crates/corvette-ui` provides a responsive Leptos CSR application shell. It is
+  split by concern -- entry point and routes, shared chrome, one module per
+  page, and the activity, calendar, media, timeline and local-time vocabularies
+  they share -- so that no page's logic has to be read through another's.
 - `crates/corvette-api` owns the shared subset of Frigate's `/api/config`
   contract, and the UI discovers and orders enabled cameras through it.
 - Camera cards use go2rtc's maintained MSE player, keeping media decode outside

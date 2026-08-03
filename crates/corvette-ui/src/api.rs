@@ -8,11 +8,8 @@
 
 // Browser fetch futures are confined to the WASM thread and cannot implement Send.
 #![allow(clippy::future_not_send)]
-// `pub` here would trip the workspace's denied `unreachable_pub`, since this
-// module is private; `pub(super)` is what remains, and it trips this lint for
-// the same reason. Neither visibility satisfies both lints.
-#![allow(clippy::redundant_pub_crate)]
 
+use crate::activity::MOTION_BUCKET_SECONDS;
 use corvette_api::{
     Camera, Event, FrigateConfig, MotionActivity, PreviewClip, RecordingSegment, ReviewEvent,
     ReviewSegment,
@@ -90,8 +87,6 @@ pub(super) async fn fetch_motion_activity(
     after: f64,
     before: f64,
 ) -> Result<Vec<MotionActivity>, String> {
-    const MOTION_BUCKET_SECONDS: u32 = 30;
-
     let path = format!(
         "/api/review/activity/motion?cameras=all&after={after}&before={before}&scale={MOTION_BUCKET_SECONDS}"
     );
