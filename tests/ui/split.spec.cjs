@@ -79,128 +79,167 @@ test("recordings route supports direct navigation", async ({ page }) => {
   await expect(page.getByRole("link", { name: "Recordings" })).toBeVisible();
 });
 
-test("recording timeline exposes availability and review activity", async ({ page }) => {
-  const now = Date.now() / 1000;
-  const recordingDays = recentRecordingDays(21);
-  await page.addInitScript(() => {
-    HTMLMediaElement.prototype.play = function play() {
-      Object.defineProperty(this, "paused", { configurable: true, get: () => false });
-      this.dispatchEvent(new Event("play"));
-      return Promise.resolve();
-    };
+test.describe("recording timeline", () => {
+  // One camera with two retained spans in the last hour: an earlier one that
+  // recorded motion, and a later one that did not. Two reviews sit inside the
+  // window, the first of them instantaneous.
+  let now;
+
+  test.beforeEach(async ({ page }) => {
+    now = Date.now() / 1000;
+    await page.addInitScript(() => {
+      HTMLMediaElement.prototype.play = function play() {
+        Object.defineProperty(this, "paused", { configurable: true, get: () => false });
+        this.dispatchEvent(new Event("play"));
+        return Promise.resolve();
+      };
+    });
+    await page.route("**/api/config", (route) =>
+      route.fulfill({
+        json: {
+          cameras: {
+            front: { enabled: true, friendly_name: "Front", ui: { order: 0 } },
+          },
+        },
+      }),
+    );
+    await page.route("**/api/events?*", (route) => route.fulfill({ json: [] }));
+    await page.route("**/api/review?*", (route) =>
+      route.fulfill({
+        json: [
+          { start_time: now - 1800, end_time: now - 1800, severity: "detection" },
+          { start_time: now - 200, end_time: now - 190, severity: "alert" },
+        ],
+      }),
+    );
+    await page.route("**/api/recordings/summary?*", (route) =>
+      route.fulfill({ json: recentRecordingDays(21) }),
+    );
+    await page.route("**/api/front/recordings?*", (route) =>
+      route.fulfill({
+        json: [
+          { start_time: now - 510, end_time: now - 480, motion: 1 },
+          { start_time: now - 210, end_time: now - 180, motion: null },
+        ],
+      }),
+    );
+    await page.route("**/api/preview/front/start/*/end/*", (route) =>
+      route.fulfill({
+        json: [
+          {
+            camera: "front",
+            src: "/clips/previews/front/hour.mp4",
+            type: "video/mp4",
+            start: now - 3600,
+            end: now,
+          },
+        ],
+      }),
+    );
+    await page.route("**/clips/previews/front/hour.mp4", (route) =>
+      route.fulfill({ contentType: "video/mp4", body: Buffer.alloc(0) }),
+    );
+
+    await page.goto("/recordings");
+    await page.getByRole("button", { name: "Last hour" }).click();
+    await expect(page.getByRole("region", { name: "Recording timeline" })).toBeVisible();
   });
-  await page.route("**/api/config", (route) =>
-    route.fulfill({
-      json: {
-        cameras: {
-          front: { enabled: true, friendly_name: "Front", ui: { order: 0 } },
-        },
-      },
-    }),
-  );
-  await page.route("**/api/events?*", (route) => route.fulfill({ json: [] }));
-  await page.route("**/api/review?*", (route) =>
-    route.fulfill({
-      json: [
-        { start_time: now - 1800, end_time: now - 1800, severity: "detection" },
-        { start_time: now - 200, end_time: now - 190, severity: "alert" },
-      ],
-    }),
-  );
-  await page.route("**/api/recordings/summary?*", (route) =>
-    route.fulfill({ json: recordingDays }),
-  );
-  await page.route("**/api/front/recordings?*", (route) =>
-    route.fulfill({
-      json: [
-        { start_time: now - 510, end_time: now - 480, motion: 1 },
-        { start_time: now - 210, end_time: now - 180, motion: null },
-      ],
-    }),
-  );
-  await page.route("**/api/preview/front/start/*/end/*", (route) =>
-    route.fulfill({
-      json: [
-        {
-          camera: "front",
-          src: "/clips/previews/front/hour.mp4",
-          type: "video/mp4",
-          start: now - 3600,
-          end: now,
-        },
-      ],
-    }),
-  );
-  await page.route("**/clips/previews/front/hour.mp4", (route) =>
-    route.fulfill({ contentType: "video/mp4", body: Buffer.alloc(0) }),
-  );
 
-  await page.goto("/recordings");
-  await page.getByRole("button", { name: "Last hour" }).click();
-  await expect(
-    page.getByRole("region", { name: "Recording timeline" }),
-  ).toBeVisible();
-  const availableSpans = page.locator(".timeline-availability");
-  await expect(availableSpans).toHaveCount(2);
-  const activitySpans = page.locator(".timeline-activity");
-  await expect(activitySpans).toHaveCount(3);
-  const motionRecording = page.locator(".timeline-motion-recording");
-  await expect(motionRecording).toHaveCount(1);
-  await expect(page.locator(".timeline-activity.activity-detection.timeline-point"))
-    .toHaveCount(1);
-  await expect(page.locator(".timeline-player")).toHaveAttribute(
-    "src",
-    "/clips/previews/front/hour.mp4",
-  );
+  test("marks each retained span, motion span and review severity", async ({ page }) => {
+    await expect(page.locator(".timeline-availability")).toHaveCount(2);
+    await expect(page.locator(".timeline-activity")).toHaveCount(3);
+    await expect(page.locator(".timeline-motion-recording")).toHaveCount(1);
+    await expect(
+      page.locator(".timeline-activity.activity-detection.timeline-point"),
+    ).toHaveCount(1);
+  });
 
-  const playhead = page.getByRole("slider", { name: "Recording playhead" });
-  await expect
-    .poll(() => playhead.inputValue().then(Number))
-    .toBeCloseTo(now - 510, 0);
-  await motionRecording.click();
-  await expect
-    .poll(() => playhead.inputValue().then(Number))
-    .toBeCloseTo(now - 510, 0);
-  await page.locator(".timeline-player").dispatchEvent("ended");
-  await expect
-    .poll(() => playhead.inputValue().then(Number))
-    .toBeCloseTo(now - 200, 0);
-  await page.locator(".timeline-player").dispatchEvent("ended");
-  await expect
-    .poll(() => playhead.inputValue().then(Number))
-    .toBeCloseTo(now - 190, 0);
-  await expect(page.getByRole("button", { name: "Play", exact: true })).toBeVisible();
-  await playhead.evaluate((input, value) => {
-    input.value = value;
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  }, String(now - 300));
-  await expect
-    .poll(() => playhead.inputValue().then(Number))
-    .toBeCloseTo(now - 210, 0);
-  await page.getByRole("button", { name: "Play", exact: true }).click();
-  await expect(page.locator(".timeline-player")).toHaveAttribute(
-    "src",
-    new RegExp(`/api/front/start/${now - 210}/end/${now - 180}/clip\\.mp4`),
-  );
+  test("scrubs against Frigate's low-resolution preview video", async ({ page }) => {
+    await expect(page.locator(".timeline-player")).toHaveAttribute(
+      "src",
+      "/clips/previews/front/hour.mp4",
+    );
+  });
 
-  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-  const scrollBeforeDrag = await page.evaluate(() => window.scrollY);
-  const sliderBounds = await playhead.boundingBox();
-  expect(sliderBounds).not.toBeNull();
-  await page.mouse.move(sliderBounds.x + sliderBounds.width * 0.25, sliderBounds.y + 5);
-  await page.mouse.down();
-  await page.mouse.move(sliderBounds.x + sliderBounds.width * 0.75, sliderBounds.y + 5);
-  await page.mouse.up();
-  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeCloseTo(scrollBeforeDrag, 0);
+  test("advances through each later activity and stops after the last", async ({ page }) => {
+    const playhead = page.getByRole("slider", { name: "Recording playhead" });
+    await expect.poll(() => playhead.inputValue().then(Number)).toBeCloseTo(now - 510, 0);
 
-  await page.setViewportSize({ width: 390, height: 844 });
-  const recordingDayButtons = page
-    .getByRole("group", { name: "Recent days" })
-    .getByRole("button", { disabled: false });
-  await recordingDayButtons.nth(0).click();
-  await recordingDayButtons.nth(1).click();
-  await expect(page.locator(".calendar-grid button[aria-pressed='true']")).toHaveCount(2);
+    await page.locator(".timeline-motion-recording").click();
+    await expect.poll(() => playhead.inputValue().then(Number)).toBeCloseTo(now - 510, 0);
 
+    await page.locator(".timeline-player").dispatchEvent("ended");
+    await expect.poll(() => playhead.inputValue().then(Number)).toBeCloseTo(now - 200, 0);
+
+    await page.locator(".timeline-player").dispatchEvent("ended");
+    await expect.poll(() => playhead.inputValue().then(Number)).toBeCloseTo(now - 190, 0);
+    await expect(page.getByRole("button", { name: "Play", exact: true })).toBeVisible();
+  });
+
+  test("snaps a playhead time in a gap to the nearest retained span", async ({ page }) => {
+    const playhead = page.getByRole("slider", { name: "Recording playhead" });
+    await playhead.evaluate((input, value) => {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, String(now - 300));
+
+    await expect.poll(() => playhead.inputValue().then(Number)).toBeCloseTo(now - 210, 0);
+  });
+
+  test("plays the full-resolution clip once playback starts", async ({ page }) => {
+    const playhead = page.getByRole("slider", { name: "Recording playhead" });
+    await playhead.evaluate((input, value) => {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, String(now - 300));
+    await expect.poll(() => playhead.inputValue().then(Number)).toBeCloseTo(now - 210, 0);
+
+    await page.getByRole("button", { name: "Play", exact: true }).click();
+    await expect(page.locator(".timeline-player")).toHaveAttribute(
+      "src",
+      new RegExp(`/api/front/start/${now - 210}/end/${now - 180}/clip\\.mp4`),
+    );
+  });
+
+  test("dragging the playhead does not scroll the page", async ({ page }) => {
+    const playhead = page.getByRole("slider", { name: "Recording playhead" });
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    const scrollBeforeDrag = await page.evaluate(() => window.scrollY);
+    const sliderBounds = await playhead.boundingBox();
+    expect(sliderBounds).not.toBeNull();
+
+    await page.mouse.move(sliderBounds.x + sliderBounds.width * 0.25, sliderBounds.y + 5);
+    await page.mouse.down();
+    await page.mouse.move(sliderBounds.x + sliderBounds.width * 0.75, sliderBounds.y + 5);
+    await page.mouse.up();
+
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeCloseTo(scrollBeforeDrag, 0);
+  });
+
+  test("tapping two days on a phone selects a calendar range", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const recordingDayButtons = page
+      .getByRole("group", { name: "Recent days" })
+      .getByRole("button", { disabled: false });
+
+    await recordingDayButtons.nth(0).click();
+    await recordingDayButtons.nth(1).click();
+
+    await expect(page.locator(".calendar-grid button[aria-pressed='true']")).toHaveCount(2);
+  });
+
+  test("a cleared start time is reported instead of loading a range", async ({ page }) => {
+    await page.getByRole("textbox", { name: "From" }).fill("");
+    await page
+      .getByRole("group", { name: "Recent days" })
+      .getByRole("button", { disabled: false })
+      .nth(0)
+      .click();
+
+    await expect(page.getByRole("alert")).toContainText(
+      "Enter both times as 24-hour HH:MM before choosing a date.",
+    );
+  });
 });
 
 test("recent events are filtered review activity from the last six hours", async ({ page }) => {
