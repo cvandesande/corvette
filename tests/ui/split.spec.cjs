@@ -20,6 +20,21 @@ const consecutiveDates = (lastDate, count) =>
     return date.toISOString().slice(0, 10);
   });
 
+// Answers the recording-availability preflight with the whole requested range
+// retained, so a review's clip URL is reached rather than reported as expired.
+const retainRequestedRange = (route) => {
+  const params = new URL(route.request().url()).searchParams;
+  return route.fulfill({
+    json: [
+      {
+        start_time: Number(params.get("after")),
+        end_time: Number(params.get("before")),
+        motion: 1,
+      },
+    ],
+  });
+};
+
 const calendarDayLabel = (date) =>
   `${new Intl.DateTimeFormat("en-IE", { timeZone: "UTC" }).format(
     new Date(`${date}T00:00:00Z`),
@@ -328,6 +343,7 @@ test("recent events are filtered review activity from the last six hours", async
       ],
     });
   });
+  await page.route("**/api/front/recordings?*", retainRequestedRange);
   await page.route("**/clips/review/*.webp", (route) =>
     route.fulfill({ contentType: "image/webp", body: Buffer.alloc(0) }),
   );
@@ -364,6 +380,50 @@ test("recent events are filtered review activity from the last six hours", async
   await expect(
     page.getByRole("heading", { name: "No events in the last 6 hours" }),
   ).toBeVisible();
+});
+
+test("a review whose footage expired reports the absence, not a media error", async ({
+  page,
+}) => {
+  await page.route("**/api/config", (route) => route.fulfill({ json: { cameras: {} } }));
+  await page.route("**/api/review?*", (route) => {
+    const before = Number(new URL(route.request().url()).searchParams.get("before"));
+    return route.fulfill({
+      json: [
+        {
+          id: "expired-review",
+          camera: "front",
+          start_time: before - 60,
+          end_time: before - 50,
+          severity: "alert",
+          thumb_path: "/media/frigate/clips/review/alert.webp",
+          data: { objects: ["person"], zones: [], audio: [] },
+        },
+      ],
+    });
+  });
+  await page.route("**/api/review/activity/motion?*", (route) => route.fulfill({ json: [] }));
+  // The review outlived its recording: Frigate answers a clip request for this
+  // range with a JSON 400 that a <video> element would call an unplayable file.
+  await page.route("**/api/front/recordings?*", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/front/start/*/end/*/clip.mp4", (route) =>
+    route.fulfill({
+      status: 400,
+      json: { success: false, message: "No recordings found for the specified time range" },
+    }),
+  );
+  await page.route("**/clips/review/*.webp", (route) =>
+    route.fulfill({ contentType: "image/webp", body: Buffer.alloc(0) }),
+  );
+
+  await page.goto("/");
+  await page.locator(".event-card").getByRole("button").click();
+  const playback = page.getByRole("dialog", { name: "Selected event playback" });
+  await expect(playback).toBeVisible();
+  await expect(playback.getByRole("alert")).toHaveText(
+    "Frigate has no retained recording for this activity.",
+  );
+  await expect(playback.locator("video")).toHaveCount(0);
 });
 
 test("events route browses a selected day and filters severity", async ({ page }) => {
@@ -411,6 +471,7 @@ test("events route browses a selected day and filters severity", async ({ page }
       json: [{ start_time: after + 180, motion: 25, camera: "front" }],
     });
   });
+  await page.route("**/api/front/recordings?*", retainRequestedRange);
   await page.route("**/clips/review/*.webp", (route) =>
     route.fulfill({ contentType: "image/webp", body: Buffer.alloc(0) }),
   );

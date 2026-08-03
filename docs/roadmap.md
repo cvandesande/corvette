@@ -97,11 +97,13 @@ WASM payload that is fetched only when Recordings is opened.
 
 The next timeline slice is adding zoom for long recording ranges.
 
-Known recording-browser issues:
-
-- Frigate returns a JSON `400` when a selected range has no recordings, but a
-  `<video>` element reports that as an unsupported MIME type. Preflight the VOD
-  mapping and show Frigate's actual error before assigning the media URL.
+Selecting a review whose footage has expired no longer reports a browser media
+error. Frigate answers a clip request for a range it has no recordings for with
+a JSON `400`, which a `<video>` element surfaces as an unsupported MIME type, so
+review playback now asks which segments are retained before naming a media URL
+and reports an absent recording as absent. This is the review-media contract
+below applied to the client: availability is asked for, not inferred from a
+failed media load.
 
 The date-to-timestamp conversion that produced a reported July 31 selection
 requesting August 1 was audited against every IANA zone. Two findings:

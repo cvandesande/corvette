@@ -141,14 +141,24 @@ fn ReviewPlayback(
             _ = button.focus();
         }
     });
-    let clip_url = RecordingRange {
+    let range = RecordingRange {
         camera: review.camera.clone(),
         start_time: review.start_time,
         end_time: review
             .end_time
             .unwrap_or_else(|| js_sys::Date::now() / 1_000.0),
-    }
-    .clip_url();
+    };
+    let clip_url = StoredValue::new(range.clip_url());
+    // A review outlives the footage it was recorded from, and Frigate answers a
+    // clip request for an expired range with a JSON 400 that a <video> element
+    // reports as an unsupported MIME type. Ask which segments are retained
+    // before naming a media URL, so the reader is told the clip is gone rather
+    // than that their browser cannot play it.
+    let retained_segments = LocalResource::new(move || {
+        let camera = range.camera.clone();
+        let (start_time, end_time) = (range.start_time, range.end_time);
+        async move { crate::api::fetch_recording_segments(&camera, start_time, end_time).await }
+    });
     let heading = review_event_title(&review);
     view! {
         <div
@@ -175,14 +185,36 @@ fn ReviewPlayback(
                         on:click=move |_| selected_review.set(None)
                     >"Close"</button>
                 </div>
-                <video class="recording-player" src=clip_url controls autoplay playsinline
-                    on:error=move |_| playback_failed.set(true)
-                >"This browser cannot play the event recording."</video>
-                {move || playback_failed.get().then(|| view! {
-                    <p class="recording-error" role="alert">
-                        "The high-resolution clip is not available from Frigate."
-                    </p>
-                })}
+                {move || match retained_segments.get() {
+                    None => view! { <Status
+                        heading="Checking availability"
+                        detail="Asking Frigate whether this activity still has retained footage."
+                        glyph=StatusGlyph::Recording
+                    /> }.into_any(),
+                    Some(Err(error)) => view! {
+                        <p class="recording-error" role="alert">{error}</p>
+                    }.into_any(),
+                    Some(Ok(segments)) if segments.is_empty() => view! {
+                        <p class="recording-error" role="alert">
+                            "Frigate has no retained recording for this activity."
+                        </p>
+                    }.into_any(),
+                    Some(Ok(_)) => view! {
+                        <video
+                            class="recording-player"
+                            src=clip_url.get_value()
+                            controls
+                            autoplay
+                            playsinline
+                            on:error=move |_| playback_failed.set(true)
+                        >"This browser cannot play the event recording."</video>
+                        {move || playback_failed.get().then(|| view! {
+                            <p class="recording-error" role="alert">
+                                "The high-resolution clip is not available from Frigate."
+                            </p>
+                        })}
+                    }.into_any(),
+                }}
             </section>
         </div>
     }
