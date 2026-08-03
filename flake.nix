@@ -16,9 +16,9 @@
       rust-overlay,
     }:
     let
-      # amd64 only, matching the packaging decision in frigate-vulkan's
-      # docs/distroless-split-plan.md -- the Vulkan behaviour this project
-      # exists to pin down is AMD-discrete-GPU behaviour.
+      # amd64 only, matching the packaging decision in docs/roadmap.md -- the
+      # Vulkan behaviour this project exists to pin down is AMD-discrete-GPU
+      # behaviour.
       systems = [ "x86_64-linux" ];
       forAllSystems =
         f:

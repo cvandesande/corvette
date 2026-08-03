@@ -8,7 +8,7 @@ enumeration -- is closed by ~90 lines of C++ of ours, with no fork of ncnn.
 Run 2026-08-03 on liltig (Strix Halo, RADV GFX1151, Mesa 26.1.5 on the host /
 25.x in the images), ncnn tag 20260526, against the same YOLOv9-t models
 frigate-vulkan deploys. This is stage 2 of the roadmap in
-`frigate-vulkan/docs/distroless-split-plan.md`, done early and deliberately out
+[roadmap.md](roadmap.md), done early and deliberately out
 of dependency order: everything after it rests on this result.
 
 ## Result

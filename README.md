@@ -4,10 +4,10 @@ Rust work for the frigate-vulkan project: eventually a Leptos UI and an NVR
 behind it, with Frigate retired piece by piece. Today it is one thing only --
 the spike that decides whether any of that is worth starting.
 
-The plan this repo implements lives in the sibling repository,
-`frigate-vulkan`, at `docs/distroless-split-plan.md`. That repo keeps the
-ncnn/Vulkan detector plugin and the container packaging; nothing here is pinned
-to `FRIGATE_VERSION`, and nothing there is pinned to a Rust toolchain.
+The plan is [docs/roadmap.md](docs/roadmap.md) -- moved here from the sibling
+`frigate-vulkan` repository once the spike proved the premise. That repo keeps
+the ncnn/Vulkan detector plugin and the container packaging; nothing here is
+pinned to `FRIGATE_VERSION`, and nothing there is pinned to a Rust toolchain.
 
 ## The ncnn spike
 
