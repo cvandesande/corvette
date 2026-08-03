@@ -1779,12 +1779,18 @@ fn select_calendar_range(
 }
 
 fn recent_calendar_days(count: u32) -> Vec<CalendarDay> {
-    let today = js_sys::Date::new_0();
+    // Days are stepped back from local noon, not from the current time: a fixed
+    // 24-hour step crosses two date boundaries on a 23-hour daylight-saving day
+    // and none on a 25-hour one, so the strip loses the short day and repeats the
+    // long one. No transition moves noon far enough to change its calendar date.
+    const NOON_OFFSET_MILLIS: f64 = 43_200_000.0;
+
+    let noon = local_day_start(&js_sys::Date::new_0()).mul_add(1_000.0, NOON_OFFSET_MILLIS);
     (0..count)
         .rev()
         .map(|offset| {
             let date = js_sys::Date::new(&JsValue::from_f64(
-                f64::from(offset).mul_add(-86_400_000.0, today.get_time()),
+                f64::from(offset).mul_add(-86_400_000.0, noon),
             ));
             let start_time = local_day_start(&date);
             let start = js_sys::Date::new(&JsValue::from_f64(start_time * 1_000.0));

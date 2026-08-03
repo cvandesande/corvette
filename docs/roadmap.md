@@ -58,8 +58,9 @@ The first reviewable foundation is complete:
   touch-friendly 21-day range calendar with highest-severity activity dots, and
   the same activity filters. Days without retained footage are dimmed using the
   shared recording-availability contract, and selected reviews play Frigate's
-  high-resolution review clip. Calendar queries use local-day boundaries,
-  including 23- and 25-hour daylight-saving days.
+  high-resolution review clip. Calendar queries use local-day boundaries, and the
+  21-day strip steps calendar dates rather than fixed 24-hour spans, so 23- and
+  25-hour daylight-saving days are neither skipped nor repeated.
 - Continuous recordings can be selected by camera with common range shortcuts
   or by tapping the start and end of a calendar range. A single player follows
   the selected point on the availability timeline.
@@ -95,9 +96,22 @@ Known recording-browser issues:
 - Frigate returns a JSON `400` when a selected range has no recordings, but a
   `<video>` element reports that as an unsupported MIME type. Preflight the VOD
   mapping and show Frigate's actual error before assigning the media URL.
-- A reported July 31 selection requested August 1. Verify date-to-timestamp
-  conversion across the browser timezone and daylight-saving boundaries when
-  the first committed Playwright regression suite is added.
+
+The date-to-timestamp conversion that produced a reported July 31 selection
+requesting August 1 was audited against every IANA zone. Two findings:
+
+- The calendar strip stepped back a fixed 24 hours per day, which crosses two
+  date boundaries on a 23-hour daylight-saving day and none on a 25-hour one --
+  the short day vanished from the strip and the long one appeared twice, pushing
+  the oldest day off the end. Reproduced in 130 of 418 zones, and fixed by
+  stepping from local noon. Regression coverage is pinned to `America/New_York`
+  at both 2026 transitions in `tests/ui/split.spec.cjs`.
+- Converting a calendar date to local midnight is correct in all 418 zones, so
+  that conversion is not the source of the July 31 report. The likely origin is
+  the exclusive end bound: a single-day selection asks Frigate for everything
+  before the *next* local midnight, so browsing July 31 legitimately sends
+  `before` as August 1 00:00. Unconfirmed against the original observation --
+  reproduce it before treating the bound as the explanation.
 
 Stage 0 is worth doing on its own merits even if nothing after it happens: it
 replaces 21MB of React, and it is what makes stage 1 safe, since a UI you own is

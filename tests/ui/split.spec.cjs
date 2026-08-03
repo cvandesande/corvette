@@ -12,6 +12,51 @@ const recentRecordingDays = (count) =>
     }),
   );
 
+// Civil-date arithmetic, done in UTC where no daylight-saving shift can occur.
+const consecutiveDates = (lastDate, count) =>
+  Array.from({ length: count }, (_, index) => {
+    const date = new Date(`${lastDate}T00:00:00Z`);
+    date.setUTCDate(date.getUTCDate() - (count - 1 - index));
+    return date.toISOString().slice(0, 10);
+  });
+
+const calendarDayLabel = (date) =>
+  `${new Intl.DateTimeFormat("en-IE", { timeZone: "UTC" }).format(
+    new Date(`${date}T00:00:00Z`),
+  )}, recordings available`;
+
+test.describe("daylight-saving date conversion", () => {
+  test.use({ timezoneId: "America/New_York" });
+
+  const transitions = [
+    { day: "23-hour day", now: "2026-03-09T00:30:00-04:00", lastDate: "2026-03-09" },
+    { day: "25-hour day", now: "2026-11-01T23:30:00-05:00", lastDate: "2026-11-01" },
+  ];
+
+  for (const { day, now, lastDate } of transitions) {
+    test(`event calendar covers every local date across a ${day}`, async ({ page }) => {
+      const dates = consecutiveDates(lastDate, 21);
+      await page.clock.setFixedTime(new Date(now));
+      await page.route("**/api/recordings/summary?*", (route) =>
+        route.fulfill({ json: Object.fromEntries(dates.map((date) => [date, true])) }),
+      );
+      await page.route("**/api/review?*", (route) => route.fulfill({ json: [] }));
+      await page.route("**/api/review/activity/motion?*", (route) =>
+        route.fulfill({ json: [] }),
+      );
+
+      await page.goto("/events");
+      const eventDays = page.getByRole("group", { name: "Event days" }).getByRole("button");
+      await expect(eventDays).toHaveCount(21);
+      expect(
+        await eventDays.evaluateAll((buttons) =>
+          buttons.map((button) => button.getAttribute("aria-label")),
+        ),
+      ).toEqual(dates.map(calendarDayLabel));
+    });
+  }
+});
+
 test("recording payload loads only after recordings navigation", async ({ page }) => {
   const recordingPayloads = [];
   page.on("request", (request) => {
