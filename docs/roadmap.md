@@ -297,7 +297,14 @@ down:
   in the review-record response. Frigate's motion timestamp identifies the start
   of a sampling bucket, not an exact retained frame: media for that bucket must be
   addressed as a range. A point-in-time snapshot can land in a recording gap even
-  though the bucket contains playable footage.
+  though the bucket contains playable footage. Frigate builds this response by
+  loading the matching recording rows into pandas, resampling them into buckets,
+  and normalizing each hour. The Rust service should replace that per-request
+  dataframe with an ordered database query and a bounded-memory bucket reduction,
+  using SQL for filtering and Rust for the signed maximum and camera set. Keep
+  this aggregation server-side: returning raw recording telemetry would increase
+  transfer size, repeat the work in every open client, and expose storage-shaped
+  data instead of the compact activity contract clients need.
 - **One range semantic across every activity query.** Frigate's two activity
   endpoints answer the same `after`/`before` pair with different set logic.
   `/api/review` matches `start_time < before AND (end_time IS NULL OR end_time >
