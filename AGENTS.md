@@ -9,15 +9,22 @@ control flow, state, contracts, error handling, comments, tests, change hygiene,
 and file layout. More specific conventions already established in a file or
 subtree take precedence, as the guide itself specifies.
 
+GitHub issues are the source of truth for tracked work. Every planned feature,
+defect, investigation, or follow-up must have an issue before implementation
+begins. Issue #1 is the roadmap index; keep its linked issues current and close
+them when their stated outcome is complete. `docs/design/` owns durable
+architectural decisions and API contracts; it is not a backlog.
+
 Frigate's source is available locally at `~/github/frigate`. Consult that checkout
 for upstream API contracts and implementation details before using an external
 copy or inferring Frigate behavior.
 
 When a change uncovers a Frigate API incompatibility, ambiguous contract,
 surprising behavior, or upstream defect that should influence Corvette's own API,
-record the finding and the intended Corvette contract in `docs/roadmap.md`. Keep
-the note with the relevant API contract rather than leaving the rationale only in
-an issue, commit message, or compatibility workaround.
+record the finding and the intended Corvette contract in
+`docs/design/api-contracts.md`, and link it from the relevant GitHub issue. Keep
+the note with the relevant API contract rather than leaving the rationale only
+in an issue, commit message, or compatibility workaround.
 
 When changing this repository:
 
@@ -29,9 +36,10 @@ When changing this repository:
   fails when the defect is reintroduced whenever practical.
 - Run the formatters, linters, and tests relevant to every changed file. Use the
   Rust toolchain pinned by `rust-toolchain.toml`; `nix develop` provides it.
-- Before committing, compare the staged change with `docs/roadmap.md`. Update
-  completed status, current progress, and the next planned slice when the change
-  affects them; otherwise explicitly confirm that the roadmap remains accurate.
+- Before committing, compare the staged change with its GitHub issue and
+  `docs/design/`. Update or close the issue when its outcome or next step has
+  changed; update the design documents when an architectural decision or API
+  contract has changed. Otherwise explicitly confirm that both remain accurate.
 - Review the final diff against the full style guide before declaring the work
   complete. Report checks that could not be run and why.
 

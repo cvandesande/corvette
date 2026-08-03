@@ -16,7 +16,8 @@
       rust-overlay,
     }:
     let
-      # arm64 is unvalidated rather than unsupported; see docs/roadmap.md.
+      # arm64 is unvalidated rather than unsupported; see
+      # docs/design/architecture.md.
       systems = [
         "x86_64-linux"
         "aarch64-linux"

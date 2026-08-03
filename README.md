@@ -4,15 +4,17 @@ Rust work for the frigate-vulkan project: a Leptos UI and, eventually, an NVR
 behind it, with Frigate retired piece by piece. The ncnn/Vulkan spike has proved
 the detector path and the first UI foundation is now in place.
 
-The plan is [docs/roadmap.md](docs/roadmap.md) -- moved here from the sibling
-`frigate-vulkan` repository once the spike proved the premise. That repo keeps
-the ncnn/Vulkan detector plugin and the container packaging; nothing here is
-pinned to `FRIGATE_VERSION`, and nothing there is pinned to a Rust toolchain.
+Work is tracked from [GitHub issue #1][roadmap]. Architecture and API contracts
+live in [docs/design/](docs/design/). The sibling `frigate-vulkan` repository
+keeps the ncnn/Vulkan detector plugin and the container packaging; nothing here
+is pinned to `FRIGATE_VERSION`, and nothing there is pinned to a Rust toolchain.
+
+[roadmap]: https://github.com/cvandesande/corvette/issues/1
 
 ## The ncnn spike
 
-Everything on the roadmap after stage 2 assumes ncnn is usable from Rust with
-Vulkan. That assumption rests on ncnn's **C** API, which is narrower than the
+The planned Rust NVR assumes ncnn is usable from Rust with Vulkan. That
+assumption rests on ncnn's **C** API, which is narrower than the
 C++ API the Python detector uses -- it covers the entire inference path but has
 no GPU enumeration at all. See `docs/ncnn-spike.md` for the result.
 
@@ -60,6 +62,7 @@ is not enabled as a group, on upstream's own advice. See the bottom of
 | `scripts/` | the benchmark and device-selection harness |
 | `Makefile` | the repository-wide local and CI check entry point |
 | `flake.nix` | pinned toolchain, a Vulkan-enabled ncnn, and a dev shell |
+| `docs/design` | architecture and API contracts |
 | `docs/ncnn-spike.md` | findings |
 
 ## License
