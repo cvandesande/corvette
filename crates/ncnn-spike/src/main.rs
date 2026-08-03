@@ -53,12 +53,38 @@ impl Drop for Net {
     }
 }
 
+/// Owns an extractor for the duration of one inference.
+struct Extractor(ncnn_sys::ncnn_extractor_t);
+
+impl Drop for Extractor {
+    fn drop(&mut self) {
+        // SAFETY: self.0 came from ncnn_extractor_create and is dropped once.
+        unsafe { ncnn_extractor_destroy(self.0) }
+    }
+}
+
+/// Owns a Mat while preserving any separately owned backing buffer.
+struct Mat(ncnn_mat_t);
+
+impl Drop for Mat {
+    fn drop(&mut self) {
+        // SAFETY: self.0 came from an ncnn Mat constructor or extractor and is
+        // dropped once. ncnn does not free external backing storage here.
+        unsafe { ncnn_mat_destroy(self.0) }
+    }
+}
+
 struct Config {
     param_path: String,
     bin_path: String,
     size: c_int,
     elements: usize,
     iters: usize,
+}
+
+struct BlobNames {
+    input: CString,
+    output: CString,
 }
 
 struct Stats {
@@ -226,7 +252,7 @@ fn load_net(config: &Config, device: c_int) -> Result<(Net, f64), Failure> {
 /// The C API names blobs directly, so the `.param` parsing `ncnn.py` does by
 /// hand is not needed on this path -- but honour an override in case a model's
 /// declared outputs ever disagree with its last layer.
-fn blob_names(net: &Net) -> (String, String) {
+fn blob_names(net: &Net) -> Result<BlobNames, Failure> {
     // SAFETY: the net is loaded, so its blob tables are populated; the
     // returned strings are owned by the net, which outlives this call.
     let (input, output, inputs, outputs) = unsafe {
@@ -240,15 +266,19 @@ fn blob_names(net: &Net) -> (String, String) {
     let input = env::var("INPUT_BLOB").unwrap_or(input);
     let output = env::var("OUTPUT_BLOB").unwrap_or(output);
     eprintln!("ncnn-spike: blobs in={input} ({inputs} declared) out={output} ({outputs} declared)");
-    (input, output)
+    Ok(BlobNames {
+        input: CString::new(input)
+            .map_err(|_| "INPUT_BLOB contains an interior NUL byte".to_string())?,
+        output: CString::new(output)
+            .map_err(|_| "OUTPUT_BLOB contains an interior NUL byte".to_string())?,
+    })
 }
 
 /// One inference, structured like `NcnnDetector._extract`: a fresh extractor
 /// and a Mat borrowing the caller's buffer, which therefore has to outlive it.
 fn infer(
     net: &Net,
-    input_name: &CStr,
-    output_name: &CStr,
+    blob_names: &BlobNames,
     input: &mut [f32],
     size: c_int,
 ) -> Result<(Vec<f32>, Vec<c_int>), Failure> {
@@ -257,33 +287,46 @@ fn infer(
     // destroyed on every path out. The extract() output Mat is ours to destroy
     // per the C API.
     unsafe {
-        let mat =
+        let mat_handle =
             ncnn_mat_create_external_3d(size, size, 3, input.as_mut_ptr().cast(), ptr::null_mut());
-        if mat.is_null() {
+        if mat_handle.is_null() {
             return Err("ncnn_mat_create_external_3d returned null".into());
         }
-        let ex = ncnn_extractor_create(net.0);
-        let rc = ncnn_extractor_input(ex, input_name.as_ptr(), mat);
-        if rc != 0 {
-            ncnn_extractor_destroy(ex);
-            ncnn_mat_destroy(mat);
-            return Err(format!("extractor input returned {rc}"));
+        let mat = Mat(mat_handle);
+        let extractor_handle = ncnn_extractor_create(net.0);
+        if extractor_handle.is_null() {
+            return Err("ncnn_extractor_create returned null".into());
         }
-        let mut out: ncnn_mat_t = ptr::null_mut();
-        let rc = ncnn_extractor_extract(ex, output_name.as_ptr(), &raw mut out);
-        if rc != 0 || out.is_null() {
-            ncnn_extractor_destroy(ex);
-            ncnn_mat_destroy(mat);
+        let extractor = Extractor(extractor_handle);
+        let rc = ncnn_extractor_input(extractor.0, blob_names.input.as_ptr(), mat.0);
+        if rc != 0 {
+            return Err(format!(
+                "set extractor input {:?}: ncnn returned {rc}",
+                blob_names.input
+            ));
+        }
+        let mut output_handle: ncnn_mat_t = ptr::null_mut();
+        let rc = ncnn_extractor_extract(
+            extractor.0,
+            blob_names.output.as_ptr(),
+            &raw mut output_handle,
+        );
+        let output = (!output_handle.is_null()).then(|| Mat(output_handle));
+        if rc != 0 {
             // Frigate treats a nonzero extract as a lost device, which only a
             // new process recovers from; the spike just reports it.
-            return Err(format!("extract returned {rc}"));
+            return Err(format!(
+                "extract output {:?}: ncnn returned {rc}",
+                blob_names.output
+            ));
         }
-
-        let result = copy_out(out);
-        ncnn_mat_destroy(out);
-        ncnn_extractor_destroy(ex);
-        ncnn_mat_destroy(mat);
-        result
+        let Some(output) = output else {
+            return Err(format!(
+                "extract output {:?}: ncnn returned a null Mat",
+                blob_names.output
+            ));
+        };
+        copy_out(output.0)
     }
 }
 
@@ -295,7 +338,7 @@ fn infer(
 unsafe fn copy_out(mat: ncnn_mat_t) -> Result<(Vec<f32>, Vec<c_int>), Failure> {
     // SAFETY: the caller guarantees `mat` is live; all of these are pure
     // accessors on it.
-    let (elemsize, elempack, dims, w, h, c, cstep, data) = unsafe {
+    let (elemsize, elempack, dims, w, h, c, cstep, output_data) = unsafe {
         (
             ncnn_mat_get_elemsize(mat),
             ncnn_mat_get_elempack(mat),
@@ -313,38 +356,41 @@ unsafe fn copy_out(mat: ncnn_mat_t) -> Result<(Vec<f32>, Vec<c_int>), Failure> {
             "expected unpacked fp32 output, got elemsize={elemsize} elempack={elempack}"
         ));
     }
-    if data.is_null() {
+    if output_data.is_null() {
         return Err("output Mat has no data".into());
     }
 
-    let plane = usize::try_from(w * h).map_err(|_| "negative output extent".to_string())?;
+    let width = usize::try_from(w).map_err(|_| format!("output width is negative: {w}"))?;
+    let height = usize::try_from(h).map_err(|_| format!("output height is negative: {h}"))?;
+    let plane_elements = width
+        .checked_mul(height)
+        .ok_or_else(|| format!("output plane dimensions overflow usize: {w}x{h}"))?;
     let (shape, plane, channels) = match dims {
-        1 => (
-            vec![w],
-            usize::try_from(w).map_err(|_| "negative output extent".to_string())?,
-            1usize,
-        ),
-        2 => (vec![h, w], plane, 1usize),
+        1 => (vec![w], width, 1usize),
+        2 => (vec![h, w], plane_elements, 1usize),
         3 => (
             vec![c, h, w],
-            plane,
-            usize::try_from(c).map_err(|_| "negative channel count".to_string())?,
+            plane_elements,
+            usize::try_from(c).map_err(|_| format!("output channel count is negative: {c}"))?,
         ),
         other => return Err(format!("unexpected output dims {other}")),
     };
 
-    let mut out = Vec::with_capacity(plane * channels);
+    let output_elements = plane
+        .checked_mul(channels)
+        .ok_or_else(|| "output element count overflows usize".to_string())?;
+    let mut output_values = Vec::with_capacity(output_elements);
     for channel in 0..channels {
         // SAFETY: elemsize == 4 and elempack == 1 make this an array of f32,
         // which ncnn allocates with at least that alignment; channel < c and
         // cstep is ncnn's own channel stride, so each slice stays inside the
         // allocation.
         unsafe {
-            let start = data.cast::<f32>().add(channel * cstep);
-            out.extend_from_slice(std::slice::from_raw_parts(start, plane));
+            let start = output_data.cast::<f32>().add(channel * cstep);
+            output_values.extend_from_slice(std::slice::from_raw_parts(start, plane));
         }
     }
-    Ok((out, shape))
+    Ok((output_values, shape))
 }
 
 fn mean(values: &[f64]) -> f64 {
@@ -370,7 +416,8 @@ fn median(sorted: &[f64]) -> f64 {
 fn summarise(samples: &[f64], iters: usize) -> Stats {
     let quarter = std::cmp::max(1, iters / 4);
     let head = &samples[..quarter];
-    let tail = &samples[samples.len() - iters / 2..];
+    let tail_count = std::cmp::max(1, iters / 2);
+    let tail = &samples[samples.len() - tail_count..];
     let mut sorted = tail.to_vec();
     sorted.sort_by(f64::total_cmp);
     #[expect(
@@ -401,13 +448,24 @@ fn config() -> Result<Config, Failure> {
         .map(|stem| format!("{stem}.bin"))
         .ok_or_else(|| format!("MODEL_PARAM must name a .param file, got {param_path}"))?;
     let size: c_int = env_or("MODEL_SIZE", 320)?;
-    let extent = usize::try_from(size).map_err(|_| "MODEL_SIZE must be positive".to_string())?;
+    let extent = usize::try_from(size)
+        .ok()
+        .filter(|extent| *extent > 0)
+        .ok_or_else(|| format!("MODEL_SIZE must be positive, got {size}"))?;
+    let elements = extent
+        .checked_mul(extent)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| format!("MODEL_SIZE is too large: {size}"))?;
+    let iters: usize = env_or("BENCH_ITERS", 2000)?;
+    if iters == 0 {
+        return Err("BENCH_ITERS must be positive, got 0".to_string());
+    }
     Ok(Config {
         param_path,
         bin_path,
         size,
-        elements: 3 * extent * extent,
-        iters: env_or("BENCH_ITERS", 2000)?,
+        elements,
+        iters,
     })
 }
 
@@ -436,12 +494,10 @@ fn run() -> Result<(), Failure> {
     eprintln!("ncnn-spike: ncnn {}", unsafe { cstr(ncnn_version()) });
     let device = select_device()?;
     let (net, load_ms) = load_net(&config, device)?;
-    let (input_name, output_name) = blob_names(&net);
-    let input_c = CString::new(input_name.clone()).map_err(|e| e.to_string())?;
-    let output_c = CString::new(output_name.clone()).map_err(|e| e.to_string())?;
+    let blob_names = blob_names(&net)?;
     let mut input = read_input(&config)?;
 
-    let (first, shape) = infer(&net, &input_c, &output_c, &mut input, config.size)?;
+    let (first, shape) = infer(&net, &blob_names, &mut input, config.size)?;
     if let Ok(path) = env::var("OUTPUT_F32") {
         let mut bytes = Vec::with_capacity(first.len() * 4);
         for value in &first {
@@ -453,7 +509,7 @@ fn run() -> Result<(), Failure> {
     let mut samples = Vec::with_capacity(config.iters);
     for _ in 0..config.iters {
         let start = Instant::now();
-        infer(&net, &input_c, &output_c, &mut input, config.size)?;
+        infer(&net, &blob_names, &mut input, config.size)?;
         samples.push(start.elapsed().as_secs_f64() * 1000.0);
     }
     let stats = summarise(&samples, config.iters);
@@ -472,8 +528,8 @@ fn run() -> Result<(), Failure> {
         config.size,
         device_name(device),
         device_type(device).as_str(),
-        input_name,
-        output_name,
+        blob_names.input.to_string_lossy(),
+        blob_names.output.to_string_lossy(),
         round(load_ms, 1),
         shape,
         first.len(),

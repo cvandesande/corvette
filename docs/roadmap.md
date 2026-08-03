@@ -172,11 +172,6 @@ point is hardware that no arm64 machine has. Neither of those is true here: this
 repo is bindings and an NVR, and its correctness is not a property of one vendor's
 driver.
 
-One concrete gap if anyone runs this on arm64: `scripts/run_spike.sh` needs
-`frigate-vulkan:py313` for the Python side of the comparison, and that image is
-built amd64-only. The Rust binary runs fine; the *parity* half of the harness
-needs that image built for arm64 first.
-
 ## Contracts a Rust NVR must honour
 
 These are what the rest of the pod depends on, and they are small enough to write

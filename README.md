@@ -17,7 +17,7 @@ C++ API the Python detector uses -- it covers the entire inference path but has
 no GPU enumeration at all. See `docs/ncnn-spike.md` for the result.
 
 ```
-scripts/run_spike.sh                 # build, run, and diff against the Python detector
+scripts/run_spike.sh                 # build, benchmark, and check device selection
 ```
 
 ## Building
@@ -27,7 +27,8 @@ paths -- rustup reads it directly, `flake.nix` feeds it to rust-overlay, and
 `docker/Dockerfile.spike` pins the matching image tag.
 
 ```
-nix develop                          # toolchain + ncnn + python3/numpy
+nix develop                          # toolchain + ncnn
+make check                           # format, lint, and test everything
 nix build .#ncnn-spike               # or .#ncnn for the pinned ncnn alone
 docker build -f docker/Dockerfile.spike --target lint .   # clippy + rustfmt gate
 ```
@@ -45,7 +46,8 @@ is not enabled as a group, on upstream's own advice. See the bottom of
 | `crates/ncnn-sys` | raw FFI over ncnn's C API, plus `csrc/c_api_ext.cpp` -- the GPU enumeration the C API is missing |
 | `crates/ncnn-spike` | the benchmark/parity binary |
 | `docker/Dockerfile.spike` | builds ncnn from source with `NCNN_VULKAN=ON`, then the Rust binary |
-| `scripts/` | the harness that runs both implementations over one input and compares them |
+| `scripts/` | the benchmark and device-selection harness |
+| `Makefile` | the repository-wide local and CI check entry point |
 | `flake.nix` | pinned toolchain, a Vulkan-enabled ncnn, and a dev shell |
 | `docs/ncnn-spike.md` | findings |
 

@@ -19,6 +19,10 @@ fn main() {
         .file("csrc/c_api_ext.cpp")
         .include("csrc")
         .include(&include)
+        // Nix enables _FORTIFY_SOURCE, whose checks require optimization.
+        // Optimize this small shim in every profile so development builds keep
+        // those checks without changing Rust's debug settings.
+        .opt_level(1)
         .flag_if_supported("-std=c++11")
         .compile("ncnn_c_api_ext");
 

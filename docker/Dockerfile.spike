@@ -2,9 +2,8 @@
 #
 # ncnn-from-Rust spike. Three stages: ncnn built from source with Vulkan, the
 # Rust binary linked against it, and a runtime carrying only the Mesa/Vulkan
-# stack. Trixie throughout, matching the Python image the results are compared
-# against (frigate-vulkan's docker/Dockerfile.py313) so Mesa and glibc are the
-# same generation on both sides of the comparison.
+# stack. Trixie is used throughout so the build and runtime share a compatible
+# glibc generation.
 ARG NCNN_TAG=20260526
 ARG DEBIAN_IMAGE=debian:trixie
 # Pinned to match rust-toolchain.toml and flake.nix -- one Rust version across

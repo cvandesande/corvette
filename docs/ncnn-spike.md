@@ -112,14 +112,14 @@ scripts/run_spike.sh                                  # 320, 2000 iterations
 MODEL=yolov9t-640-2026-2.ncnn.param SIZE=640 ITERS=600 scripts/run_spike.sh
 ```
 
-Needs `frigate-vulkan:py313` built for the reference side, and the models in
-`../frigate-vulkan/models`. Both are overridable; see the top of the script.
+Needs the models in `../frigate-vulkan/models`. The model directory and image
+are overridable; see the top of the script.
 
 Without Docker, on a host that has a Vulkan driver:
 
 ```
 nix run .#ncnn-spike        # MODEL_PARAM=... and the rest via the environment
-nix develop                 # Rust 1.97.1, ncnn, and python3+numpy for the diff
+nix develop                 # Rust 1.97.1 and ncnn
 ```
 
 `nix build .#ncnn` builds the same pinned ncnn tag the container does, with

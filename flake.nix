@@ -117,15 +117,17 @@
           # this shell cannot drift apart.
           packages = [
             (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
-            self.packages.${pkgs.system}.ncnn
+            self.packages.${pkgs.stdenv.hostPlatform.system}.ncnn
+            pkgs.clang-tools
             pkgs.cmake
+            pkgs.gnumake
+            pkgs.nixfmt
             pkgs.pkg-config
+            pkgs.shellcheck
             pkgs.vulkan-loader
             pkgs.vulkan-tools
-            # scripts/compare_outputs.py, without needing the container.
-            (pkgs.python3.withPackages (ps: [ ps.numpy ]))
           ];
-          NCNN_DIR = "${self.packages.${pkgs.system}.ncnn}";
+          NCNN_DIR = "${self.packages.${pkgs.stdenv.hostPlatform.system}.ncnn}";
         };
       });
 

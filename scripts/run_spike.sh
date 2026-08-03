@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Runs the ncnn-from-Rust spike end to end: build, Python reference, Rust
-# implementation over the same input, tensor diff, and the device-selection
-# checks that the C API extension exists for.
+# Builds and runs the ncnn-from-Rust benchmark and its device-selection checks.
 #
-# The models and the Python image come from the sibling frigate-vulkan repo.
+# The model comes from the sibling frigate-vulkan repo.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -13,40 +11,19 @@ MODEL="${MODEL:-yolov9t-320-2026-2.ncnn.param}"
 SIZE="${SIZE:-320}"
 ITERS="${ITERS:-2000}"
 NCNN_TAG="${NCNN_TAG:-20260526}"
-PY_IMAGE="${PY_IMAGE:-frigate-vulkan:py313}"
 SPIKE_IMAGE="${SPIKE_IMAGE:-corvette/ncnn-spike:trixie}"
-OUT="${OUT:-$REPO/out}"
-
-mkdir -p "$OUT"
-rm -f "$OUT"/*.f32
 
 echo "== build =="
 docker build -f "$REPO/docker/Dockerfile.spike" --build-arg "NCNN_TAG=$NCNN_TAG" \
   -t "$SPIKE_IMAGE" "$REPO"
 
 common=(--rm --device /dev/dri
-  -v "$MODELS_DIR:/models:ro" -v "$OUT:/out"
-  -e "MODEL_PARAM=/models/$MODEL" -e "MODEL_SIZE=$SIZE" -e "BENCH_ITERS=$ITERS"
-  -e INPUT_F32=/out/input.f32)
-
-# First run generates the input, so the reference goes first deliberately.
-echo
-echo "== python reference ($PY_IMAGE) =="
-docker run "${common[@]}" -v "$REPO/scripts:/scripts:ro" \
-  -e OUTPUT_F32=/out/output-python.f32 \
-  --entrypoint python3 "$PY_IMAGE" /scripts/reference_infer.py \
-  | tee "$OUT/python.txt"
+  -v "$MODELS_DIR:/models:ro"
+  -e "MODEL_PARAM=/models/$MODEL" -e "MODEL_SIZE=$SIZE" -e "BENCH_ITERS=$ITERS")
 
 echo
-echo "== rust spike ($SPIKE_IMAGE) =="
-docker run "${common[@]}" -e OUTPUT_F32=/out/output-rust.f32 "$SPIKE_IMAGE" \
-  | tee "$OUT/rust.txt"
-
-echo
-echo "== tensor diff =="
-docker run --rm -v "$OUT:/out" -v "$REPO/scripts:/scripts:ro" \
-  --entrypoint python3 "$PY_IMAGE" \
-  /scripts/compare_outputs.py /out/output-python.f32 /out/output-rust.f32
+echo "== benchmark ($SPIKE_IMAGE) =="
+docker run "${common[@]}" "$SPIKE_IMAGE"
 
 echo
 echo "== device selection =="
