@@ -57,6 +57,55 @@ test.describe("daylight-saving date conversion", () => {
   }
 });
 
+test.describe("single-day request bounds", () => {
+  test.use({ timezoneId: "America/New_York" });
+
+  // Frigate matches reviews with `start_time < before`, so a day's upper bound is
+  // exclusive and belongs at the *next* day's local midnight. Browsing 31 July
+  // therefore asks Frigate for everything before 1 August 00:00; an end bound of
+  // 23:59 on the day itself would silently drop its final minute.
+  test("a chosen day is requested from its local midnight to the next", async ({ page }) => {
+    const julyThirtyFirstStart = 1785470400;
+    const augustFirstStart = 1785556800;
+    const reviewBounds = [];
+    const motionBounds = [];
+    const boundsOf = (request) => {
+      const params = new URL(request.url()).searchParams;
+      return [Number(params.get("after")), Number(params.get("before"))];
+    };
+
+    await page.clock.setFixedTime(new Date("2026-08-03T12:00:00-04:00"));
+    await page.route("**/api/recordings/summary?*", (route) =>
+      route.fulfill({
+        json: Object.fromEntries(
+          consecutiveDates("2026-08-03", 21).map((date) => [date, true]),
+        ),
+      }),
+    );
+    await page.route("**/api/review?*", (route) => {
+      reviewBounds.push(boundsOf(route.request()));
+      return route.fulfill({ json: [] });
+    });
+    await page.route("**/api/review/activity/motion?*", (route) => {
+      motionBounds.push(boundsOf(route.request()));
+      return route.fulfill({ json: [] });
+    });
+
+    await page.goto("/events");
+    const eventDays = page.getByRole("group", { name: "Event days" }).getByRole("button");
+    await expect(eventDays).toHaveCount(21);
+    await expect(eventDays.nth(17)).toHaveAccessibleName(calendarDayLabel("2026-07-31"));
+    await eventDays.nth(17).click();
+
+    await expect
+      .poll(() => reviewBounds)
+      .toContainEqual([julyThirtyFirstStart, augustFirstStart]);
+    await expect
+      .poll(() => motionBounds)
+      .toContainEqual([julyThirtyFirstStart, augustFirstStart]);
+  });
+});
+
 test("recording payload loads only after recordings navigation", async ({ page }) => {
   const recordingPayloads = [];
   page.on("request", (request) => {

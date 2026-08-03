@@ -113,11 +113,16 @@ requesting August 1 was audited against every IANA zone. Two findings:
   stepping from local noon. Regression coverage is pinned to `America/New_York`
   at both 2026 transitions in `tests/ui/split.spec.cjs`.
 - Converting a calendar date to local midnight is correct in all 418 zones, so
-  that conversion is not the source of the July 31 report. The likely origin is
-  the exclusive end bound: a single-day selection asks Frigate for everything
-  before the *next* local midnight, so browsing July 31 legitimately sends
-  `before` as August 1 00:00. Unconfirmed against the original observation --
-  reproduce it before treating the bound as the explanation.
+  that conversion is not the source of the July 31 report. The origin is the
+  exclusive end bound, and the behaviour is correct: `/events` asks for a
+  selected day with `after` at that day's local midnight and `before` at the
+  *next* one, so browsing July 31 does send `before` as August 1 00:00. Frigate
+  matches reviews with `start_time < before`, so the bound is exclusive at the
+  server too and an end of 23:59 would drop the day's final minute. Settled
+  2026-08-03; pinned by "a chosen day is requested from its local midnight to
+  the next" in `tests/ui/split.spec.cjs`. The `/recordings` calendar never sends
+  the next date at all -- it bounds a selection with the reader's own From/To
+  clock times, defaulting to 00:00 and 23:59 on the selected days.
 
 Stage 0 is worth doing on its own merits even if nothing after it happens: it
 replaces 21MB of React, and it is what makes stage 1 safe, since a UI you own is
@@ -274,6 +279,20 @@ down:
   of a sampling bucket, not an exact retained frame: media for that bucket must be
   addressed as a range. A point-in-time snapshot can land in a recording gap even
   though the bucket contains playable footage.
+- **One range semantic across every activity query.** Frigate's two activity
+  endpoints answer the same `after`/`before` pair with different set logic.
+  `/api/review` matches `start_time < before AND (end_time IS NULL OR end_time >
+  after)` -- overlap, so a review still running when the window opens is
+  included. `/api/review/activity/motion` matches `start_time > after AND
+  end_time < before` -- containment, and strict at both ends, so a recording row
+  straddling a bound is dropped. Because the bounds are adjacent local midnights,
+  a segment crossing midnight is excluded from *both* days: too late for the
+  earlier query's `end_time < before`, too early for the later query's
+  `start_time > after`. Frigate's segments are short enough to bound the loss to
+  the edges, but the motion sampled for a day is not the motion retained for it.
+  Corvette must answer every activity range with one documented semantic --
+  half-open `[after, before)` on overlap -- so that adjacent ranges partition the
+  timeline instead of dropping the rows between them.
 - **`vod_mode mapped` + `vod_upstream_location /api`.** nginx-vod asks `/api` for
   a JSON mapping of a playback request to files on disk, then reads them itself.
   Whatever serves `/api` has to answer that, or recording playback stops working.
