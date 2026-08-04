@@ -128,6 +128,8 @@ DP-B  3xx handling: follow internally, or surface status to the caller?
 - Each item carries five fields — **Premise / Do / Verify / Mutation / Scope guard**.
   *(Filled canonical item: see Appendix — it's clearer than five abstract definitions.)*
 - **Effort + model assignment per item**, so cost is visible at approval (§6).
+- **A ceiling on agents in flight at once** (§5), so the fan-out is approved rather than
+  discovered.
 - **The human reviews the PLAN, not just the design** — the last cheap moment to catch a
   wrong decomposition.
 
@@ -172,6 +174,22 @@ A guard rail that lives in prose doesn't exist for the next contributor or the n
   behind a green checklist exactly this way.)
 - **Serialize items sharing a working tree.** Parallelize only with genuine isolation
   (worktrees), and only when items can't collide on build dirs/ports/state.
+- **Delegation has a floor and a ceiling.** Spawn an agent only for work that is genuinely
+  independent and large enough to repay the overhead — a wide multi-file investigation, an
+  item whose research and implementation are separable. Work the orchestrator could finish
+  in a handful of tool calls costs more delegated than done: the agent re-establishes
+  context, re-explores, and reports back, and the orchestrator then reads the report. When
+  one agent can do the job, use one. Current models delegate more readily than the ones
+  this playbook was first written against, so the plan states the maximum number of agents
+  in flight at once, and exceeding it is a human decision rather than an orchestrator
+  judgment call.
+- **The review agent is the sanctioned exception, and it does not generalize.** It exists
+  for independence, not for double-checking: an implementer's testimony about its own work
+  is not evidence (§8), and no improvement in a model's self-checking changes that. That
+  argument covers a reviewer reading someone else's work. It does not license spawning
+  agents to re-verify work that already carries executed evidence, and it is not a reason
+  to add "verify your work" instructions to an implement brief — §7 duty 4 asks for an
+  executed mutation cycle, which produces an artifact, not a reassurance.
 
 Naming — keep the two axes from colliding (write it in the handoff; left implicit it
 reliably confuses the next reader — it did here):
@@ -183,34 +201,52 @@ Phase A, B, C …      work breakdown of ONE feature
 Numbers never mean feature-work; letters never mean roadmap.
 ```
 
-## 6. Model selection — the cost-based policy
+## 6. Model and effort selection — the cost-based policy
 
 The expensive fixed cost is the **strong-model review** after every implement. Optimize
-around that fact.
+around that fact, across both levers: how capable a model runs the agent, and how hard it
+is told to work.
 
-- **Implement = cheap/fast model by default** (~1/5 the cost for the same transcript).
+- **Effort is the first lever; model tier is the second.** Current models hold quality at
+  low and medium effort for a fraction of the tokens and latency, so the cheapest correct
+  configuration is often the strong model at reduced effort rather than Sonnet at full
+  effort. Reach for the effort step before the tier change, and step up to the
+  highest settings for demanding agentic and coding items rather than leaving them there
+  by default.
+- **Re-sweep effort whenever the model generation changes.** An effort default carried
+  across a model release is a guess, not a measurement — the tradeoff curve moves with the
+  model, and the level that was barely adequate before may now be wasteful. Sweep on real
+  items from the current phase, never a synthetic case.
+- **Shallow work is an effort problem before it is a prompt problem.** When an agent
+  under-thinks a hard item, raise its effort rather than adding prose telling it to think
+  carefully.
+- **Sonnet is the floor — nothing below it runs in this pipeline, in any role.** The tier
+  beneath it was tried and withdrawn: observed twice that its reviewers rationalize
+  execution away and verdict on static reading alone — once fabricating run evidence
+  outright, once claiming the platform blocked a run its brief explicitly provided the
+  runner for. With the floor in place the cost question stops being *which cheap model*
+  and becomes *how much effort*, which is why effort leads this section.
+- **Implement = Sonnet at the effort the item needs**, by default.
 - **Upgrade implement to the strong model only when:**
   - (a) the review FAILed **and** the item is genuinely hard (subtle concurrency, FFI
-    ownership, design-level fix) — a mechanical miss just gets a cheap re-fix + **delta**
+    ownership, design-level fix) — a mechanical miss just gets a Sonnet re-fix + **delta**
     re-review; or
   - (b) the item is **pre-identified as subtle**. Strong-first is *cheaper* there: a
-    failed cheap attempt burns a full strong-model review on doomed work plus a second
-    implement. Rule of thumb: go strong-first when the cheap model's first-pass odds are
-    below ~60–70%.
+    failed Sonnet attempt burns a full strong-model review on doomed work plus a second
+    implement. Rule of thumb: go strong-first when Sonnet's first-pass odds are below
+    ~60–70% — but raise Sonnet's effort first, since that is the cheaper half-step.
 - **Review tier follows RISK, not habit.** Production / security / unsafe-FFI → strong,
-  full rigor. Docs / housekeeping → cheap review (no mutation cycle to re-execute, no
+  full rigor. Docs / housekeeping → Sonnet review (no mutation cycle to re-execute, no
   hollow-test risk).
-- **Review floor is the mid tier for any review with an execution duty.** A review that
-  must run anything (suite, harness, mutation, evidence re-run) never goes to the cheap
-  tier: observed twice that cheap-tier reviewers rationalize execution away and verdict
-  on static reading alone — once fabricating run evidence outright, once claiming the
-  platform blocked a run its brief explicitly provided the runner for. Cheap review is
-  for reviews whose entire duty is reading. If an item deserves execution in its review,
-  it deserves the mid tier; the orchestrator re-running the skipped half after the fact
-  is recovery, not a plan.
-- **Measure, don't guess.** Every agent ends with `model / tool-calls / approx-tokens`,
-  and the orchestrator records the *harness's* numbers (agent self-counts run 30%+ off in
-  both directions). After two items you know where the money goes.
+- **A review with an execution duty gets real effort.** The floor settles the model; the
+  same failure reappears as an effort setting too low to sustain a run. A reviewer that
+  must execute something (suite, harness, mutation, evidence re-run) is not where to
+  economize — the orchestrator re-running the skipped half after the fact is recovery,
+  not a plan.
+- **Measure, don't guess.** Every agent ends with `model / effort / tool-calls /
+  approx-tokens`, and the orchestrator records the *harness's* numbers (agent self-counts
+  run 30%+ off in both directions). After two items you know where the money goes — and
+  without the effort field the sweep above has nothing to compare.
 
 ## 7. The implement agent
 
@@ -267,7 +303,7 @@ Exit checklist — paste it, check each line, do not paraphrase:
 [ ] remote/secondary checkouts HEAD-verified
 [ ] evidence file committed at tip, commit hash embedded
 [ ] all trees clean (`git status`), scratch removed
-[ ] cost line present:  model=<m> tool-calls=<n> approx-tokens=<t>
+[ ] cost line present:  model=<m> effort=<e> tool-calls=<n> approx-tokens=<t>
 ```
 
 ## 8. The review agent
@@ -510,6 +546,7 @@ the implement agent receives.
 ```
 IMPLEMENT agent — item A1 of PLAN-tls-redirect.
 Repo: ngx-otel   Branch: feat/A1-hostname   Base: 9f3c1a2
+Model: sonnet   Effort: medium   (assigned in PLAN §A1, approved at the plan gate)
 READ FIRST: PLAN §A1, INVARIANTS block, RESEARCH F-3.
 
 ## Scope (A1 only)
@@ -559,7 +596,7 @@ premise: F-3 confirmed — SSL_set1_host present at src/ssl.rs:1442
 reuse: none found — new helper verify_peer_name (searched verify_*, *_hostname)
 STOP items: none
 out-of-scope: CN fallback has no IP-SAN test — propose new item A1b
-model=haiku  tool-calls=37  approx-tokens=210k
+model=sonnet  effort=medium  tool-calls=37  approx-tokens=210k
 exit: [x] pushed  [x] checkouts  [x] evidence@tip  [x] trees clean  [x] cost line
 ```
 
