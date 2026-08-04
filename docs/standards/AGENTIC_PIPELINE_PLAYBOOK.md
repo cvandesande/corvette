@@ -284,8 +284,10 @@ Duties, in order:
    is banned vocabulary.*
 5. **Verify on each platform the matrix requires, proportional to the diff** (doc-only ≠
    full matrix; production code = full matrix).
-6. **Commit in reviewable units, push after each,** and confirm remote/secondary
-   checkouts actually landed (silent no-op pulls happen).
+6. **Commit in reviewable units; never push.** Pushing is an orchestrator action taken
+   only on explicit human approval — agents leave their commits local and report
+   `git log origin/main..HEAD`. Confirm secondary checkouts landed where the item
+   requires it.
 7. **Report as DATA, not prose** (shape in Appendix).
 8. **End with the exit checklist, pasted and checked** (below). Agents drift on
    *protocol* long before *capability*; a pasted checklist catches the drift mechanically
@@ -307,7 +309,7 @@ test tls::rejects_name_mismatch ... ok              ← restored, passes
 Exit checklist — paste it, check each line, do not paraphrase:
 
 ```
-[ ] pushed — prove it: `git log origin/main..HEAD` is empty
+[ ] NOT pushed — prove it: `git log origin/main..HEAD` lists exactly your commits
 [ ] remote/secondary checkouts HEAD-verified
 [ ] evidence file committed at tip, commit hash embedded
 [ ] all trees clean (`git status`), scratch removed
@@ -611,7 +613,7 @@ reuse: none found — new helper verify_peer_name (searched verify_*, *_hostname
 STOP items: none
 out-of-scope: CN fallback has no IP-SAN test — propose new item A1b
 model=sonnet  effort=medium  tool-calls=37  approx-tokens=210k
-exit: [x] pushed  [x] checkouts  [x] evidence@tip  [x] trees clean  [x] cost line
+exit: [x] unpushed  [x] checkouts  [x] evidence@tip  [x] trees clean  [x] cost line
 ```
 
 The **review brief mirrors it**: range, file-backed report (VERDICT last), checks 1–6
