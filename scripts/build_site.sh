@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Builds a publish-ready staging tree at target/site-publish/ without mutating
-# target/site, which a running dev server (scripts/serve_ui.sh) may be serving.
+# Builds the release bundle and stages a publish-ready copy of it at
+# target/site-publish/.
+#
+# The build below rewrites target/site, so running this replaces the bundle a
+# dev server (scripts/serve_ui.sh) is serving, exactly as `make check` already
+# does. Only the staging copy leaves target/site alone. Check for a listening
+# dev server before running either.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
