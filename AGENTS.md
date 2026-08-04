@@ -9,6 +9,17 @@ control flow, state, contracts, error handling, comments, tests, change hygiene,
 and file layout. More specific conventions already established in a file or
 subtree take precedence, as the guide itself specifies.
 
+Before starting non-trivial implementation work — a new feature, a change
+spanning multiple files or sessions, or anything using an agent pipeline
+(research, design doc, implementation plan, per-item review) — read
+`docs/standards/AGENTIC_PIPELINE_PLAYBOOK.md` in full. Do not begin after
+reading only part of it or a summary. Treat it as the repository's default
+standard for how that work is run: research before design, a design doc and
+implementation plan gated by a human before implementation starts, per-item
+implement/review cycles, and the evidence bar it sets for claims about tests,
+mutation coverage, and re-execution. Single-file fixes and other trivial
+changes need only the style guide above.
+
 GitHub issues are the source of truth for tracked work. Every planned feature,
 defect, investigation, or follow-up must have an issue before implementation
 begins. Issue #1 is the roadmap index; keep its linked issues current and close
