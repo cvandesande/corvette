@@ -84,15 +84,26 @@ FIXTURE_MARKER='NOT-EXECUTED-FIXTURE'
 # the output the same length as the input, so a statement still sits on the
 # number of the line it starts at and grep -n keeps reporting real line numbers.
 # A carriage return between the backslash and the end of line still counts as a
-# continuation, so a CRLF file cannot hide a wrapped verb. Over-joining -- a
-# line ending in an escaped backslash, which the shell would not continue --
-# can only produce an extra reported match for a human to dismiss, never a
-# missed one.
+# continuation, so a CRLF file cannot hide a wrapped verb.
+#
+# Only an ODD number of trailing backslashes continues a line: an even run is
+# escaped literal backslashes and the shell starts a fresh statement on the next
+# line. Joining an even run anyway is not a harmless extra match to dismiss. It
+# splices the following line into the opening line's text, so a fixture marker on
+# the opening line lands on content its author never marked, and the exemption
+# below then skips a genuine, unmarked forbidden verb that stands on its own as an
+# executable statement.
 join_continuations() {
   awk -- '
+    # True when the line ends in an odd number of backslashes, disregarding a
+    # carriage return between the last backslash and the end of the line.
+    function continues_onto_next_line(line) {
+      sub(/\r$/, "", line)
+      return match(line, /\\+$/) > 0 && RLENGTH % 2 == 1
+    }
     {
       held = held $0
-      if (held ~ /\\\r?$/) {
+      if (continues_onto_next_line(held)) {
         sub(/\\\r?$/, "", held)
         consumed++
         next
