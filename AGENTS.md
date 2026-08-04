@@ -9,6 +9,11 @@ control flow, state, contracts, error handling, comments, tests, change hygiene,
 and file layout. More specific conventions already established in a file or
 subtree take precedence, as the guide itself specifies.
 
+The orchestrator does not read this guide and does not author code. It may edit
+Markdown prose and apply wording a human has approved verbatim. Anything
+touching code, tests, scripts, configuration, or build files is delegated to an
+agent that reads the guide in full — regardless of how small the change is.
+
 Before starting non-trivial implementation work — a new feature, a change
 spanning multiple files or sessions, or anything using an agent pipeline
 (research, design doc, implementation plan, per-item review) — read
