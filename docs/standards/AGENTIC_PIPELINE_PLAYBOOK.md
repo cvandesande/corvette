@@ -56,6 +56,11 @@ human gate rather than fed it.
 Goal: a *sourced* findings document, not a vibe. Wrong premises poison every downstream
 phase, so this is where fabrication costs the most.
 
+- **The orchestrator never researches.** Research is always delegated, regardless of
+  apparent size — the orchestrator reads the findings document, never the sources. An
+  orchestrator that has read the primary sources has spent the context that gating and
+  triage depend on, and has disqualified itself under §2 from being the neutral reader
+  of the design doc.
 - **Primary sources only** — archives, man pages, vendor docs, the dependency's actual
   source at the *pinned* version. Verify by **symbol**, not by upstream docs for a newer
   version.
@@ -182,7 +187,10 @@ A guard rail that lives in prose doesn't exist for the next contributor or the n
   one agent can do the job, use one. Current models delegate more readily than the ones
   this playbook was first written against, so the plan states the maximum number of agents
   in flight at once, and exceeding it is a human decision rather than an orchestrator
-  judgment call.
+  judgment call. The floor applies to work *within* a phase, not to the phases
+  themselves. Research, design drafting, implementation, and review are always
+  delegated; the orchestrator's own tool calls are for deciding what to work on, triage,
+  gating, and verifying evidence.
 - **The review agent is the sanctioned exception, and it does not generalize.** It exists
   for independence, not for double-checking: an implementer's testimony about its own work
   is not evidence (§8), and no improvement in a model's self-checking changes that. That
@@ -477,7 +485,13 @@ reduces the re-processing bill but does not remove it.) Hence:
 
 - Check agent claims against source/output — including *explanations* (agents have
   fabricated nonexistent reports and code constructs in explanations) and "environmental
-  failure" classifications (require a re-run).
+  failure" classifications (require a re-run). Verification runs against the
+  **committed evidence artifact**, not a re-reading of the sources — §1 bars the
+  orchestrator from the sources, and a claim with no surviving artifact is VOID
+  (relaunch, don't accept). The escape hatch is deliberate and narrow: when a specific
+  claim looks wrong, the orchestrator may read the exact source it rests on to settle
+  that claim. Spot-checking one suspect claim is not a licence to re-derive the
+  findings.
 - Read actual test output, never just counters or STATUS files. Sanity-check every
   verdict: does the wall-clock support the prescribed work? Does the evidence artifact
   exist and match?
