@@ -26,9 +26,16 @@ begins. Issue #1 is the roadmap index; keep its linked issues current and close
 them when their stated outcome is complete. `docs/design/` owns durable
 architectural decisions and API contracts; it is not a backlog.
 
-Frigate's source is available locally at `~/github/frigate`. Consult that checkout
-for upstream API contracts and implementation details before using an external
-copy or inferring Frigate behavior.
+Establish upstream API contracts and implementation details by reading Frigate's
+own source at the revision the deployment is running, not from documentation, a
+newer release, or inference. Obtain that source if you do not already have it.
+
+The deployed system is read-only to agents. Reading from it is expected: port-forward
+to the running Frigate, go2rtc, and nginx and verify route behavior and contracts
+against what is actually serving. Mutating it is a human action. If the work would
+apply a manifest, edit configuration inside the pod, replace an image or its digest,
+or restart a workload, stop and ask; propose the change and let a human apply it. Do
+not proceed on judgment.
 
 When a change uncovers a Frigate API incompatibility, ambiguous contract,
 surprising behavior, or upstream defect that should influence Corvette's own API,
