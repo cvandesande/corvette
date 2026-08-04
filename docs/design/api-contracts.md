@@ -86,3 +86,25 @@ renders that file directly from its configuration.
 
 `/tmp/cache/birdseye` is required only if Corvette deliberately keeps birdseye.
 It is not part of the recording contract.
+
+## Thumbnails under `/clips/` carry no usable content type
+
+`location /clips/` declares its own `types { video/mp4 mp4; image/jpeg jpg; }`
+block. An nginx `types` block inside a location *replaces* the inherited MIME map
+rather than extending it, so any extension absent from those two entries falls to
+`default_type`. Review thumbnails are `.webp`, so they are served as
+`application/octet-stream`.
+
+This is invisible today because `<img>` sniffs the bytes and ignores the declared
+type. It breaks the moment a client needs the real type — `fetch` plus
+`createImageBitmap`, a `<picture>` element keyed on `type`, or a Content-Security
+Policy that discriminates by media type.
+
+Corvette's contract: media responses state their actual type. A location that
+narrows the MIME map must enumerate every extension it serves, or extend the map
+instead of replacing it. When Corvette owns this route, `.webp` is served as
+`image/webp`.
+
+Note that Corvette's local development proxy diverges here in a second, unrelated
+way: its `types` block declares no image entries at all. Neither environment is a
+guide to the other for content types.
