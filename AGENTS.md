@@ -14,20 +14,20 @@ Markdown prose and apply wording a human has approved verbatim. Anything
 touching code, tests, scripts, configuration, or build files is delegated to an
 agent that reads the guide in full — regardless of how small the change is.
 
-Before starting non-trivial implementation work — a new feature, a change
-spanning multiple files or sessions, or anything using an agent pipeline
-(research, design doc, implementation plan, per-item review) — read
-`docs/standards/AGENTIC_PIPELINE_PLAYBOOK.md` in full. Do not begin after
-reading only part of it or a summary. Treat it as the repository's default
-standard for how that work is run: research before design, a design doc and
-implementation plan gated by a human before implementation starts, per-item
-implement/review cycles, and the evidence bar it sets for claims about tests,
-mutation coverage, and re-execution. Single-file fixes and other trivial
-changes need only the style guide above.
+Before starting implementation work, classify it using
+`docs/standards/AGENTIC_PIPELINE_PLAYBOOK.md`. Read the playbook in full for
+Significant or Critical work; do not begin after reading only part of it or a
+summary. Those profiles govern research, human design and plan gates,
+implement/review cycles, and the evidence bar for claims about tests, mutation
+coverage, and re-execution. Routine work follows the playbook's universal rails
+and the style guide above without manufacturing the heavier pipeline artifacts.
 
-GitHub issues are the source of truth for tracked work. Every planned feature,
-defect, investigation, or follow-up must have an issue before implementation
-begins. Issue #1 is the roadmap index; keep its linked issues current and close
+GitHub issues are the source of truth for material tracked work: roadmap
+features, defects or investigations that need scheduling, and follow-ups the
+project intends to revisit. Create the issue before implementation begins.
+Directly requested Routine work does not need a bookkeeping issue, and an
+unscheduled observation remains a note until the project accepts it as planned
+work. Issue #1 is the roadmap index; keep its linked issues current and close
 them when their stated outcome is complete. `docs/design/` owns durable
 architectural decisions and API contracts; it is not a backlog.
 

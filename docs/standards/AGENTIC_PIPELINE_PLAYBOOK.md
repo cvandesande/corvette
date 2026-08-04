@@ -6,9 +6,9 @@ campaigns (32 findings, all fixed or deferred with recorded rationale). Every ru
 paid for by a concrete failure; the failures are kept (see §14) because the rules don't
 stick without them.*
 
-**Thesis:** agents are excellent implementers and terrible witnesses. The pipeline never
-accepts an agent's testimony about its own work — only artifacts, executed runs, and
-independent re-execution.
+**Thesis:** agents are excellent implementers and terrible witnesses. Verification must
+come from inspectable changes and executed runs, with independence and durable evidence
+scaled to the cost of being wrong.
 
 > **How to read this.** Two kinds of content.
 > **Rails** — invariants, gates, the evidence bar, the failure catalog — are enumerated
@@ -21,7 +21,40 @@ independent re-execution.
 
 ---
 
-## 0. Lifecycle at a glance
+## 0. Select the workflow before the work
+
+Every change starts by selecting the lightest profile whose risk triggers cover it.
+Profile selection is a scope decision: record it in the task return, issue, plan, or
+handoff together with one sentence of rationale. Discovery can only escalate a profile;
+lowering it after work begins requires human agreement.
+
+| Profile | Use it for | Required path |
+|---|---|---|
+| **Routine** | Localized defects, UI behavior, dependency-free refactors, and other changes with a known contract and small blast radius | Confirm premise in nearby code; implement; add or update tests; run relevant format, lint, and tests; review the final diff |
+| **Significant** | Multi-component features, new or changed contracts, uncertain upstream behavior, or work whose decomposition affects maintainability | Sourced research as needed; design doc with human decision gate; reviewed implementation plan; scoped implement/review cycles; integration gate |
+| **Critical** | Security, authentication, unsafe/FFI ownership, concurrency, persistence or data loss, destructive behavior, deployment behavior, or compatibility of a public API | Full pipeline in this playbook, including independent fact review, per-item independent review in isolation, mutation evidence, and whole-range re-execution |
+
+When classification is ambiguous, use the higher profile until the uncertainty is
+resolved. These triggers override apparent diff size: a one-line authentication or
+retention change is Critical. A large mechanical rename may remain Routine if it does
+not change behavior and can be checked mechanically.
+
+The following rails apply to every profile:
+
+- Agents never mutate the deployed system, publish externally, push, or perform an
+  irreversible action without the applicable human gate.
+- Verify unfamiliar external contracts against primary sources at the pinned revision;
+  for Frigate, use its source at the deployed revision and read the running service.
+- Search nearby code and project-wide helpers before adding an abstraction or pattern.
+- Keep the diff focused, preserve checks and error reporting, and test behavioral
+  changes.
+- Run the formatters, linters, and tests relevant to every changed file, and report
+  exactly what ran and what could not.
+- Record Corvette API-contract discoveries in `docs/design/api-contracts.md`.
+- Treat an agent's claim as a lead, not evidence; inspect the diff and actual command
+  output before accepting it.
+
+### Significant and Critical lifecycle
 
 ```
 RESEARCH ──► DESIGN DOC ──► DOC FACT-REVIEW ──► [HUMAN GATE: answer the DPs]
@@ -45,7 +78,8 @@ RESEARCH ──► DESIGN DOC ──► DOC FACT-REVIEW ──► [HUMAN GATE: a
 ```
 
 Humans gate **direction** (design, plan, scope changes, irreversible actions).
-Agents gate **correctness** (premise, facts, tests, mutation, re-execution).
+Agents gate **correctness** (premise, facts, tests, mutation where required,
+re-execution).
 Neither substitutes for the other — an agent that approves a direction has replaced the
 human gate rather than fed it.
 
@@ -56,8 +90,13 @@ human gate rather than fed it.
 Goal: a *sourced* findings document, not a vibe. Wrong premises poison every downstream
 phase, so this is where fabrication costs the most.
 
-- **The orchestrator never researches.** Research is always delegated, regardless of
-  apparent size — the orchestrator reads the findings document, never the sources. An
+This phase is mandatory for Significant and Critical work whose premise depends on an
+external contract, unfamiliar subsystem, or unresolved technical question. Routine work
+uses direct premise verification and records the source in its return; it does not create
+a research document merely to satisfy the process.
+
+- **For a formal research phase, the orchestrator never researches.** Research is
+  delegated — the orchestrator reads the findings document, never the sources. An
   orchestrator that has read the primary sources has spent the context that gating and
   triage depend on, and has disqualified itself under §2 from being the neutral reader
   of the design doc.
@@ -83,6 +122,10 @@ F-3  TLS hostname verification
 ```
 
 ## 2. Design doc → human review
+
+Required for Significant and Critical work. Routine work follows an existing contract;
+if it needs a product, architecture, or public-contract decision, reclassify it before
+implementation.
 
 - One document for a human decision-maker: the WHY, the options, the tradeoffs, and
   **named decision points** (DP-A, DP-B, …). The human's answers become **decisions of
@@ -124,6 +167,9 @@ DP-B  3xx handling: follow internally, or surface status to the caller?
 ```
 
 ## 3. Implementation plan → human review
+
+Required for Significant and Critical work. A Routine change needs a written scope and
+verification statement, but not a separate plan document or plan gate.
 
 - **Phases ordered by decision, not intuition** — and record the rationale ("C before A:
   C de-risks the FFI surface A depends on"). Re-orderings later are fine but update the
@@ -187,10 +233,11 @@ A guard rail that lives in prose doesn't exist for the next contributor or the n
   one agent can do the job, use one. Current models delegate more readily than the ones
   this playbook was first written against, so the plan states the maximum number of agents
   in flight at once, and exceeding it is a human decision rather than an orchestrator
-  judgment call. The floor applies to work *within* a phase, not to the phases
-  themselves. Research, design drafting, implementation, and review are always
-  delegated; the orchestrator's own tool calls are for deciding what to work on, triage,
-  gating, and verifying evidence.
+  judgment call. Significant and Critical research, design drafting, implementation,
+  and independent review are delegated when those phases apply. Routine work should stay
+  with one implementer unless a genuinely independent subproblem repays the handoff cost.
+  The orchestrator's own tool calls are for deciding what to work on, triage, gating,
+  and verifying evidence.
 - **The review agent is the sanctioned exception, and it does not generalize.** It exists
   for independence, not for double-checking: an implementer's testimony about its own work
   is not evidence (§8), and no improvement in a model's self-checking changes that. That
@@ -210,6 +257,9 @@ Numbers never mean feature-work; letters never mean roadmap.
 ```
 
 ## 6. Model and effort selection — the cost-based policy
+
+This section governs delegated Significant and Critical work. Routine work does not need
+a model-assignment plan or per-change cost telemetry.
 
 The expensive fixed cost is the **strong-model review** after every implement. Optimize
 around that fact, across both levers: how capable a model runs the agent, and how hard it
@@ -258,6 +308,11 @@ is told to work.
 
 ## 7. The implement agent
 
+The full protocol below applies to Significant and Critical items. A Routine implementer
+uses the universal rails in §0, reports the premise and reuse search, runs relevant checks,
+and leaves a reviewable diff; it does not create evidence files, cost lines, or a formal
+exit artifact unless the change's risk justifies them.
+
 The brief contains ONLY: that item's section, the invariants, the hard rules, the env
 gotchas. Not the whole plan — context is cost and distraction.
 
@@ -280,8 +335,10 @@ Duties, in order:
    rule FIX-NOW, which creates a NEW item with its own scope/verify/review coverage —
    never a silent expansion of the current item. Observations that wouldn't become
    tracker issues stay NOTEs in the return.
-4. **Write the test, then run the mutation cycle** (below). *"Verified by construction"
-   is banned vocabulary.*
+4. **Write the test, then run the mutation cycle when the profile or plan requires it.**
+   Significant work uses mutation when the new test's oracle is not self-evident or the
+   regression can practically be reintroduced. Critical work always executes it.
+   *"Verified by construction" is banned vocabulary.*
 5. **Verify on each platform the matrix requires, proportional to the diff** (doc-only ≠
    full matrix; production code = full matrix).
 6. **Commit in reviewable units; never push.** Pushing is an orchestrator action taken
@@ -293,7 +350,7 @@ Duties, in order:
    *protocol* long before *capability*; a pasted checklist catches the drift mechanically
    and costs nothing. Don't escalate models to fix protocol lapses — fix the brief.
 
-Mutation cycle — both halves, executed, committed:
+Mutation cycle — when required, both halves are executed; Critical evidence is committed:
 
 ```
 $ # break it
@@ -320,7 +377,13 @@ Exit checklist — paste it, check each line, do not paraphrase:
 
 **Independent, never the author, and it re-executes — never trusts.**
 
-- Runs in an **isolated worktree** at the exact commit under review.
+Independent review is required for Significant and Critical work. Significant review
+may run in the existing clean tree and retain only the command output needed to support
+its verdict. Critical review uses every isolation and evidence rule below. Routine work
+requires final-diff review, but not a separate review agent or duplicate execution unless
+the reviewer identifies a concrete risk.
+
+- For Critical work, runs in an **isolated worktree** at the exact commit under review.
 - **Foreground execution only — every brief says so explicitly, naming the tools.**
   **The mechanism, so agents stop rediscovering it the hard way:** a completion
   notification (a backgrounded shell exit, a Monitor/timer firing, a spawned task
@@ -347,13 +410,14 @@ Exit checklist — paste it, check each line, do not paraphrase:
   sub-agent that spawned a Monitor loop and stalled reporting "waiting for the monitor
   to signal the run finished." The brief line alone does not stick; the mechanism
   explanation is the load-bearing part.)
-- **File-backed incremental report** (`<item>-review-report.md`): a timestamped section
+- **For Critical work, file-backed incremental report**
+  (`<item>-review-report.md`): a timestamped section
   after each check, VERDICT as the last line. (This exists because a reviewer once
   *vanished*, leaving only a "PASS" stamped too soon to be real.)
   - **A verdict with no surviving evidence artifact is VOID** — relaunch, don't accept.
   - The orchestrator sanity-checks verdict wall-clock against the prescribed work.
-- **Checklist core** (tune per item): **1** scope — full diff vs claimed files, invariant
-  grep, nothing swept in; **2** premise — re-verify the author's factual claims at the
+- **Checklist core** (tune per profile and item): **1** scope — full diff vs claimed
+  files, invariant grep, nothing swept in; **2** premise — re-verify the author's factual claims at the
   source; **3** re-execute the mutation cycle, plus — for security-critical items — **one
   additional mutation of the reviewer's own choosing** (reviewer-chosen mutations are what
   killed the hollow-test class); **4** test quality — do tests drive PRODUCTION code, or a
@@ -385,7 +449,8 @@ A finding is concrete or it isn't a finding:
       → STOP and ask. Do not proceed on judgment."
   ```
 
-- **Evidence bar for any "ran X under tool Y" claim** — all four, committed to the repo:
+- **Critical evidence bar for any "ran X under tool Y" claim** — all four, committed to
+  the repo:
   (1) prove the tool is in the exact artifact tested (e.g. symbol counts on the loaded
   binary); (2) named PASS lines from inside the run; (3) zero-counts counted only after
   1+2; (4) the commit hash embedded in the evidence file.
@@ -393,7 +458,8 @@ A finding is concrete or it isn't a finding:
   can't be forced in a test, split into (a) a behavioral assertion that gates what CAN be
   forced + (b) a unit test proving the harm exists without the fix. Document the
   decomposition.
-- **The whole-range gate at phase end checks CROSS-ITEM concerns only:** integration
+- **For Significant and Critical work, the whole-range gate at phase end checks
+  CROSS-ITEM concerns only:** integration
   between items, scope creep across the range, sanitizer/CI artifacts + provenance, docs
   coherence. It does NOT re-litigate items that passed per-item review — that duplication
   is pure cost.
@@ -448,6 +514,9 @@ state the rule in prose and drop the link. Scale detail by **surprise**, not wor
 
 ## 11. Operating agents economically
 
+These controls apply when a Significant or Critical plan delegates work. Routine work
+should avoid orchestration machinery whose setup costs more than the change.
+
 Token cost ≈ model price × tool calls × transcript length: **every tool call re-processes
 the whole transcript.** (The default cache TTL is 5 minutes; a 1-hour TTL exists and helps
 stable cross-agent prefixes — opt in explicitly and confirm it's live via
@@ -471,7 +540,7 @@ reduces the re-processing bill but does not remove it.) Hence:
     or redirect-and-read-immediately in the same synchronous step (§8). The `&` and the
     `sleep`-poll loop are exactly the shape that hangs them.
 
-- **Tool-call budgets in every brief** (~80 mechanical / ~150 subtle): exceeding it means
+- **Tool-call budgets in delegated briefs** (~80 mechanical / ~150 subtle): exceeding it means
   write a handoff brief with exact state and STOP. A grinding agent at call 120 pays
   full-transcript price per call for diminishing returns.
 - **Split long work into sequential short agents** with handoff briefs, not one marathon
@@ -484,6 +553,11 @@ reduces the re-processing bill but does not remove it.) Hence:
   gotchas is cheaper than one wedged agent.
 
 ## 12. Verify-before-trust (the orchestrator's own discipline)
+
+Apply this section proportionally. Every profile requires inspection of the diff and the
+actual output of claimed checks. Committed evidence, clean-room re-execution, and
+quiescence checks are mandatory only where the Critical profile or an approved plan calls
+for them.
 
 - Check agent claims against source/output — including *explanations* (agents have
   fabricated nonexistent reports and code constructs in explanations) and "environmental
@@ -514,6 +588,10 @@ reduces the re-processing bill but does not remove it.) Hence:
   narrative. Sessions die; the handoff survives.
 
 ## 13. Human touchpoints (automate nothing past these)
+
+Routine work needs a human gate only when it encounters direction, scope expansion,
+deployment mutation, publication, or another irreversible action. Significant and
+Critical work additionally use these planned touchpoints:
 
 1. **Design-doc review** — answers the decision points. The human reads the DP section
    alone; the body is backstopped by the doc review agent's PASS (§2), which the doc
