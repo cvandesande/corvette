@@ -1,0 +1,191 @@
+Minimum edits that let Frigate's own nginx configuration run outside its
+container, on an unprivileged account, with no Frigate backend, no go2rtc and
+no media tree.
+
+Applied to a scratch copy of vendor/ at run time (`patch -p1`), never to the
+vendored files themselves. Every hunk below carries its justification on the
+@@ line. Nothing here touches location matching, try_files, sub_filter,
+add_header/expires, autoindex, auth_request, or the proxy includes -- those are
+the behaviour the harness exists to measure, so an edit to any of them would
+make the measurement worthless.
+
+One removal is larger than a path rewrite and is called out here as well as at
+its hunks: the nginx this harness runs is the flake's stock build, which has
+neither nginx-vod-module nor nginx-secure-token-module, so the `vod_*`,
+`vod`, and `secure_token` directives will not parse. They are dropped, and with
+them `location /vod/`. THE HARNESS THEREFORE MODELS NOTHING ABOUT /vod/. The
+check runner refuses a route assertion under that prefix rather than leaving
+the gap to a reader's memory.
+
+--- a/nginx.conf
++++ b/nginx.conf
+@@ -1,9 +1,8 @@ runs unprivileged and outside the container: no `user` to set, one worker for deterministic logs, pid and error log under the harness prefix rather than /var/run and /dev/stdout
+ daemon off;
+-user root;
+-worker_processes auto;
++worker_processes 1;
+
+-error_log /dev/stdout warn;
+-pid /var/run/nginx.pid;
++error_log logs/error.log warn;
++pid logs/nginx.pid;
+
+ events {
+     worker_connections 1024;
+@@ -21,7 +20,7 @@ access log to a file under the harness prefix, so a failing check can quote the request nginx actually saw
+                         'request_time="$request_time" upstream_response_time="$upstream_response_time"';
+
+
+-    access_log /dev/stdout main;
++    access_log logs/access.log main;
+
+     # send headers in one piece, it is better than sending them one by one
+     tcp_nopush on;
+@@ -36,7 +35,7 @@ proxy cache under the harness prefix: /dev/shm is shared with every other user and process on the machine, so runs would inherit each other's cached responses
+     gzip_proxied no-cache no-store private expired auth;
+     gzip_vary on;
+
+-    proxy_cache_path /dev/shm/nginx_cache levels=1:2 keys_zone=api_cache:10m max_size=10m inactive=1m use_temp_path=off;
++    proxy_cache_path cache/api levels=1:2 keys_zone=api_cache:10m max_size=10m inactive=1m use_temp_path=off;
+
+     map $sent_http_content_type $should_not_cache {
+         'application/json' 0;
+@@ -44,17 +43,17 @@ every upstream points at the harness stub instead of the container's ports, so no request can reach a real service that happens to be listening locally
+     }
+
+     upstream frigate_api {
+-        server 127.0.0.1:5001;
++        server 127.0.0.1:15001;
+         keepalive 1024;
+     }
+
+     upstream mqtt_ws {
+-        server 127.0.0.1:5002;
++        server 127.0.0.1:15001;
+         keepalive 1024;
+     }
+
+     upstream jsmpeg {
+-        server 127.0.0.1:8082;
++        server 127.0.0.1:15001;
+         keepalive 1024;
+     }
+
+@@ -63,21 +62,6 @@ nginx-vod-module is absent from this nginx, so its server-level settings will not parse
+     server {
+         include listen.conf;
+
+-        # vod settings
+-        vod_base_url '';
+-        vod_segments_base_url '';
+-        vod_mode mapped;
+-        vod_max_mapping_response_size 1m;
+-        vod_upstream_location /api;
+-        vod_align_segments_to_key_frames on;
+-        vod_manifest_segment_durations_mode accurate;
+-        vod_ignore_edit_list on;
+-        vod_segment_duration 10000;
+-
+-        # MPEG-TS settings (not used when fMP4 is enabled, kept for reference)
+-        vod_hls_mpegts_align_frames off;
+-        vod_hls_mpegts_interleave_frames on;
+-
+         # file handle caching / aio
+         open_file_cache max=1000 inactive=5m;
+         open_file_cache_valid 2m;
+@@ -88,13 +72,6 @@ the rest of the same absent module's server-level settings
+         # file upload size
+         client_max_body_size 20M;
+
+-        # https://github.com/kaltura/nginx-vod-module#vod_open_file_thread_pool
+-        vod_open_file_thread_pool default;
+-
+-        # vod caches
+-        vod_metadata_cache metadata_cache 512m;
+-        vod_mapping_cache mapping_cache 5m 10m;
+-
+         # gzip manifests
+         gzip on;
+         gzip_types application/vnd.apple.mpegurl;
+@@ -102,28 +79,6 @@ the /vod/ location itself: its body is nginx-vod-module and nginx-secure-token-module directives, so it cannot be kept in any form this nginx accepts
+         include auth_location.conf;
+         include base_path.conf;
+
+-        location /vod/ {
+-            include auth_request.conf;
+-            aio threads;
+-            vod hls;
+-
+-            # Use fMP4 (fragmented MP4) instead of MPEG-TS for better performance
+-            # Smaller segments, faster generation, better browser compatibility
+-            vod_hls_container_format fmp4;
+-
+-            secure_token $args;
+-            secure_token_types application/vnd.apple.mpegurl;
+-
+-            add_header Cache-Control "no-store";
+-            expires off;
+-
+-            keepalive_disable safari;
+-
+-            # vod module returns 502 for non-existent media
+-            # https://github.com/kaltura/nginx-vod-module/issues/468
+-            error_page 502 =404 /vod-not-found;
+-        }
+-
+         location = /vod-not-found {
+             return 404;
+         }
+@@ -153,7 +108,7 @@ media root becomes a harness fixture tree, resolved against the nginx prefix; the location's own directives are untouched
+             expires 7d;
+             add_header Cache-Control "public";
+             autoindex on;
+-            root /media/frigate;
++            root media;
+         }
+
+         location /cache/ {
+@@ -169,7 +124,7 @@ same fixture media tree; this is the location whose JSON autoindex the trailing-slash check measures
+
+             autoindex on;
+             autoindex_format json;
+-            root /media/frigate;
++            root media;
+         }
+
+         location /exports/ {
+@@ -180,7 +135,7 @@ same fixture media tree
+
+             autoindex on;
+             autoindex_format json;
+-            root /media/frigate;
++            root media;
+         }
+
+         location /ws {
+@@ -356,7 +311,7 @@ web root becomes the staged overlay tree, resolved against the nginx prefix; try_files and every sub_filter above it are untouched
+             sub_filter_types text/css application/javascript;
+             sub_filter_once off;
+
+-            root /opt/frigate/web;
++            root web;
+             try_files $uri $uri.html $uri/ /index.html;
+         }
+     }
+--- a/go2rtc_upstream.conf
++++ b/go2rtc_upstream.conf
+@@ -1,4 +1,4 @@ go2rtc upstream points at the harness stub
+ upstream go2rtc {
+-    server 127.0.0.1:1984;
++    server 127.0.0.1:11984;
+     keepalive 1024;
+ }
+\ No newline at end of file
+--- a/auth_location.conf
++++ b/auth_location.conf
+@@ -1,4 +1,4 @@ the auth subrequest target points at the harness stub, which answers it 202 so auth_request resolves
+-set $upstream_auth http://127.0.0.1:5001/auth;
++set $upstream_auth http://127.0.0.1:15001/auth;
+
+ ## Virtual endpoint created by nginx to forward auth requests.
+ location /auth {

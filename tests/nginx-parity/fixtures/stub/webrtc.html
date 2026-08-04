@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>go2rtc WebRTC player</title>
+  </head>
+  <body>
+    go2rtc-webrtc-player
+    <script>
+      // Stands in for the player page go2rtc serves at /webrtc.html, which
+      // deployed nginx proxies as a single file. Only two properties of it
+      // matter to the checks: it is HTML, and it is nothing like the shell
+      // this site's own routes fall back to.
+      const source = new URLSearchParams(location.search).get("src");
+      document.title = source ? `go2rtc: ${source}` : "go2rtc";
+    </script>
+  </body>
+</html>

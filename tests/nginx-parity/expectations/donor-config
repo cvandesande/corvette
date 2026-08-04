@@ -1,0 +1,11 @@
+# What Frigate's own configuration, unmodified, returns for the two /pkg/
+# questions. Measured against it -- not hoped for.
+#
+# /pkg/ is not one of the nested locations, so it inherits the catch-all's
+# try_files and its no-store header: a missing bundle file is answered with the
+# site's shell at 200, which a wasm or module loader reports as a parse error
+# rather than a missing file.
+missing_pkg_asset_status=200
+missing_pkg_asset_content_type=text/html
+missing_pkg_asset_is_shell=yes
+pkg_cache_control=no-store

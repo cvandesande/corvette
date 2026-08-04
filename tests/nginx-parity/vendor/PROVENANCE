@@ -1,0 +1,61 @@
+Origin of the files in this directory
+=====================================
+
+Every file beside this one is a byte-for-byte copy of Frigate's own nginx
+configuration at the revision the deployment runs. They are vendored, never
+edited: the harness applies ../offline.patch to a scratch copy at run time, so
+a reviewer can diff these files against upstream and get an empty result.
+
+Upstream repository  https://github.com/blakeblackshear/frigate
+Revision             3d4dd3ac4  (tag v0.17.2)
+Source directory     docker/main/rootfs/usr/local/nginx/conf/
+Copied               2026-08-04, with `git show 3d4dd3a:<source path>`
+
+  file                        md5                               source path
+  nginx.conf                  ab5dc3e90e54616dc30c7cdc8fac4048  docker/main/rootfs/usr/local/nginx/conf/nginx.conf
+  auth_location.conf          522ac3d34f2615520f96b6a26278e7aa  docker/main/rootfs/usr/local/nginx/conf/auth_location.conf
+  auth_request.conf           f404f1fcb032379cdf714a7b33820d4c  docker/main/rootfs/usr/local/nginx/conf/auth_request.conf
+  go2rtc_upstream.conf        1021c6a864aea2107ce776327eefd37c  docker/main/rootfs/usr/local/nginx/conf/go2rtc_upstream.conf
+  proxy.conf                  aaf9c8947b323861f5ac71562631fc73  docker/main/rootfs/usr/local/nginx/conf/proxy.conf
+  proxy_trusted_headers.conf  27de4bc2612bca1f51ec87bc239dad4d  docker/main/rootfs/usr/local/nginx/conf/proxy_trusted_headers.conf
+
+Reproduce the whole set:
+
+  for f in nginx.conf auth_location.conf auth_request.conf \
+           go2rtc_upstream.conf proxy.conf proxy_trusted_headers.conf; do
+    git -C <frigate checkout> show \
+      "3d4dd3a:docker/main/rootfs/usr/local/nginx/conf/$f" | md5sum
+  done
+
+Why these six
+-------------
+
+nginx.conf includes go2rtc_upstream.conf, auth_location.conf, auth_request.conf
+and proxy.conf directly; auth_location.conf in turn includes
+proxy_trusted_headers.conf, so the sixth file is required for the configuration
+to load at all.
+
+Two more includes are named by nginx.conf and are absent here on purpose:
+
+  listen.conf     generated in the container from templates/listen.gotmpl
+  base_path.conf  generated in the container from templates/base_path.gotmpl
+
+Neither exists in Frigate's source tree, so neither can be vendored. The
+harness writes both, following those templates: listen.conf gets the two
+`listen` lines the template emits with no TLS and no IPv6 section, at the
+harness's own ports; base_path.conf is written empty, which is what the
+template renders when no base path is configured.
+
+Why the deployment's line numbers are these files' line numbers
+--------------------------------------------------------------
+
+The running pod's /usr/local/nginx/conf/nginx.conf was diffed against this
+revision and differed on one line -- `worker_processes auto` against
+`worker_processes 4` -- with no change in file length, and the four includes
+matched the pod by md5. That measurement lives in
+.agents/issue-2/RESEARCH-serving-contract.md; the md5 column above is the
+source half of it, recomputed when these copies were taken.
+
+mime.types is nginx's own, not Frigate's. The pod's copy maps
+`application/wasm wasm;` at line 55 and so does the nginx this harness runs
+(1.30.4), which is what makes the wasm content-type assertion meaningful here.

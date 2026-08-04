@@ -1,0 +1,11 @@
+# What a configuration that gives /pkg/ its own location must return.
+#
+# A nested location does not inherit try_files, so a missing bundle file
+# becomes a real 404 instead of the shell. Cache-Control is no-cache: the
+# browser keeps the bytes and revalidates every load, so a superseded bundle at
+# an unchanged filename can never be served, and the multi-megabyte wasm still
+# answers 304 rather than being re-transferred.
+missing_pkg_asset_status=404
+missing_pkg_asset_content_type=text/html
+missing_pkg_asset_is_shell=no
+pkg_cache_control=no-cache

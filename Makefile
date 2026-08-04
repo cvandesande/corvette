@@ -1,8 +1,8 @@
-.PHONY: check check-cpp check-nix check-no-mutation check-rust check-shell check-site-shape \
-	check-ui check-whitespace serve-ui
+.PHONY: check check-cpp check-nginx-parity check-nix check-no-mutation check-rust check-shell \
+	check-site-shape check-ui check-whitespace serve-ui
 
 check: check-rust check-cpp check-shell check-nix check-ui check-whitespace check-site-shape \
-	check-no-mutation
+	check-nginx-parity check-no-mutation
 
 check-rust:
 	cargo fmt --all -- --check
@@ -27,6 +27,10 @@ check-ui:
 check-site-shape:
 	./scripts/build_site.sh
 	./scripts/check_site_shape.sh target/site-publish
+
+# Runs after check-site-shape, which stages the publish tree this serves.
+check-nginx-parity:
+	./scripts/run_nginx_parity.sh
 
 check-no-mutation:
 	./scripts/check_no_mutation.sh
