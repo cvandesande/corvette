@@ -24,7 +24,10 @@ independent re-execution.
 ## 0. Lifecycle at a glance
 
 ```
-RESEARCH ──► DESIGN DOC ──► [HUMAN GATE] ──► IMPLEMENTATION PLAN ──► [HUMAN GATE]
+RESEARCH ──► DESIGN DOC ──► DOC FACT-REVIEW ──► [HUMAN GATE: answer the DPs]
+                                                      │
+                                                      ▼
+                              IMPLEMENTATION PLAN ──► [HUMAN GATE]
                                                       │
                                   invariants + decisions-of-record locked here
                                                       ▼
@@ -42,8 +45,9 @@ RESEARCH ──► DESIGN DOC ──► [HUMAN GATE] ──► IMPLEMENTATION PL
 ```
 
 Humans gate **direction** (design, plan, scope changes, irreversible actions).
-Agents gate **correctness** (premise, tests, mutation, re-execution).
-Neither substitutes for the other.
+Agents gate **correctness** (premise, facts, tests, mutation, re-execution).
+Neither substitutes for the other — an agent that approves a direction has replaced the
+human gate rather than fed it.
 
 ---
 
@@ -82,13 +86,34 @@ F-3  TLS hostname verification
   more" kills scope creep before it has a budget).
 - **WHY docs stay separate from WHAT docs.** The repo is self-describing for WHAT it
   does; the design doc holds WHY.
+- **The doc may be agent-drafted; the decisions may not.** Drafting from the research is
+  high-context, low-judgment work and belongs off the orchestrator's context. Answering a
+  DP is direction, and direction is the human's. A drafting agent writes each DP complete
+  — question, options, tradeoff, and its own recommendation — and leaves
+  `DECISION  pending`. It never fills that line, and neither does any reviewer. A DP an
+  agent answered is a decision nobody made, and every downstream phase quotes it verbatim.
+- **The drafting agent is not one of the researchers.** An agent drafting from its own
+  findings carries its own blind spots into the doc with nothing left to catch them; §8's
+  independence rule applies here for the same reason it applies to code.
+- **The DP section is self-contained and comes first.** The human answers from that
+  section alone, so each DP states enough to be decided without reading the body. A DP
+  whose framing needs the body is not finished.
+- **A doc review agent checks facts, never direction.** Independent of the drafter, its
+  verdict is PASS/FAIL on accuracy alone: every load-bearing claim resolves at its cited
+  source, nothing the research marked UNVERIFIED is restated as fact, and each DP's
+  options are materially different with real tradeoffs. FAIL returns the doc to the
+  drafter. PASS means only that the doc is safe to put in front of the human — it is not
+  an approval, and the doc reaches the human only after it.
 
-Canonical decision point → decision of record:
+Canonical decision point, as drafted and as decided:
 
 ```
 DP-B  3xx handling: follow internally, or surface status to the caller?
-  Options  (a) follow internally   (b) return upstream status to caller
-  Trade    (a) ergonomic, hides hop count;  (b) explicit, matches mod_X
+  Options   (a) follow internally   (b) return upstream status to caller
+  Trade     (a) ergonomic, hides hop count;  (b) explicit, matches mod_X
+  RECOMMEND (b) — the incumbent's callers already own redirect policy
+  DECISION  pending                          ← an agent stops here
+
   DECISION (human, 2026-05-02): (b). Rationale: parity with incumbent;
            caller owns redirect policy.  ← quoted verbatim into PLAN §A2
 ```
@@ -438,7 +463,9 @@ reduces the re-processing bill but does not remove it.) Hence:
 
 ## 13. Human touchpoints (automate nothing past these)
 
-1. **Design-doc review** — answers the decision points.
+1. **Design-doc review** — answers the decision points. The human reads the DP section
+   alone; the body is backstopped by the doc review agent's PASS (§2), which the doc
+   needs before it reaches the human at all.
 2. **Plan review** — approves decomposition, invariants, model/cost plan.
 3. **STOP-AND-ASK escalations** — premise corrections, irreversible actions, mid-phase
    scope changes. Exception of record: newly discovered issues that need NO redesign
