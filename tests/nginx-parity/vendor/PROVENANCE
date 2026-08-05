@@ -27,6 +27,13 @@ Reproduce the whole set:
       "3d4dd3a:docker/main/rootfs/usr/local/nginx/conf/$f" | md5sum
   done
 
+The md5 column is read, not just recorded: scripts/run_nginx_parity.sh hashes
+every file in this directory and refuses to run unless the value here matches,
+so a copy edited in place, or taken from another revision, stops the harness
+instead of quietly changing what it measures. Re-vendoring means updating this
+table and ../offline.patch together; the runner refuses a patch that no longer
+applies exactly, which is the other half of the same guard.
+
 Why these six
 -------------
 
@@ -49,12 +56,12 @@ template renders when no base path is configured.
 Why the deployment's line numbers are these files' line numbers
 --------------------------------------------------------------
 
-The running pod's /usr/local/nginx/conf/nginx.conf was diffed against this
-revision and differed on one line -- `worker_processes auto` against
-`worker_processes 4` -- with no change in file length, and the four includes
-matched the pod by md5. That measurement lives in
-.agents/issue-2/RESEARCH-serving-contract.md; the md5 column above is the
-source half of it, recomputed when these copies were taken.
+The running pod's /usr/local/nginx/conf/nginx.conf was read out of the pod and
+diffed against `git show 3d4dd3a:docker/main/rootfs/usr/local/nginx/conf/
+nginx.conf`. The diff was a single hunk -- `worker_processes auto;` against
+`worker_processes 4;` -- with no change in file length, and the four includes
+the pod carries matched by md5. The md5 column above is the source half of that
+comparison, recomputed when these copies were taken.
 
 mime.types is nginx's own, not Frigate's. The pod's copy maps
 `application/wasm wasm;` at line 55 and so does the nginx this harness runs

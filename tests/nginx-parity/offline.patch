@@ -177,7 +177,7 @@ the gap to a reader's memory.
 @@ -1,4 +1,4 @@ go2rtc upstream points at the harness stub
  upstream go2rtc {
 -    server 127.0.0.1:1984;
-+    server 127.0.0.1:11984;
++    server 127.0.0.1:15002;
      keepalive 1024;
  }
 \ No newline at end of file

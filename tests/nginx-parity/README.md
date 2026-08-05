@@ -33,7 +33,8 @@ predicate.
 ## What it runs
 
 `vendor/` holds Frigate v0.17.2's nginx configuration, byte for byte; see
-`vendor/PROVENANCE` for the revision, the source paths and the md5s.
+`vendor/PROVENANCE` for the revision, the source paths and the md5s, which the
+runner checks before it patches anything.
 `offline.patch` carries the only edits, each justified on its hunk header:
 unprivileged process settings, writable pid/log/cache paths, upstream
 addresses, the two filesystem roots, and the removal of the directives that
@@ -56,15 +57,24 @@ the stub.
 - **Nothing about `/vod/`.** The flake's nginx has neither nginx-vod-module nor
   nginx-secure-token-module, so those directives will not parse and the patch
   removes them along with the location they configure.
-- **Nothing about the proxied routes** (`/api/*`, `/clips/`, `/stream/`,
-  `/exports/`, `/ws`, `/live/*` other than the player page). Their upstreams are
-  stubs. The runner refuses an assertion under those prefixes rather than
+- **Nothing about the proxied routes** (`/api/*`, `/ws`, `/live/*` other than
+  the player page). Their upstreams are stubs.
+- **Nothing about `/clips/` or `/stream/`**, which have no fixture content
+  staged under them and so answer for a directory that is not there.
+  `/recordings/` and `/exports/` do have fixture content, and those two stay
+  assertable.
+
+  The runner refuses an assertion under any of the prefixes above rather than
   letting a fixture's answer be read as the deployment's.
 - **Nothing about authentication.** The stub answers every `/auth` subrequest
   202. Frigate's real answer depends on the port the request arrived on and on
   session state, neither of which is modelled here.
 - **Nothing about the deployment's own state** — its media tree, its cameras,
   or its configuration. The media root is a fixture.
+- **Nothing about a deployment that sets a base path.** `base_path.conf` is
+  written empty here, which is what the container's template renders when no
+  base path is configured; whether that matches the running deployment has not
+  been measured, and every result above assumes it does.
 
 ## Testing a proposed configuration change
 
@@ -75,7 +85,10 @@ here before it is built into an image:
       --extra-patch <patch against the vendored config> \
       --expect tests/nginx-parity/expectations/<profile>
 
-`--extra-patch` is applied after `offline.patch`. The expectations file states
+`--extra-patch` is applied after `offline.patch`. Both must apply exactly:
+`patch` reports a hunk it placed at a shifted line number and still exits 0, so
+the runner reads that report and stops, rather than measuring a configuration
+the patch no longer describes. The expectations file states
 what a missing file under `/pkg/` returns and what `Cache-Control` `/pkg/`
 carries; `expectations/donor-config` records what the unmodified configuration
 does today, and `expectations/pkg-location` states what a configuration that
@@ -86,5 +99,8 @@ the parameter worth having.
 ## Ports
 
 18971 (external analogue), 15000 (internal analogue), 15001 (Frigate stub),
-11984 (go2rtc stub). The runner refuses to start if any of them is in use, so
-it can never report on a server it did not start.
+15002 (go2rtc stub). The runner refuses to start if any of them is in use, so
+it can never report on a server it did not start. None of them is a port a dev
+session occupies — 8080 and 8081 for the site and its live reload, 5000 and
+11984 for `scripts/serve_ui.sh`'s forwards — so a dev session and a check run do
+not abort each other.

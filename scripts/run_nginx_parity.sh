@@ -30,11 +30,14 @@ PUBLISH_TREE="$REPO/target/site-publish"
 
 # Fixed so the applied patch can be a plain checked-in diff. A port already in
 # use is a hard stop below rather than something to work around: the harness
-# must know it is talking to its own nginx.
+# must know it is talking to its own nginx. None of them may be a port a dev
+# session occupies -- 8080 and 8081 for the site and its live reload, 5000 and
+# 11984 for scripts/serve_ui.sh's forwards -- or running the checks alongside
+# one aborts the run on a port clash.
 WEB_PORT=18971
 INTERNAL_PORT=15000
 FRIGATE_STUB_PORT=15001
-GO2RTC_STUB_PORT=11984
+GO2RTC_STUB_PORT=15002
 
 BASE_URL="http://127.0.0.1:$WEB_PORT"
 
@@ -60,7 +63,7 @@ done
 
 # Phase 1: refuse to run on anything but a complete, quiet environment.
 
-for tool in nginx curl patch cmp; do
+for tool in nginx curl patch cmp md5sum; do
   if ! command -v "$tool" >/dev/null; then
     echo "run_nginx_parity: $tool is not on PATH -- run under 'nix develop'" >&2
     exit 1
@@ -143,10 +146,55 @@ esac
 rm -rf "$WORK"
 mkdir -p "$WORK/conf" "$WORK/logs" "$WORK/cache" "$WORK/web" "$WORK/media" "$WORK/stub" "$WORK/out"
 
+# The vendored files are what a reviewer diffs against upstream to confirm they
+# are unedited copies, and every assertion below is about the configuration
+# they describe. Hashing them here makes that a checked claim rather than a
+# recorded one: a file edited in place, or re-vendored from another revision,
+# stops the run instead of being measured. A file with no PROVENANCE row fails
+# too.
+for vendored in "$HARNESS"/vendor/*.conf; do
+  vendored_name="$(basename "$vendored")"
+  recorded_md5="$(awk -v name="$vendored_name" \
+    '$1 == name && $2 ~ /^[0-9a-f]{32}$/ { print $2 }' "$HARNESS/vendor/PROVENANCE")"
+  actual_md5="$(md5sum "$vendored" | cut -d' ' -f1)"
+  if [[ "$actual_md5" != "$recorded_md5" ]]; then
+    echo "run_nginx_parity: vendor/$vendored_name is md5 $actual_md5, but" \
+      "vendor/PROVENANCE records '$recorded_md5' -- re-vendor the" \
+      "configuration and offline.patch together" >&2
+    exit 1
+  fi
+done
+
+# patch(1) applies a hunk at a shifted line number, or with context lines
+# ignored, and still exits 0 -- so a diff that no longer describes the file it
+# is applied to yields a configuration nobody wrote, with no sign of it. -F0
+# refuses the fuzzy match outright; a shifted one is reported and not otherwise
+# signalled, so the report is read rather than silenced. The hashes above
+# cannot cover this: they say the input is the revision that was vendored, not
+# that a patch still describes it, and --extra-patch has no recorded hash at
+# all.
+apply_config_patch() {
+  local patch_file=$1
+  local report
+  # LC_ALL=C so what is matched below is patch's own wording, not a translation.
+  if ! report="$(LC_ALL=C patch -p1 -F0 -d "$WORK/conf" -i "$patch_file" 2>&1)"; then
+    echo "$report" >&2
+    echo "run_nginx_parity: $patch_file does not apply to the vendored" \
+      "configuration" >&2
+    exit 1
+  fi
+  if grep -qE 'offset|fuzz' <<<"$report"; then
+    echo "$report" >&2
+    echo "run_nginx_parity: $patch_file applied at a shifted line number, so it" \
+      "no longer describes the configuration it patches -- rebuild the patch" >&2
+    exit 1
+  fi
+}
+
 cp "$HARNESS"/vendor/*.conf "$WORK/conf/"
-patch -p1 -d "$WORK/conf" --silent -i "$HARNESS/offline.patch"
+apply_config_patch "$HARNESS/offline.patch"
 if [[ -n "$extra_patch" ]]; then
-  patch -p1 -d "$WORK/conf" --silent -i "$extra_patch"
+  apply_config_patch "$extra_patch"
 fi
 
 # Both of these are generated inside the container from Go templates rather
@@ -215,29 +263,42 @@ wait_for_port "$WEB_PORT"
 
 # Phase 5: the assertions.
 
+# Every check ends in exactly one of these two, so counting here rather than at
+# the call sites keeps the run's only completeness signal from drifting when a
+# check is added. Guards that abort the run exit instead of reporting.
 checks_run=0
 checks_failed=0
 
 fail() {
   echo "  FAIL $1" >&2
+  checks_run=$((checks_run + 1))
   checks_failed=$((checks_failed + 1))
 }
 
 pass() {
   echo "  ok   $1"
+  checks_run=$((checks_run + 1))
 }
 
-# Paths the harness does not model. Their upstreams are stubs and the vod
-# module is not in this nginx at all, so an assertion about one of them would
-# be measuring the fixture rather than the deployment. The one exception is the
-# go2rtc player page, which is a real fixture on purpose.
+# Paths the harness does not model, where an assertion would be measuring the
+# harness rather than the deployment. /api/, /ws and /live/ are proxied to the
+# stub; /vod/ is nginx-vod-module's, which this nginx does not have, so
+# offline.patch deletes the location outright; /clips/ and /stream/ resolve to
+# directories nothing is staged under -- /clips/ under the fixture media tree,
+# /stream/ under /tmp, whose root the patch leaves alone. The two locations
+# that do have fixture content, /recordings/ and /exports/, are modelled and
+# stay assertable, as is the one /live/ path the stub answers with a real
+# go2rtc player page.
+#
+# Matching drops the query string: the player page is fetched with the camera
+# in one, and a query cannot move a request to a different location block.
 refuse_unmodelled_path() {
   local path=$1
-  case "$path" in
+  case "${path%%\?*}" in
     /live/webrtc/webrtc.html) return 0 ;;
-    /api/* | /vod/* | /clips/* | /stream/* | /exports/* | /ws | /ws/* | /live/*)
-      echo "run_nginx_parity: $path is proxied or module-backed and is not" \
-        "modelled here; measure it against the deployment" >&2
+    /api/* | /vod/* | /clips/* | /stream/* | /ws | /ws/* | /live/*)
+      echo "run_nginx_parity: $path is not modelled here; measure it against" \
+        "the deployment" >&2
       exit 1
       ;;
   esac
@@ -283,7 +344,6 @@ assert_route() {
     exit 1
   fi
   refuse_unmodelled_path "$path"
-  checks_run=$((checks_run + 1))
 
   # One file per check, so a failed run leaves every response on disk to read.
   local out="$WORK/out/${name//[^A-Za-z0-9]/-}"
@@ -337,7 +397,6 @@ assert_route "shell at /events" /events 200 text/html \
 assert_route "shell at /recordings" /recordings 200 text/html \
   contains:/pkg/corvette.js absent:donor-react-shell
 
-checks_run=$((checks_run + 1))
 http_get / "$WORK/out/root" >/dev/null
 http_get /events "$WORK/out/events" >/dev/null
 http_get /recordings "$WORK/out/recordings" >/dev/null
@@ -373,7 +432,6 @@ assert_route "missing asset under /assets/" /assets/does-not-exist.js 404 text/h
 assert_route "go2rtc player" /live/webrtc/webrtc.html 200 text/html \
   contains:go2rtc-webrtc-player absent:/pkg/corvette.js
 
-checks_run=$((checks_run + 1))
 http_get /live/webrtc/webrtc.html "$WORK/out/player" >/dev/null
 if cmp -s <(strip_injected_script "$WORK/out/root.body") \
   <(strip_injected_script "$WORK/out/player.body"); then
@@ -388,7 +446,6 @@ fi
 assert_route "wasm binary" /pkg/corvette.wasm 200 application/wasm \
   absent:/pkg/corvette.js
 
-checks_run=$((checks_run + 1))
 http_get /pkg/corvette.wasm "$WORK/out/wasm" >/dev/null
 wasm_length="$(header_value "$WORK/out/wasm.head" content-length)"
 # 00 61 73 6d is the four-byte preamble every WebAssembly module starts with.
@@ -402,7 +459,6 @@ fi
 # Unhashed filenames mean any positive freshness lifetime is a window in which
 # a browser serves a superseded bundle from a URL that did not change. This
 # holds for every configuration; the exact header is the expectations file's.
-checks_run=$((checks_run + 1))
 wasm_cache="$(header_value "$WORK/out/wasm.head" cache-control)"
 wasm_expires="$(header_value "$WORK/out/wasm.head" expires)"
 if [[ "$wasm_cache" == *"$pkg_cache_control"* ]] &&
@@ -430,7 +486,6 @@ fi
 # a request header. This site emits none of those tokens, so the only rule that
 # can fire is the one that injects a window.baseUrl script after <body>.
 
-checks_run=$((checks_run + 1))
 http_get /pkg/corvette.js "$WORK/out/js-plain" >/dev/null
 http_get /pkg/corvette.js "$WORK/out/js-prefixed" 'X-Ingress-Path: /sub' >/dev/null
 if cmp -s "$WORK/out/js-plain.body" "$WORK/out/js-prefixed.body"; then
@@ -439,7 +494,6 @@ else
   fail "the loader JavaScript changed under an ingress path"
 fi
 
-checks_run=$((checks_run + 1))
 http_get / "$WORK/out/html-prefixed" 'X-Ingress-Path: /sub' >/dev/null
 if grep -qF 'window.baseUrl="/"' "$WORK/out/root.body" &&
   grep -qF 'window.baseUrl="/sub/"' "$WORK/out/html-prefixed.body" &&
@@ -460,7 +514,6 @@ if PARITY_BASE_URL="$BASE_URL" playwright test \
 else
   fail "the bundle did not boot through this nginx"
 fi
-checks_run=$((checks_run + 1))
 
 # Phase 8: verdict.
 
