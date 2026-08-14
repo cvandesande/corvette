@@ -412,6 +412,21 @@ fi
 assert_route "/recordings/ is the media autoindex" /recordings/ 200 application/json \
   contains:2026-08-04 contains:directory absent:/pkg/corvette.js
 
+# The mechanical statement of the collision itself, not two assertions that
+# merely happen to expect different values: same path, trailing slash is the
+# only difference, and the response is a completely different resource.
+# Assert that difference directly rather than trusting it as a byproduct of
+# the two assert_route calls above.
+http_get /recordings "$WORK/out/recordings-no-slash" >/dev/null
+http_get /recordings/ "$WORK/out/recordings-slash" >/dev/null
+recordings_no_slash_type="$(header_value "$WORK/out/recordings-no-slash.head" content-type)"
+recordings_slash_type="$(header_value "$WORK/out/recordings-slash.head" content-type)"
+if [[ "$recordings_no_slash_type" == "$recordings_slash_type" ]]; then
+  fail "/recordings and /recordings/ both answered '$recordings_no_slash_type': the trailing-slash collision is not distinguishable by content-type"
+else
+  pass "/recordings ('$recordings_no_slash_type') and /recordings/ ('$recordings_slash_type') differ in content-type"
+fi
+
 # The donor's login page still resolves, through the $uri.html step, and is not
 # the shell.
 assert_route "donor login page" /login 200 text/html \

@@ -1,8 +1,9 @@
 .PHONY: check check-cpp check-nginx-parity check-nix check-no-go2rtc check-no-mutation \
-	check-rust check-shell check-site-shape check-ui check-whitespace serve-ui
+	check-no-trailing-slash-hrefs check-rust check-shell check-site-shape check-ui \
+	check-whitespace serve-ui
 
 check: check-rust check-cpp check-shell check-nix check-ui check-whitespace check-site-shape \
-	check-nginx-parity check-no-mutation check-no-go2rtc
+	check-nginx-parity check-no-mutation check-no-go2rtc check-no-trailing-slash-hrefs
 
 check-rust:
 	cargo fmt --all -- --check
@@ -37,6 +38,9 @@ check-no-mutation:
 
 check-no-go2rtc:
 	./scripts/check_no_go2rtc.sh
+
+check-no-trailing-slash-hrefs:
+	./scripts/check_no_trailing_slash_hrefs.sh
 
 check-whitespace:
 	git diff --check
