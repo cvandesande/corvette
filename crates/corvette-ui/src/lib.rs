@@ -124,6 +124,7 @@ const KNOWN_TRAILING_SLASH_EXCEPTIONS: &[&str] = &["recordings"];
 #[cfg(test)]
 mod reserved_route_tests {
     use super::{CLIENT_ROUTES, KNOWN_TRAILING_SLASH_EXCEPTIONS, RESERVED_NGINX_PREFIXES};
+    use crate::shell::NAVIGATION;
 
     /// The absolute path a route renders as, with and without a trailing
     /// slash -- the two forms nginx's location matching treats as different
@@ -176,6 +177,35 @@ mod reserved_route_tests {
             "the declared known exception no longer collides with a reserved \
              prefix, or an undeclared collision was found -- update \
              KNOWN_TRAILING_SLASH_EXCEPTIONS to match what actually collides"
+        );
+    }
+
+    /// `NAVIGATION` (`shell::NAVIGATION`) is the only mechanism this crate
+    /// actually uses to render a self-route navigation link (`PageShell` in
+    /// `shell.rs`, consumed by `events.rs` and `recordings.rs`, and again
+    /// independently in `dashboard.rs`) -- every `href` on screen comes from
+    /// this array, never from a literal string in a `view!` macro. So unlike
+    /// `check_no_trailing_slash_hrefs.sh`, which greps source text for a
+    /// quoted `href="..."` literal and is structurally blind to this, this
+    /// test inspects the actual data feeding those links. A trailing slash
+    /// on a self-route entry would silently misroute a click into nginx's
+    /// own resource for that prefix instead of the SPA (see
+    /// `RESERVED_NGINX_PREFIXES` above); `"/"` and hash-fragment links are
+    /// exempt because neither is a narrower path a trailing slash could
+    /// misroute.
+    #[test]
+    fn no_navigation_entry_is_a_self_route_with_a_trailing_slash() {
+        let offenders: Vec<&str> = NAVIGATION
+            .iter()
+            .filter(|(_, href)| *href != "/" && !href.starts_with('#') && href.ends_with('/'))
+            .map(|(_, href)| *href)
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "NAVIGATION entry/entries render a self-route href ending in '/' \
+             and would misroute a click into nginx's own resource instead of \
+             the SPA: {offenders:?}"
         );
     }
 }
