@@ -64,7 +64,7 @@ pub(crate) fn Dashboard() -> impl IntoView {
                             <div class="camera-grid" aria-label="Configured cameras">
                                 {cameras.into_iter().map(|camera| {
                                     let player_url = format!(
-                                        "/go2rtc/stream.html?src={}&mode=mse",
+                                        "/live/webrtc/webrtc.html?src={}",
                                         camera.name,
                                     );
                                     let player_title = format!("{} live video", camera.display_name);

@@ -428,17 +428,30 @@ assert_route "missing asset under /assets/" /assets/does-not-exist.js 404 text/h
   contains:404
 
 # The go2rtc player page, which is what a live tile must load instead of this
-# site's own shell.
-assert_route "go2rtc player" /live/webrtc/webrtc.html 200 text/html \
+# site's own shell. Fetched with a src= query parameter, matching the URL a
+# camera tile actually embeds (crates/corvette-ui/src/dashboard.rs); the
+# query string does not move the request to a different location block, but
+# this is the concrete tile URL the loop-detector below is measuring.
+assert_route "go2rtc player" "/live/webrtc/webrtc.html?src=front_door" 200 text/html \
   contains:go2rtc-webrtc-player absent:/pkg/corvette.js
 
-http_get /live/webrtc/webrtc.html "$WORK/out/player" >/dev/null
+http_get "/live/webrtc/webrtc.html?src=front_door" "$WORK/out/player" >/dev/null
 if cmp -s <(strip_injected_script "$WORK/out/root.body") \
   <(strip_injected_script "$WORK/out/player.body"); then
   fail "the go2rtc player page is this site's shell"
 else
   pass "the go2rtc player page is a different document from /"
 fi
+
+# There is deliberately no /go2rtc/ location in this configuration: a request
+# under that prefix has nowhere to match but the site's own SPA fallback, so
+# it silently returns this site's own shell -- an iframe that loads the app
+# into itself. Asserting that behaviour is unchanged here is what proves the
+# retarget above is measuring dashboard.rs's own URL, not a config accident
+# that happens to also route /go2rtc/ somewhere real.
+assert_route "/go2rtc/ still falls back to this site's own shell, unpatched" \
+  "/go2rtc/stream.html?src=front_door&mode=mse" 200 text/html \
+  contains:/pkg/corvette.js
 
 # The wasm binary: the right MIME for streaming instantiation, and a
 # Content-Length, which proves sub_filter did not rewrite it -- a filtered
