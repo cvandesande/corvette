@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Enforces INV-1 (publish shape) on a staging tree built by build_site.sh: the
+# Checks the publish shape of a staging tree built by build_site.sh: the
 # tree must contain exactly index.html and pkg/**, with the expected pkg
 # bundle files present and no donor files an overlay onto /opt/frigate/web
 # would otherwise displace.

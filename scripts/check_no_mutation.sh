@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Enforces INV-3: the deployed system and every registry are read-only to
-# agents. Greps tracked scripts and the evidence directory for verbs that
-# would mutate a cluster, push an image, or push to a git remote.
+# Keeps the deployed system and every registry read-only to agents. Greps
+# tracked scripts and the evidence directory for verbs that would mutate a
+# cluster, push an image, or push to a git remote.
 #
 # Fails closed. Every condition that stops a target from being enumerated,
 # read, or matched exits non-zero with a diagnostic naming the cause: a check
@@ -65,8 +65,8 @@ fi
 
 # A mutation-test evidence file legitimately quotes a forbidden verb to prove
 # this script catches it -- that line is a rehearsal, not a record of anything
-# that ran, so it would otherwise make every future INV-3 sweep fail on its
-# own required evidence. A line carrying this literal marker in its CONTENT is
+# that ran, so it would otherwise make every future run of this check fail on
+# its own required evidence. A line carrying this literal marker in its CONTENT is
 # exempted; every other line, including a second, unmarked forbidden verb
 # sharing a file with a marked line, is still caught. The marker is tested
 # against content only, never against the path -- testing the path let a
