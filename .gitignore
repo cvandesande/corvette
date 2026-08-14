@@ -8,3 +8,4 @@ models/
 *.f32
 result
 result-*
+.claude/
