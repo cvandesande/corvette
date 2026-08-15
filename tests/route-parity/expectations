@@ -1,0 +1,71 @@
+# Route-parity expectations for the deployed nginx path, checked by
+# scripts/route_parity.sh. Format:
+#   PATH | EXPECTED-STATUS | EXPECTED-CONTENT-TYPE | BODY-PREDICATE
+#
+# Every fact here was read from the running deployment (port 5000, inside the
+# pod) or from the UI's own URL-construction sites, before any Leptos bundle
+# was placed at /opt/frigate/web. That is deliberate: this table is the
+# PRE-FLIGHT baseline, describing what nginx and Frigate's React bundle
+# return today. A route whose body is the shell -- id="root" and an
+# /assets/main-*.js reference -- is currently unmatched by any real location
+# and falls back to index.html; that is what the SPA fallback looks like on
+# this deployment right now, not a build-specific string. /pkg/corvette.js
+# and /pkg/corvette.wasm are two such rows: no /pkg/ location exists yet, so
+# they resolve to the same shell as every other unmatched path.
+#
+# The client-side routes (/, /events, /recordings) and /login use different
+# entry chunks -- main-*.js versus login-*.js -- which is what distinguishes
+# the two pages the fallback can land on without depending on a content hash
+# that changes on every donor rebuild.
+
+/ | 200 | text/html | contains:id="root";contains:/assets/main-
+/events | 200 | text/html | contains:id="root";contains:/assets/main-
+/recordings | 200 | text/html | contains:id="root";contains:/assets/main-
+
+# location /recordings/ (nginx.conf:164) serves a filesystem JSON autoindex
+# of /media/frigate/recordings. This is a DIFFERENT resource from the row
+# above with no trailing slash: nginx's try_files fallback only applies to
+# the no-slash spelling, so the trailing slash reaches the autoindex instead
+# of the SPA shell. A checker that only compared status codes could not
+# distinguish this row from the one above -- both return 200.
+/recordings/ | 200 | application/json | starts_with:[;contains:"type":"directory"
+
+/login | 200 | text/html | contains:/assets/login-;absent:/assets/main-
+
+/pkg/corvette.js | 200 | text/html | contains:id="root";contains:/assets/main-
+/pkg/corvette.wasm | 200 | text/html | contains:id="root";contains:/assets/main-
+
+/live/webrtc/webrtc.html | 200 | text/html | contains:go2rtc - WebRTC;absent:/assets/main-
+/live/mse/api/ws | 400 | text/plain | contains:Bad Request
+/api/go2rtc/api | 200 | application/json | starts_with:{;contains:"version"
+
+# No /go2rtc/ location exists in deployed nginx at all, so this path falls
+# back to the site's own shell -- an iframe loading the app into itself, at
+# HTTP 200, with no error surfaced anywhere. This row exists to document that
+# fact and catch a regression in either direction: crates/corvette-ui's live
+# tile targets /live/webrtc/webrtc.html above instead, precisely because this
+# path is not a real go2rtc endpoint.
+/go2rtc/stream.html | 200 | text/html | contains:id="root";contains:/assets/main-
+
+# The URLs the UI itself constructs (crates/corvette-ui/src/api.rs,
+# media.rs, activity.rs, recordings.rs) against camera "front", a
+# recording segment starting at 1786800006, and event 1786824297.955438-9e9817
+# -- all real, currently-retained data on this deployment.
+/api/config | 200 | application/json | starts_with:{;contains:"auth"
+/api/events?limit=10&sort=date_desc&has_clip=1 | 200 | application/json | starts_with:[;contains:"camera"
+/api/review?cameras=all&after=0&before=9999999999&limit=1000 | 200 | application/json | starts_with:[;contains:"severity"
+/api/review/activity/motion?cameras=all&after=0&before=9999999999&scale=30 | 200 | application/json | starts_with:[;contains:"motion"
+/api/recordings/summary?cameras=front&timezone=Europe%2FLondon | 200 | application/json | starts_with:{
+/api/front/recordings?after=1786800000&before=1786900000 | 200 | application/json | starts_with:[;contains:"segment_size"
+/api/preview/front/start/1786800006/end/1786800015 | 200 | application/json | starts_with:[;contains:/clips/previews
+/api/front/start/1786800006/end/1786800015/clip.mp4 | 200 | video/mp4 | contains:ftyp
+/api/front/start/1786800006/end/1786800015/preview.gif | 200 | image/gif | magic:474946
+/api/front/recordings/1786800006/snapshot.jpg?height=720 | 200 | image/jpeg | magic:ffd8ff
+/api/events/1786824297.955438-9e9817/clip.mp4 | 200 | video/mp4 | contains:ftyp
+/api/events/1786824297.955438-9e9817/snapshot.jpg?crop=1&height=360&quality=80 | 200 | image/jpeg | magic:ffd8ff
+
+# /clips/ (nginx.conf:146) replaces the MIME map, so a .webp thumbnail comes
+# back as application/octet-stream rather than image/webp -- a real,
+# researched fact about this location, not a defect in this table.
+/clips/previews/front/1786798800.266612-1786802400.066462.mp4 | 200 | video/mp4 | contains:ftyp
+/clips/review/thumb-front-1742067985.603411-0muga0.webp | 200 | application/octet-stream | contains:WEBP

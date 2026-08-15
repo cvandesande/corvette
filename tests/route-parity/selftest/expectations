@@ -1,0 +1,5 @@
+# Minimal table for route_parity.sh's own self-test (see fixture_server.py).
+# Format matches tests/route-parity/expectations.
+
+/ | 200 | text/html | contains:selftest-shell
+/api/config | 200 | application/json | starts_with:{;contains:"ok"
