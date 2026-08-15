@@ -1,9 +1,10 @@
 .PHONY: check check-cpp check-nginx-parity check-nix check-no-go2rtc check-no-mutation \
-	check-no-trailing-slash-hrefs check-rust check-shell check-site-shape check-ui \
-	check-whitespace serve-ui
+	check-no-trailing-slash-hrefs check-oci-layout check-rust check-shell check-site-shape \
+	check-ui check-whitespace serve-ui
 
 check: check-rust check-cpp check-shell check-nix check-ui check-whitespace check-site-shape \
-	check-nginx-parity check-no-mutation check-no-go2rtc check-no-trailing-slash-hrefs
+	check-nginx-parity check-no-mutation check-no-go2rtc check-no-trailing-slash-hrefs \
+	check-oci-layout
 
 check-rust:
 	cargo fmt --all -- --check
@@ -41,6 +42,11 @@ check-no-go2rtc:
 
 check-no-trailing-slash-hrefs:
 	./scripts/check_no_trailing_slash_hrefs.sh
+
+# Local-only: builds an OCI layout under out/, no registry contact.
+check-oci-layout:
+	./scripts/publish_site_image.sh
+	./scripts/check_oci_layout.sh out/corvette-ui.oci
 
 check-whitespace:
 	git diff --check

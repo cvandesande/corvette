@@ -1,0 +1,6 @@
+# The site's publish tree is overlaid onto another image's filesystem at
+# build time (see scripts/publish_site_image.sh); this image never runs on
+# its own. `scratch` keeps it to exactly those bytes -- no shell, no package
+# manager, nothing an overlay consumer could invoke by mistake.
+FROM scratch
+COPY target/site-publish/ /site/
