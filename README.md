@@ -49,6 +49,28 @@ FFI crate every unsafe block should have to say why it is sound. `restriction`
 is not enabled as a group, on upstream's own advice. See the bottom of
 `Cargo.toml`.
 
+## Publishing the UI image
+
+`scripts/publish_site_image.sh` builds the release-mode `target/site-publish`
+tree into a `FROM scratch` OCI image tagged
+`docker.io/cvandesande/corvette-ui:$(date -u +%Y%m%d)`. Default mode never
+contacts a registry -- it stages the tree, checks its shape
+(`check_site_shape.sh`), and writes a local OCI layout under `out/`. Push
+mode additionally requires an operator to set `CORVETTE_UI_PUSH_CONFIRM` to
+that run's exact dated tag; on a real push it records the tag, the pushed
+digest, and the source commit to
+`.agents/issue-2/evidence/corvette-ui-digest.txt`.
+
+The publish decision of record covers both identifiers: "(b) dated tag AND
+(c) digest carried alongside it." (Verbatim: "e: dated and digest".)
+`frigate-vulkan` pins the UI artifact by both: `docker/Dockerfile.py313`
+declares `ARG CORVETTE_VERSION` (the dated tag, `YYYYMMDD`) and
+`ARG CORVETTE_UI_IMAGE` carrying
+`docker.io/cvandesande/corvette-ui:${CORVETTE_VERSION}@sha256:<digest>`
+(`Dockerfile.py313:30-31`), enforced by a build-time guard
+(`Dockerfile.py313:58`) that fails the build unless `CORVETTE_UI_IMAGE`
+matches `^[^@]+@sha256:[0-9a-f]{64}$` -- a bare tag is never accepted.
+
 ## Layout
 
 | Path | What |

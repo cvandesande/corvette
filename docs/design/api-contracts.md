@@ -108,3 +108,32 @@ instead of replacing it. When Corvette owns this route, `.webp` is served as
 Note that Corvette's local development proxy diverges here in a second, unrelated
 way: its `types` block declares no image entries at all. Neither environment is a
 guide to the other for content types.
+
+## `/recordings/` is a different resource from `/recordings`
+
+The deployed nginx has, verified: "`location /recordings/` (:164) serves
+`/media/frigate/recordings` as a JSON autoindex. A trailing slash on the Leptos
+`recordings` route hits the filesystem, not the SPA. Verified: `/recordings` →
+200 `text/html`, `/recordings/` → 200 `application/json`." The two URLs are
+not variants of the same resource; one is the SPA shell and the other is a
+directory listing.
+
+Corvette's UI must never emit the trailing-slash form on its own route links.
+This is one instance of a general contract, not a special case: "Same
+collision class for `/exports/`, `/clips/`, `/stream/`, `/vod/`, `/cache/`,
+`/ws`, `/live/*`, `/api/*`, `/assets/`, `/fonts/`, `/locales/`. These names
+are reserved and must never become client-side routes."
+
+## The deployed go2rtc surface is one HTML file, not a `/go2rtc/` prefix
+
+There is no `/go2rtc/` location in the deployed nginx config. The only go2rtc
+player nginx proxies is a single, self-contained file: `/live/webrtc/webrtc.html`.
+`/live/webrtc/video-rtc.js` is not proxied — it falls through to the SPA
+fallback rather than returning a go2rtc asset, so there is no drop-in player
+bundle to load.
+
+Corvette's live view therefore depends on that one HTML file plus the two
+websocket routes proxied directly to go2rtc: `/live/mse/api/ws` and
+`/live/webrtc/api/ws`. A client route or link that assumes any other
+`/go2rtc/*` or `/live/webrtc/*` asset exists will not resolve against this
+deployment.

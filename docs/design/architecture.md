@@ -16,10 +16,16 @@ repositories intentionally have different release inputs: Corvette is pinned to
 a Rust toolchain, while `frigate-vulkan` is pinned to a Frigate version.
 
 The UI bundle is the one cross-repository build dependency. Corvette publishes
-its static `target/site` output as an OCI artifact. The downstream nginx image
-consumes a `CORVETTE_VERSION` pinned by digest alongside its Frigate and ncnn
-inputs. nginx moves into this repository once Corvette owns both the UI and
-recording playback.
+its static `target/site` output as an OCI artifact that is "citable, stable
+and digest-pinnable — a digest names whatever bytes were actually published,
+once." That is NOT a claim that "any two clean builds produce the same
+digest": byte-reproducibility of the UI build is explicitly out of scope here
+and tracked separately in [issue #13][byte-reproducible-builds]. The
+downstream nginx image consumes a `CORVETTE_VERSION` pinned by digest
+alongside its Frigate and ncnn inputs. nginx moves into this repository once
+Corvette owns both the UI and recording playback.
+
+[byte-reproducible-builds]: https://github.com/cvandesande/corvette/issues/13
 
 ## Incremental replacement
 
