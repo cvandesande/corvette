@@ -388,6 +388,27 @@ assert_route() {
 echo "Serving $PUBLISH_TREE over the donor tree at $BASE_URL"
 echo "Expectations: $expectations"
 
+# INV-5: no location serving /pkg/ may carry a positive freshness lifetime.
+# Checked against the staged configuration file directly -- a static-analysis
+# guard, not a route assertion -- so it also catches a mistake the route
+# checks below would not exercise on their own. `grep -nE 'pkg'` alone only
+# names the `location /pkg/ {` line itself; `expires 1y;` or a `max-age`
+# lives on the lines after it, in the block the location opens, so the block
+# is what gets scanned -- from the location line to its closing brace, which
+# is where this nested location (no braces of its own) always ends.
+pkg_config_lines="$(grep -nE 'pkg' "$WORK/conf/nginx.conf" || true)"
+pkg_location_block="$(awk '
+  /location[[:space:]]*\/pkg\// { inblock = 1 }
+  inblock { print; if (/}/) exit }
+' "$WORK/conf/nginx.conf")"
+if [[ -z "$pkg_location_block" ]]; then
+  pass "no 'location /pkg/' block in the patched configuration to check for INV-5 ($pkg_config_lines)"
+elif grep -qE '1y|31536000' <<<"$pkg_location_block"; then
+  fail "the /pkg/ location sets a positive freshness lifetime (INV-5): $pkg_location_block"
+else
+  pass "the /pkg/ location sets no positive freshness lifetime (INV-5): $pkg_config_lines"
+fi
+
 # The site's own shell, not the donor's, and the same bytes for every client
 # route: this is what the build-time rename to index.html buys.
 assert_route "shell at /" / 200 text/html \
@@ -494,6 +515,55 @@ if [[ "$wasm_cache" == *"$pkg_cache_control"* ]] &&
   pass "wasm cache-control '$wasm_cache' with no freshness lifetime"
 else
   fail "wasm cache-control '$wasm_cache' expires '$wasm_expires', expected '$pkg_cache_control' and no freshness lifetime"
+fi
+
+# Revalidation is the premise the /pkg/ cache header rests on (D1): a header
+# with no freshness lifetime only saves the re-transfer if nginx also emits a
+# validator and honours a matching conditional request. Without one, the
+# multi-megabyte wasm/JS is fetched in full on every load, and a positive
+# freshness lifetime would have been no worse. nginx's static file handler
+# emits ETag and Last-Modified unconditionally, so this is a property of the
+# file being served as a real static file (as /pkg/ now is) rather than of any
+# add_header this patch writes -- it is checked here as its own assertion
+# because it is exactly the thing that would go quietly wrong.
+wasm_etag="$(header_value "$WORK/out/wasm.head" etag)"
+wasm_last_modified="$(header_value "$WORK/out/wasm.head" last-modified)"
+if [[ -z "$wasm_etag" && -z "$wasm_last_modified" ]]; then
+  fail "wasm response carries neither ETag nor Last-Modified -- no-cache cannot revalidate, only re-fetch in full every load"
+else
+  if [[ -n "$wasm_etag" ]]; then
+    conditional_header="If-None-Match: $wasm_etag"
+  else
+    conditional_header="If-Modified-Since: $wasm_last_modified"
+  fi
+  conditional_status="$(http_get /pkg/corvette.wasm "$WORK/out/wasm-conditional" "$conditional_header")"
+  # curl never opens the output file for a status that forbids a body (304
+  # included), rather than opening it and writing zero bytes -- so a 304's
+  # correctly-empty body is an absent file, not an empty one.
+  if [[ -f "$WORK/out/wasm-conditional.body" ]]; then
+    conditional_size="$(wc -c <"$WORK/out/wasm-conditional.body")"
+  else
+    conditional_size=0
+  fi
+  if [[ "$conditional_status" == "304" && "$conditional_size" -eq 0 ]]; then
+    pass "wasm revalidates with 304 and an empty body given $conditional_header"
+  else
+    fail "wasm conditional request ($conditional_header) returned $conditional_status with $conditional_size body bytes, expected 304 with an empty body"
+  fi
+fi
+
+# The other file type /pkg/ serves: same cache header as the wasm, and MIME
+# type application/javascript (not the text/javascript a hand-written types
+# block might use -- see fixtures/... vs deployed nginx's full mime.types).
+assert_route "pkg javascript loader" /pkg/corvette.js 200 application/javascript \
+  contains:corvette
+
+http_get /pkg/corvette.js "$WORK/out/pkg-js" >/dev/null
+pkg_js_cache="$(header_value "$WORK/out/pkg-js.head" cache-control)"
+if [[ "$pkg_js_cache" == *"$pkg_cache_control"* ]]; then
+  pass "pkg javascript cache-control '$pkg_js_cache'"
+else
+  fail "pkg javascript cache-control '$pkg_js_cache', expected to contain '$pkg_cache_control'"
 fi
 
 # A missing file under /pkg/. On the unmodified configuration this is the shell
