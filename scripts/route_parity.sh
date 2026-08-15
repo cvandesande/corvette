@@ -153,7 +153,13 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   IFS=';' read -ra predicates <<<"$f_predicate"
   for predicate in "${predicates[@]}"; do
     case "$predicate" in
-      contains:* | absent:* | starts_with:*) ;;
+      contains:* | absent:* | starts_with:*)
+        pred_kind="${predicate%%:*}" pred_value="${predicate#*:}"
+        if [[ -z "$pred_value" ]]; then
+          echo "$SCRIPT_NAME: $table:$line_no ($f_path): $pred_kind predicate has an empty value -- refusing a predicate that would trivially pass against any body" >&2
+          exit 1
+        fi
+        ;;
       magic:*)
         hex="${predicate#magic:}"
         if [[ -z "$hex" || ! "$hex" =~ ^[0-9a-fA-F]+$ || $((${#hex} % 2)) -ne 0 ]]; then
