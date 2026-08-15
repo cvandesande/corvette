@@ -15,7 +15,7 @@ DOCKERFILE="$REPO/docker/Dockerfile.site"
 OCI_DEST="$REPO/out/corvette-ui.oci"
 IMAGE_REPOSITORY="docker.io/cvandesande/corvette-ui"
 TAG="$IMAGE_REPOSITORY:$(date -u +%Y%m%d)"
-DIGEST_LOG="$REPO/.agents/issue-2/evidence/C1-digest.txt"
+DIGEST_LOG="$REPO/.agents/issue-2/evidence/corvette-ui-digest.txt"
 
 push_requested=0
 case "${1:-}" in
