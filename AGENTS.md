@@ -11,6 +11,11 @@ edit Markdown prose and apply wording a human has approved verbatim. Anything
 touching code, tests, scripts, configuration, or build files is delegated to an
 agent that reads the style guide in full — regardless of how small the change is.
 
+Unless a plan or brief already sets a model or effort level for an item, implementer
+and reviewer agents default to Sonnet, with the effort level chosen per task from its
+presumed difficulty rather than a fixed value. A plan's own per-item cost assignment
+(as in `.agents/*/PLAN-*.md`) takes precedence over this default.
+
 GitHub issues are the source of truth for material tracked work: roadmap
 features, defects or investigations that need scheduling, and follow-ups the
 project intends to revisit. Create the issue before implementation begins.
