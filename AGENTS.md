@@ -1,26 +1,15 @@
 # Repository instructions
 
-Before creating or modifying code, tests, scripts, configuration, or developer
-documentation, read `docs/standards/HUMAN_REVIEW_STYLE_GUIDE.md` in full. Do not
-begin implementation after reading only part of the guide or a summary of it.
+The tool-neutral pipeline, style guide, and role contracts are canonical at
+`/home/cvandesande/.config/ai-agent/standards/` — see
+`docs/standards/AGENTIC_PIPELINE_PLAYBOOK.md` and
+`docs/standards/HUMAN_REVIEW_STYLE_GUIDE.md` for what each role loads from there.
+This file holds only what is specific to this repository.
 
-Treat that guide as the repository's default standard for naming, functions,
-control flow, state, contracts, error handling, comments, tests, change hygiene,
-and file layout. More specific conventions already established in a file or
-subtree take precedence, as the guide itself specifies.
-
-The orchestrator does not read this guide and does not author code. It may edit
-Markdown prose and apply wording a human has approved verbatim. Anything
+The orchestrator does not read the style guide and does not author code. It may
+edit Markdown prose and apply wording a human has approved verbatim. Anything
 touching code, tests, scripts, configuration, or build files is delegated to an
-agent that reads the guide in full — regardless of how small the change is.
-
-Before starting implementation work, classify it using
-`docs/standards/AGENTIC_PIPELINE_PLAYBOOK.md`. Read the playbook in full for
-Significant or Critical work; do not begin after reading only part of it or a
-summary. Those profiles govern research, human design and plan gates,
-implement/review cycles, and the evidence bar for claims about tests, mutation
-coverage, and re-execution. Routine work follows the playbook's universal rails
-and the style guide above without manufacturing the heavier pipeline artifacts.
+agent that reads the style guide in full — regardless of how small the change is.
 
 GitHub issues are the source of truth for material tracked work: roadmap
 features, defects or investigations that need scheduling, and follow-ups the
@@ -49,26 +38,12 @@ record the finding and the intended Corvette contract in
 the note with the relevant API contract rather than leaving the rationale only
 in an issue, commit message, or compatibility workaround.
 
-When changing this repository:
+Use the Rust toolchain pinned by `rust-toolchain.toml`; `nix develop` provides it.
 
-- Inspect nearby code and existing project-wide helpers before introducing a new
-  name, abstraction, dependency, or error-handling pattern.
-- Keep changes focused on one intent and avoid unrelated renames, formatting, or
-  cleanup.
-- Add or update tests for behavioral changes. Verify that a new regression test
-  fails when the defect is reintroduced whenever practical.
-- Run the formatters, linters, and tests relevant to every changed file. Use the
-  Rust toolchain pinned by `rust-toolchain.toml`; `nix develop` provides it.
-- Before committing, compare the staged change with its GitHub issue and
-  `docs/design/`. Update or close the issue when its outcome or next step has
-  changed; update the design documents when an architectural decision or API
-  contract has changed. Otherwise explicitly confirm that both remain accurate.
-- Review the final diff against the full style guide before declaring the work
-  complete. Report checks that could not be run and why.
-
-Do not weaken tests, lint levels, safety checks, or error reporting merely to
-make a check pass. Do not add exceptions to mechanical checks without an adjacent
-rationale that explains why the flagged construct is correct here.
+Before committing, compare the staged change with its GitHub issue and
+`docs/design/`. Update or close the issue when its outcome or next step has
+changed; update the design documents when an architectural decision or API
+contract has changed. Otherwise explicitly confirm that both remain accurate.
 
 Every Clippy bypass, including item-level `allow` attributes and project lint
 configuration changes, requires explicit human review. Use a bypass only when

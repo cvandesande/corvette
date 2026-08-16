@@ -9,3 +9,4 @@ models/
 result
 result-*
 .claude/
+.mcp.json
