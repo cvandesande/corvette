@@ -27,6 +27,17 @@ Corvette owns both the UI and recording playback.
 
 [byte-reproducible-builds]: https://github.com/cvandesande/corvette/issues/13
 
+## Deployment stakes
+
+The Frigate deployment this repository currently targets (`frigate-vulkan` on tirnanog)
+is a personal test environment, not production infrastructure. Work through the UI-deploy
+phase (issue #2) does not need production-grade rollout ceremony — gated cutovers,
+manifest-fidelity guarantees, elaborate review cycles — since a mistake there costs a
+redeploy, not real data or uptime for anyone else. Rigor should scale up as later phases
+put real data at risk: retention and storage management, the last replacement (see Risk
+boundary below), is where correctness actually matters, because that is the point this
+system starts holding recordings someone relies on.
+
 ## Incremental replacement
 
 nginx is already the router for the deployed system. Frigate's API is an
