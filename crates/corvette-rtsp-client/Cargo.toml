@@ -1,0 +1,23 @@
+[package]
+name = "corvette-rtsp-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "RTSP client for dialing physical IP cameras"
+
+[features]
+# Exposes `mock_camera`, a hand-rolled RTSP/1.0 test double used by this
+# crate's own test suites. Never enabled in a non-test build.
+mock-camera = []
+
+[dependencies]
+tokio = { version = "1.53.1", features = ["net", "rt", "sync", "time", "io-util", "macros"] }
+md-5 = "0.11.0"
+
+[dev-dependencies]
+corvette-rtsp-client = { path = ".", features = ["mock-camera"] }
+tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "sync", "time", "io-util", "macros"] }
+
+[lints]
+workspace = true

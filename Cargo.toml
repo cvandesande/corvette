@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/corvette-api",
+    "crates/corvette-rtsp-client",
     "crates/corvette-ui",
     "crates/corvette-ui-server",
     "crates/ncnn-sys",
