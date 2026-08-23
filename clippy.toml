@@ -1,0 +1,12 @@
+# Workspace-wide clippy configuration.
+#
+# `disallowed-methods` backs the `disallowed_methods` lint enabled in the root
+# `Cargo.toml` ([workspace.lints.clippy]). It exists for issue #18's RTSP
+# session/protocol layer (crates/corvette-rtsp-client/src/session): that crate
+# must never perform blocking socket I/O on a Tokio task without an explicit
+# `spawn_blocking` boundary (INV-5). `std::net::TcpStream::connect` is the
+# concrete blocking call that a careless port of synchronous RTSP-client code
+# would introduce; every other blocking call this crate could make instead
+# panics rather than fails silently. No other workspace crate calls this
+# method today (confirmed by grep before adding this file).
+disallowed-methods = ["std::net::TcpStream::connect"]

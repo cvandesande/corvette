@@ -53,6 +53,13 @@ cargo = { level = "deny", priority = -1 }
 # say why it is sound.
 undocumented_unsafe_blocks = "deny"
 
+# From `restriction`, configured via the root `clippy.toml`: corvette-rtsp-client
+# must never block the async runtime with a synchronous socket call (issue #18
+# INV-5). No crate in this workspace currently has a legitimate reason to call
+# any of the denied paths, so this is enabled workspace-wide rather than only
+# for that one crate.
+disallowed_methods = "deny"
+
 # There is no remote yet, so `cargo` cannot have its repository/keywords.
 cargo_common_metadata = "allow"
 
