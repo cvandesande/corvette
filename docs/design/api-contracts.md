@@ -235,3 +235,22 @@ MPEG-TS, fMP4, or any other container — so a downstream consumer calls
 contract governs the shape of any frame this crate publishes; it does not by
 itself mean audio is currently published, since no audio track is resolved
 yet.
+
+## A camera's own RTP stream occasionally drops or reorders a fragment
+
+Confirmed directly against one of the same Reolink cameras above, over a
+150-second run: roughly every 10-20 seconds, the H.264 depacketizer received
+an FU-A continuation packet with no start fragment in progress — a real,
+occasional dropped or reordered RTP packet from the camera's own stream, not
+a parsing bug (`DepacketizeError::FragmentWithoutStart`,
+`crates/corvette-rtsp-client/src/depacketize/h264.rs`). A second, different
+real camera (a Dahua-style unit) ran the same 150-second window with zero
+such errors, confirming this is camera- and network-dependent, not universal.
+
+Corvette's contract: a single packet that fails to depacketize does not end
+the camera's session. `crates/corvette-rtsp-client`'s per-camera task
+(`depacketize_packet` in `src/client/task.rs`) logs the error and drops that
+one packet, then keeps reading — as long as the underlying connection
+(`PlayingSession::next_packet`) keeps delivering data, an isolated malformed
+fragment is not treated as a reason to tear down the session and force a full
+DESCRIBE/SETUP/PLAY reconnect.

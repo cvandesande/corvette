@@ -131,11 +131,31 @@ async fn run_camera_once(
         if packet.channel != VIDEO_RTP_CHANNEL {
             continue;
         }
-        for frame in depacketizer.depacketize(&packet.payload)? {
+        for frame in depacketize_packet(&mut depacketizer, &config.name, &packet.payload) {
             // No current subscriber is not this task's failure to handle --
             // the frame is simply not delivered to anyone, same as a topic
             // with no listeners.
             let _ = sender.send(frame);
+        }
+    }
+}
+
+/// Depacketizes one RTP payload, logging and dropping it rather than ending
+/// the session on error. A single malformed or out-of-order fragment (e.g.
+/// [`DepacketizeError::FragmentWithoutStart`] from a dropped or reordered RTP
+/// packet) is not evidence the connection itself has failed -- `playing`
+/// already proved it healthy by delivering this packet at all -- so only a
+/// [`SessionError`] from `next_packet` still ends [`run_camera_once`]'s loop.
+fn depacketize_packet(
+    depacketizer: &mut Depacketizer,
+    camera_name: &str,
+    rtp_payload: &[u8],
+) -> Vec<Frame> {
+    match depacketizer.depacketize(rtp_payload) {
+        Ok(frames) => frames,
+        Err(err) => {
+            log_event(camera_name, "depacketize_error", &err);
+            Vec::new()
         }
     }
 }
@@ -263,10 +283,81 @@ fn log_event(camera: &str, event: &str, detail: impl std::fmt::Display) {
 
 #[cfg(test)]
 mod tests {
-    use super::spawn_supervised_with;
+    use super::{Depacketizer, depacketize_packet, spawn_supervised_with};
+    use crate::depacketize::H264Depacketizer;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
     use std::time::Duration;
+
+    /// Builds one RTP/H.264 packet: a minimal 12-byte RTP header (version 2,
+    /// no extensions, arbitrary sequence number/SSRC -- the depacketizer
+    /// under test reads only the timestamp) followed by `payload` as the
+    /// H.264-packetized RTP payload. Mirrors the identical helper in
+    /// `depacketize::h264`'s own tests.
+    fn rtp_packet(timestamp: u32, payload: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0x80, 0xE0, 0, 1];
+        packet.extend_from_slice(&timestamp.to_be_bytes());
+        packet.extend_from_slice(&[0, 0, 0, 0]); // SSRC
+        packet.extend_from_slice(payload);
+        packet
+    }
+
+    /// Exercises the exact recovery path `run_camera_once` uses when a
+    /// packet fails to depacketize: [`DepacketizeError::FragmentWithoutStart`]
+    /// (`crate::depacketize::DepacketizeError`) from an FU-A continuation
+    /// with no start fragment in progress -- the real, occasional
+    /// dropped/reordered RTP condition a real camera's own stream hit
+    /// repeatedly -- must be dropped and logged, not fatal, and processing
+    /// must continue producing frames from the packets that follow it.
+    #[test]
+    fn a_depacketize_error_is_dropped_and_processing_continues() {
+        let mut depacketizer = Depacketizer::H264(H264Depacketizer::new("").expect("decodes"));
+        // Consume the initial (empty, since no sprop-parameter-sets was
+        // declared) parameter-set emission so it does not affect the frame
+        // counts asserted below.
+        depacketize_packet(
+            &mut depacketizer,
+            "test-camera",
+            &rtp_packet(1000, &[0x65, 0xAA]),
+        );
+
+        let first = depacketize_packet(
+            &mut depacketizer,
+            "test-camera",
+            &rtp_packet(2000, &[0x65, 0xBB]),
+        );
+        assert_eq!(
+            first.len(),
+            1,
+            "a valid single-NAL packet before the corruption still produces a frame"
+        );
+
+        // An FU-A continuation (type 28) with neither the start nor end bit
+        // set, arriving with no fragment in progress: the depacketizer
+        // returns DepacketizeError::FragmentWithoutStart.
+        let fu_indicator = 0x60 | 0x1C;
+        let no_start_or_end_fu_header = 0x05;
+        let corrupted = depacketize_packet(
+            &mut depacketizer,
+            "test-camera",
+            &rtp_packet(3000, &[fu_indicator, no_start_or_end_fu_header, 0xCC]),
+        );
+        assert!(
+            corrupted.is_empty(),
+            "the corrupted packet is dropped, producing no frames -- and must not panic or propagate"
+        );
+
+        let second = depacketize_packet(
+            &mut depacketizer,
+            "test-camera",
+            &rtp_packet(4000, &[0x65, 0xDD]),
+        );
+        assert_eq!(
+            second.len(),
+            1,
+            "processing continues past the corrupted packet: a later valid frame is still produced"
+        );
+    }
 
     /// A stand-in for one camera's connection: increments `ticks` on a
     /// steady interval, panicking on its `panic_after`th tick if that count
