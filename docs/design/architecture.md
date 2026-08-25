@@ -5,6 +5,11 @@ Rust service behind the same nginx router, followed by detection and recording.
 The end state is a Rust NVR using ncnn/Vulkan for inference. Planned work and
 current status live in [GitHub issue #1][roadmap].
 
+This document describes the target architecture Corvette is converging on.
+The replacement is incremental (see below), so a section can describe a
+component ahead of the issue that ships it. An undecided target is marked as
+open. Current status per component lives in the roadmap issue.
+
 [roadmap]: https://github.com/cvandesande/corvette/issues/1
 
 ## Repository boundary
@@ -18,14 +23,42 @@ a Rust toolchain, while `frigate-vulkan` is pinned to a Frigate version.
 The UI bundle is the one cross-repository build dependency. Corvette publishes
 its static `target/site` output as an OCI artifact that is "citable, stable
 and digest-pinnable — a digest names whatever bytes were actually published,
-once." That is NOT a claim that "any two clean builds produce the same
-digest": byte-reproducibility of the UI build is explicitly out of scope here
-and tracked separately in [issue #13][byte-reproducible-builds]. The
+once." The digest pins one specific build's output; producing the same digest
+from a second clean build is a separate property, tracked as its own goal in
+[issue #13][byte-reproducible-builds]. The
 downstream nginx image consumes a `CORVETTE_VERSION` pinned by digest
 alongside its Frigate and ncnn inputs. nginx moves into this repository once
 Corvette owns both the UI and recording playback.
 
 [byte-reproducible-builds]: https://github.com/cvandesande/corvette/issues/13
+
+## Crate structure
+
+Everything this repository owns lives in one Cargo workspace, as separate crates
+— `crates/corvette-api`, `crates/corvette-ui`, `crates/corvette-ui-server`,
+`crates/ncnn-sys`, `crates/ncnn-spike` today. This keeps one shared
+`rust-toolchain.toml` and Nix devShell, and one issue-linked design/planning
+apparatus (`AGENTS.md`, `.agents/issue-*/`), covering every component. A
+workspace member crate can still be published to crates.io on its own version
+and cadence — the tokio/hyper ecosystem does exactly this — so a crate in this
+workspace can remain independently reusable. A crate earns its own repository
+once it gains outside interest or a release cadence genuinely independent of
+the rest of the workspace.
+
+Where a component is a generic capability with more than one possible backend,
+the crate boundary is a narrow trait plus swappable implementation crates
+behind it, so each build depends only on the SDK its own backend needs. The
+RTSP-restream server (decisions D-6/D-7 in
+`.agents/issue-12/DESIGN-live-view.md`, and its own research in
+`.agents/issue-12/RESEARCH-rtsp-restream-server.md`) is the first case of this:
+a `StreamProvider`-shaped trait boundary, generic and Corvette-independent, so
+the crate itself stays reusable outside this project. The detection engine
+follows the same shape as ncnn/Vulkan is joined by other accelerators: a small
+crate defines the detection trait and shared types (detection results,
+bounding boxes, frame format), independent of any backend; `ncnn`/Vulkan is
+one implementation crate against that trait, and Coral (Edge TPU) and Hailo
+are future sibling implementation crates, each pulling in its own SDK
+(`libedgetpu`, HailoRT) on its own.
 
 ## Deployment stakes
 
@@ -58,10 +91,37 @@ ncnn's C API with output identical to the Python binding.
 
 ## Media boundary
 
-WASM does not decode video. Live streams remain in go2rtc's maintained MSE or
-WebRTC player, and browser-native `MediaSource` handles recording fragments.
-The Leptos application owns negotiation and playback controls while decode and
-rendering remain in the browser media stack.
+Live view is Rust-native end to end. The grid tile is a native MSE player over
+WebSocket. The expanded view attempts a Rust-built MoQ relay first, over
+QUIC/WebTransport (`moq-dev/moq` — issue #12 D-1/D-2), falling back to
+HLS/LL-HLS on failure or timeout. A Rust ingest bridge (D-5) and a
+from-scratch Rust RTSP-restream server (D-6/D-7) together take over every
+role go2rtc played, including Frigate's own `detect`/`record` camera
+connections as well as the browser-facing player — the deployed image ships
+Corvette's own Rust media components. See
+`.agents/issue-12/DESIGN-live-view.md` for the decisions of record and
+`.agents/issue-12/PLAN-live-view.md` for the implementation plan.
+
+**Open:** the grid tile's own live MSE source, once go2rtc's replacement is
+complete. The current implementation plan sources it from go2rtc's
+`/live/mse/api/ws` (`PLAN-live-view.md` BLOCKER-1, reading (a)), which needs
+reconciling with D-6/D-7's Rust-native replacement — flagged here as a
+decision still to make.
+
+Browser-native `MediaSource` performs decode and render for the MSE grid
+tile, the HLS fallback path, and recorded fragments. The single-camera
+expanded view carries audio over MoQ alongside video, when the camera itself
+provides it — D-4 already scopes the ingest transport to native
+H.264/H.265/AAC, so the relay and `hang`'s Web Component carry an audio track
+the same way they carry video, with no transcoding.
+
+Recent-events detection boxes are a separate, simpler mechanism: no video
+decode is involved at all. The server stores each detection's box coordinates
+as data and serves the plain snapshot; the browser draws the box on a canvas
+over the `<img>`, computed at render time from stored coordinates rather than
+baked into the image at capture time. See
+`.agents/issue-5/RESEARCH-review-snapshot-api.md` for the annotation-gap
+research this answers.
 
 Frigate's nginx-vod integration remains in place until Corvette owns recording.
 The Rust service must satisfy the mapping and filesystem contracts in
