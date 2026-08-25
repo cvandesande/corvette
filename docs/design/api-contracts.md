@@ -174,6 +174,28 @@ schedule per camera from the declared timeout (`keep_alive_interval` in
 the declared value — a real margin against every tested case, not the
 `declared_timeout - 5` offset go2rtc uses above.
 
+## An RTSP camera's own RTP stream can race its handshake responses
+
+Confirmed directly against one of the same Reolink cameras above: it can
+begin pushing RTP frames on the interleaved binary channel before, or
+interleaved with, `PLAY`'s own `200 OK` arriving on the same TCP socket — the
+handshake response and the camera's first frame race each other on one byte
+stream. Every real-camera connection attempt failed immediately until this
+was accounted for. Nothing in the RTSP or RTP specifications bars a server
+from doing this, and the mock camera this project built to develop against
+never exercised it: its own interleaving fixture only ever delayed a
+keep-alive's text reply between RTP frames already flowing well after `PLAY`,
+never a data frame racing a request/response exchange itself.
+
+Corvette's contract: any RTSP client Corvette owns treats a `$`-prefixed
+binary frame arriving while it awaits a response to any request — `DESCRIBE`,
+`SETUP`, `PLAY`, a keep-alive, or `TEARDOWN` — as ordinary camera data, never
+as an error. `crates/corvette-rtsp-client` buffers such a frame
+(`Connection::send_and_receive` in `src/session/mod.rs`) and hands it back,
+in arrival order, the first time a caller reads a packet
+(`PlayingSession::next_packet`) — no frame a camera sends is ever discarded
+just because it arrived early.
+
 ## RTSP camera frames carry Annex-B video, not a container format
 
 A container was on the table for the RTP-to-MoQ path: `moq_mux::container::

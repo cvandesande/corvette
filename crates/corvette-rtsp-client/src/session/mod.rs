@@ -22,6 +22,7 @@ use digest::DigestAuth;
 use keepalive::{KeepAliveMethod, KeepAliveScheduler};
 use message_stream::{MessageStream, StreamError};
 use rtsp_types::{Message, Method, Request, StatusCode, Url, Version, headers};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -96,8 +97,6 @@ pub enum SessionError {
     /// A request other than the expected next one arrived (a camera should
     /// never send an RTSP *request* to this client).
     UnexpectedRequestFromServer,
-    /// A binary interleaved frame arrived before `PLAY` was ever sent.
-    UnexpectedDataBeforePlay,
     UnexpectedStatus {
         method: &'static str,
         status: StatusCode,
@@ -130,9 +129,6 @@ impl std::fmt::Display for SessionError {
                     f,
                     "camera sent an RTSP request; only responses and data frames are expected"
                 )
-            }
-            Self::UnexpectedDataBeforePlay => {
-                write!(f, "camera sent an interleaved binary frame before PLAY")
             }
             Self::UnexpectedStatus { method, status } => {
                 write!(f, "{method} failed: {status} ({})", u16::from(*status))
@@ -184,6 +180,7 @@ pub async fn connect(
         cseq: 0,
         digest: None,
         credentials,
+        pending_data: VecDeque::new(),
     };
 
     let describe = conn
@@ -272,6 +269,15 @@ struct Connection {
     cseq: u32,
     digest: Option<DigestAuth>,
     credentials: Credentials,
+    /// RTP/RTCP data frames read while awaiting a response in
+    /// [`Connection::send_and_receive`]. Some cameras start streaming on the
+    /// interleaved channel immediately around a handshake request (observed
+    /// directly around `PLAY`, and not provably bounded to that one request),
+    /// racing that request's own text response on the same socket. Such a
+    /// frame is real camera data, not noise, so it is buffered here rather
+    /// than discarded; [`PlayingSession::next_packet`] drains it before
+    /// reading fresh messages off the socket.
+    pending_data: VecDeque<RtpPacket>,
 }
 
 impl Connection {
@@ -318,6 +324,11 @@ impl Connection {
         Ok(retried)
     }
 
+    /// Sends `method` and reads messages off the connection until the
+    /// matching `Response` arrives, buffering any RTP/RTCP data frame that
+    /// arrives first rather than treating it as an error -- a camera is free
+    /// to start streaming on the interleaved channel before its own response
+    /// to this request lands on the same socket.
     async fn send_and_receive(
         &mut self,
         method: Method,
@@ -326,10 +337,15 @@ impl Connection {
         extra_headers: &[(rtsp_types::HeaderName, String)],
     ) -> Result<rtsp_types::Response<Vec<u8>>, SessionError> {
         self.send(method, uri, session_id, extra_headers).await?;
-        match self.reader.read_message().await? {
-            Message::Response(response) => Ok(response),
-            Message::Data(_) => Err(SessionError::UnexpectedDataBeforePlay),
-            Message::Request(_) => Err(SessionError::UnexpectedRequestFromServer),
+        loop {
+            match self.reader.read_message().await? {
+                Message::Response(response) => return Ok(response),
+                Message::Data(data) => self.pending_data.push_back(RtpPacket {
+                    channel: data.channel_id(),
+                    payload: bytes::Bytes::from(data.into_body()),
+                }),
+                Message::Request(_) => return Err(SessionError::UnexpectedRequestFromServer),
+            }
         }
     }
 
@@ -412,11 +428,18 @@ impl PlayingSession {
     /// Reads the next demuxed RTP/RTCP packet, sending keep-alives on
     /// schedule in the background of the same read loop.
     ///
+    /// Drains any frame the handshake buffered while racing a request's
+    /// response first, in the order it arrived, before reading fresh
+    /// messages off the socket -- such a frame must not be lost.
+    ///
     /// # Errors
     ///
     /// Returns an error if the connection closes, a message fails to parse,
     /// or the camera sends something other than a response or a data frame.
     pub async fn next_packet(&mut self) -> Result<RtpPacket, SessionError> {
+        if let Some(packet) = self.conn.pending_data.pop_front() {
+            return Ok(packet);
+        }
         loop {
             tokio::select! {
                 _ = self.ticker.tick() => {

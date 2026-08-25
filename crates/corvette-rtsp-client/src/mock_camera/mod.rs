@@ -41,6 +41,7 @@ pub struct MockCameraConfig {
     declared_timeout: Duration,
     frame_interval: Duration,
     delay_keepalive_reply_to_next_frame: bool,
+    stream_before_play_response: bool,
 }
 
 impl Default for MockCameraConfig {
@@ -51,6 +52,7 @@ impl Default for MockCameraConfig {
             declared_timeout: DEFAULT_DECLARED_TIMEOUT,
             frame_interval: DEFAULT_FRAME_INTERVAL,
             delay_keepalive_reply_to_next_frame: false,
+            stream_before_play_response: false,
         }
     }
 }
@@ -84,6 +86,18 @@ impl MockCameraConfig {
     #[must_use]
     pub const fn delay_keepalive_reply_to_next_frame(mut self, delay: bool) -> Self {
         self.delay_keepalive_reply_to_next_frame = delay;
+        self
+    }
+
+    /// When `true`, `PLAY`'s handler sends one synthetic RTP frame on the
+    /// interleaved channel *before* writing `PLAY`'s own `200 OK`,
+    /// deterministically reproducing a real camera observed doing exactly
+    /// this -- streaming before, or interleaved with, `PLAY`'s response
+    /// arriving on the same socket -- rather than relying on incidental
+    /// timing to hit the race.
+    #[must_use]
+    pub const fn stream_before_play_response(mut self, stream_first: bool) -> Self {
+        self.stream_before_play_response = stream_first;
         self
     }
 

@@ -192,6 +192,61 @@ async fn a_keep_alive_response_interleaved_between_rtp_frames_does_not_corrupt_e
 }
 
 #[tokio::test]
+async fn an_rtp_frame_sent_before_plays_response_is_buffered_and_observed_in_order() {
+    // S2: a real camera was observed starting to stream RTP on the
+    // interleaved channel immediately around PLAY -- before, or interleaved
+    // with, PLAY's own 200 OK arriving on the same TCP socket. The mock's
+    // `stream_before_play_response` flag reproduces that exact ordering
+    // deterministically. The handshake must still succeed, and the frame
+    // sent ahead of PLAY's response must not be lost -- it must come back
+    // from `next_packet` first, ahead of the frames `stream_frames` sends
+    // afterward.
+    let camera = MockCamera::spawn(MockCameraConfig::new().stream_before_play_response(true))
+        .await
+        .expect("mock camera binds loopback");
+
+    let (_track, mut playing) = session::connect(camera.addr(), "/stream/", credentials())
+        .await
+        .expect("handshake succeeds even though an RTP frame arrives before PLAY's 200 OK");
+
+    let first = tokio::time::timeout(Duration::from_secs(1), playing.next_packet())
+        .await
+        .expect("the frame buffered during the handshake arrives before the timeout")
+        .expect("next_packet succeeds");
+    assert_eq!(first.channel, 0);
+    assert_eq!(
+        frame_index(&first.payload),
+        0,
+        "the first packet returned must be the one the mock sent before PLAY's response, \
+         not a later frame from the regular post-PLAY stream"
+    );
+
+    let second = tokio::time::timeout(Duration::from_secs(1), playing.next_packet())
+        .await
+        .expect("a subsequent frame from the regular stream also arrives")
+        .expect("next_packet succeeds");
+    assert_eq!(second.channel, 0);
+    assert_eq!(
+        frame_index(&second.payload),
+        1,
+        "the regular post-PLAY stream resumes normally after the buffered frame is drained"
+    );
+
+    playing.teardown().await.expect("TEARDOWN succeeds");
+}
+
+/// Extracts the 8-byte big-endian frame index `mock_camera::rtp::
+/// fabricate_h264_packet` appends after its 13-byte RTP header + NAL header,
+/// so a test can assert which fabricated frame, in sequence, was received.
+fn frame_index(payload: &bytes::Bytes) -> u64 {
+    u64::from_be_bytes(
+        payload[13..21]
+            .try_into()
+            .expect("21-byte fabricated payload"),
+    )
+}
+
+#[tokio::test]
 async fn rejects_basic_and_unauthenticated_setup_the_same_way_a_raw_client_would() {
     // Confirms the client actually exercises the Digest challenge/response
     // path (not e.g. accidentally succeeding against a camera that happens

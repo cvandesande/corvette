@@ -116,6 +116,16 @@ async fn drive_handshake(
                     let _ = send(writer, &rtsp_message::bad_request(&request)).await;
                     return;
                 };
+                if config.stream_before_play_response {
+                    // Reproduces a real camera observed streaming on the
+                    // interleaved channel before its own PLAY response
+                    // arrives on the same socket.
+                    let packet = rtp::fabricate_h264_packet(0, 0, SSRC, 0);
+                    let framed = rtp::interleave(RTP_CHANNEL, &packet);
+                    if writer.write_all(&framed).await.is_err() {
+                        return;
+                    }
+                }
                 if send(writer, &rtsp_message::play_ok(&request, &id))
                     .await
                     .is_err()
