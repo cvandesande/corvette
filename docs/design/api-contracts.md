@@ -137,3 +137,79 @@ websocket routes proxied directly to go2rtc: `/live/mse/api/ws` and
 `/live/webrtc/api/ws`. A client route or link that assumes any other
 `/go2rtc/*` or `/live/webrtc/*` asset exists will not resolve against this
 deployment.
+
+## RTSP camera sessions require a real keep-alive margin, not a thin one
+
+Two independently deployed Reolink cameras' RTSP servers (LIVE555-based, same
+firmware version) each grant a Session with a declared timeout on `SETUP`
+(`Session: <id>;timeout=65`). Confirmed directly against both live cameras:
+with no further RTSP activity on that session, the RTP stream goes silent at
+roughly the declared timeout — frames simply stop arriving, with no TCP close
+and no RTSP error to signal it. Confirmed directly, both cameras: sending
+`GET_PARAMETER` on that session every 20 seconds (roughly a third of the
+declared timeout) keeps the stream flowing indefinitely with zero gaps. This
+is not a one-off quirk of a single unit.
+
+The currently-deployed go2rtc (`v1.9.10`, `pkg/rtsp/conn.go`) does send its
+own keep-alive (`OPTIONS` on the session), but on a `declared_timeout - 5`
+second schedule — only a 5-second margin against this camera's 65-second
+deadline. A missed keep-alive triggers go2rtc's reconnect path
+(`internal/streams/producer.go`), whose backoff schedule (1s, then 5s, then
+10s, then 1-minute tiers) can take on the order of two minutes to land a
+working reconnect — consistent with, but not independently reproduced
+end-to-end as the cause of, the multi-minute Reolink stalls observed in this
+deployment. The camera's silent-timeout behavior and go2rtc's keep-alive/
+reconnect code are each confirmed separately from live testing and source;
+the two have not been observed failing together in one reproduction.
+
+Corvette's contract: any RTSP client Corvette owns reads each camera's own
+declared Session `timeout=` from its `SETUP` response and schedules
+keep-alives at a real safety margin against it, not a fixed small offset — a
+per-camera value, since different camera firmware may declare different
+timeouts and tolerate different margins.
+
+Implemented: `crates/corvette-rtsp-client`'s session layer computes this
+schedule per camera from the declared timeout (`keep_alive_interval` in
+`src/session/keepalive.rs`), capped so the interval is never closer than half
+the declared value — a real margin against every tested case, not the
+`declared_timeout - 5` offset go2rtc uses above.
+
+## RTSP camera frames carry Annex-B video, not a container format
+
+A container was on the table for the RTP-to-MoQ path: `moq_mux::container::
+ts::Import` already demuxes the same MPEG-TS byte stream go2rtc's HTTP
+endpoint used to serve, so routing this crate's output through MPEG-TS first
+would have reused an existing demuxer. That demuxer turned out to be a thin
+wrapper over `moq_mux::codec::h264`/`h265`/`aac`'s own `Split`/`Import`
+functions — the same codec-level entry points a caller can reach directly
+once RTP is depacketized. Re-packaging depacketized RTP into MPEG-TS only to
+immediately demux it back out would cost a container write and a container
+parse on every frame for no benefit.
+
+`crates/corvette-rtsp-client`'s RTP depacketizer (`src/depacketize`)
+reassembles H.264/H.265 into Annex-B: every emitted NAL unit is prefixed with
+the start code `00 00 00 01`, with parameter sets carried in-band from the
+SDP's `sprop-parameter-sets` (H.264) or `sprop-vps`/`sprop-sps`/`sprop-pps`
+(H.265) rather than out-of-band. This costs only a fixed 4-byte prefix write
+per NAL, not a conversion — an RTP H.264/H.265 payload is already
+NAL-unit-oriented, so nothing about the source data has to change shape. The
+crate's AAC depacketizer (`src/depacketize`'s `aac` module) extracts each
+access unit at the length its RTP payload's own AU-header declares and emits
+it unmodified, with no ADTS header added, since RTP's AAC payload format
+(RFC 3640, `mpeg4-generic`) already matches the raw shape `moq_mux::codec::
+aac::Import` expects.
+
+Today the crate publishes video only. Its SDP resolution
+(`session::sdp::resolve_video_track`) locates only the SDP's `m=video`
+section, so no audio track is ever resolved against a live camera session
+and no `AacDepacketizer` is constructed from one — even though the AAC
+depacketizer itself exists and is unit-tested against synthetic RTP
+payloads. A camera's audio, if it has any, is not read today.
+
+Corvette's contract: every frame `crates/corvette-rtsp-client` publishes is
+either Annex-B-framed H.264/H.265 or a raw, non-ADTS AAC access unit — never
+MPEG-TS, fMP4, or any other container — so a downstream consumer calls
+`moq_mux::codec::*::Import` directly with no demuxing step in between. The
+contract governs the shape of any frame this crate publishes; it does not by
+itself mean audio is currently published, since no audio track is resolved
+yet.
