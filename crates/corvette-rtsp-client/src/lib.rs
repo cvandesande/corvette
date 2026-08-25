@@ -10,9 +10,14 @@
 //! H.264/H.265 access units and raw, non-ADTS AAC access units -- no
 //! container format anywhere in this crate.
 //!
+//! `client` ties the two together: one supervised background task per
+//! camera runs the session and depacketizer, publishing frames onto a
+//! broadcast channel every subscriber gets its own receiver of.
+//!
 //! `mock_camera` is a test double this crate's own test suites dial against
 //! in place of a real camera; it is never a production dependency.
 
+pub mod client;
 pub mod depacketize;
 pub mod session;
 
