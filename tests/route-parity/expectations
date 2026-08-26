@@ -69,3 +69,21 @@
 # researched fact about this location, not a defect in this table.
 /clips/previews/front/1786798800.266612-1786802400.066462.mp4 | 200 | video/mp4 | contains:ftyp
 /clips/review/thumb-front-1742067985.603411-0muga0.webp | 200 | application/octet-stream | contains:WEBP
+
+# Issue #12 item N1 (INV-4): the /live/hls/ location proxying to G3's HLS/
+# LL-HLS packager (corvette-media-bridge, crates/corvette-media-bridge/src/
+# hls.rs), replacing go2rtc's own former HLS-adjacent role (D-6 removes
+# go2rtc entirely). NOT YET the live deployment's own behaviour -- unlike
+# every row above, captured against the running pod, these three describe
+# the TARGET contract N1's nginx patch establishes, verified locally in
+# `.agents/issue-12/evidence/N1-mutation.log` against a real nginx serving
+# the patched donor config with a stand-in for G3's listener. They become a
+# real pod-mode assertion once F1 (go2rtc disabled), K1 (manifest cutover)
+# and this item's own frigate-vulkan image all ship together -- re-verify
+# against the live pod at that point rather than assuming these hold as
+# written. Camera name "front_door" matches this table's own convention of
+# using a real camera name, not a placeholder; substitute the deployment's
+# own camera name(s) when re-verifying against the pod.
+/live/hls/front_door/playlist.m3u8 | 200 | application/vnd.apple.mpegurl | contains:#EXTM3U;absent:id="root"
+/live/hls/front_door/init.mp4 | 200 | video/mp4 | magic:00000018667479706d703432;absent:id="root"
+/live/hls/front_door/segment-0.m4s | 200 | video/mp4 | magic:00000018667479706d703432;absent:id="root"
