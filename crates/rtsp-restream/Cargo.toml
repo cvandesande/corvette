@@ -1,0 +1,25 @@
+[package]
+name = "rtsp-restream"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# Dual MIT/Apache-2.0, not `license.workspace` (Corvette's own bare MIT):
+# issue #12 item X1's plan text requires this crate to be usable outside
+# Corvette (D-6), and dual MIT/Apache-2.0 is the more interoperable choice
+# for a crate meant for external reuse. See LICENSE-MIT and LICENSE-APACHE.
+license = "MIT OR Apache-2.0"
+description = "A from-scratch, embeddable RTSP restream server: OPTIONS/DESCRIBE/SETUP/PLAY/TEARDOWN over TCP-interleaved transport, against a caller-supplied frame source"
+
+[dependencies]
+rtsp-types = "0.1.3"
+sdp-types = "0.2.0"
+# Only for base64-encoding SDP `sprop-parameter-sets`/`sprop-vps`/`sprop-sps`/
+# `sprop-pps` values (RFC 6184/RFC 7798) -- not a session-engine or transport
+# dependency. D-7 rejects rtsp-runtime/bairelay-rtsp as *session engines*;
+# it does not forbid a small, already-vetted encoding crate this workspace's
+# own corvette-rtsp-client depends on for the same purpose in the opposite
+# direction (decoding, not encoding).
+base64 = "0.22.1"
+
+[lints]
+workspace = true

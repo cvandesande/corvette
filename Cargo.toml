@@ -7,6 +7,7 @@ members = [
     "crates/corvette-ui-server",
     "crates/ncnn-sys",
     "crates/ncnn-spike",
+    "crates/rtsp-restream",
 ]
 
 [[workspace.metadata.leptos]]

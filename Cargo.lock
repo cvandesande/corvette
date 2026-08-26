@@ -1236,6 +1236,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtsp-restream"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "rtsp-types",
+ "sdp-types",
+]
+
+[[package]]
 name = "rtsp-types"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

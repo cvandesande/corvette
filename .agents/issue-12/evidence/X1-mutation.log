@@ -1,0 +1,144 @@
+Issue #12, item X1 -- mutation evidence
+crates/rtsp-restream/src/session.rs, requests_tcp_interleaved_transport
+
+Mutation: removed the TCP-only transport gate. The real implementation
+parses the request's `Transport` header and returns true only when it names
+`RTP/AVP` over TCP; the mutated version ignored the request entirely and
+unconditionally returned `true`, so a `SETUP` with a UDP `Transport:` header
+would be wrongly accepted instead of rejected with `461 Unsupported
+Transport`.
+
+Real code (restored after this evidence was captured):
+
+    fn requests_tcp_interleaved_transport(request: &Request<Vec<u8>>) -> bool {
+        let Ok(Some(transports)) = request.typed_header::<headers::Transports>() else {
+            return false;
+        };
+        transports.iter().any(|transport| {
+            matches!(
+                transport,
+                Transport::Rtp(rtp)
+                    if rtp.profile == RtpProfile::Avp
+                        && rtp.lower_transport == Some(RtpLowerTransport::Tcp)
+            )
+        })
+    }
+
+Mutated code (transient, in place only for the FAIL run below):
+
+    fn requests_tcp_interleaved_transport(_request: &Request<Vec<u8>>) -> bool {
+        true
+    }
+
+=== Run 1: mutated code -- `cargo test -p rtsp-restream` ===
+Command: nix develop --command bash -c 'cargo test -p rtsp-restream'
+Expected: session::tests::setup_rejects_a_udp_transport_request_with_461 FAILS
+(the UDP SETUP is wrongly accepted with 200 OK instead of 461).
+
+warning: Git tree '/home/cvandesande/github/corvette' is dirty
+   Compiling rtsp-restream v0.1.0 (/home/cvandesande/github/corvette/crates/rtsp-restream)
+warning: unused imports: `RtpLowerTransport`, `RtpProfile`, and `Transport`
+  --> crates/rtsp-restream/src/session.rs:13:5
+   |
+13 |     RtpLowerTransport, RtpProfile, Transport, CONTENT_BASE, CONTENT_TYPE, CSEQ, SESSION,
+   |     ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `rtsp-restream` (lib) generated 1 warning (run `cargo fix --lib -p rtsp-restream` to apply 1 suggestion)
+warning: `rtsp-restream` (lib test) generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
+     Running unittests src/lib.rs (target/debug/deps/rtsp_restream-1d7a55f083e5cd3c)
+
+running 15 tests
+test sdp::tests::aac_fmtp_matches_rfc_3640_mpeg4_generic_template_shape ... ok
+test sdp::tests::assigns_sequential_payload_types_and_track_ids_in_declaration_order ... ok
+test sdp::tests::h265_fmtp_matches_rfc_7798_minimal_template_shape ... ok
+test sdp::tests::h264_fmtp_matches_rfc_6184_template_shape ... ok
+test session::tests::play_before_setup_is_rejected ... ok
+test sdp::tests::panics_on_a_too_short_h264_sps - should panic ... ok
+test session::tests::options_advertises_exactly_the_five_implemented_methods ... ok
+test session::tests::setup_after_describe_accepts_tcp_interleaved_transport ... ok
+test session::tests::full_play_teardown_sequence_succeeds_in_order ... ok
+test session::tests::describe_returns_404_for_an_unknown_stream ... ok
+test session::tests::describe_returns_sdp_for_a_known_stream ... ok
+test session::tests::setup_rejects_a_udp_transport_request_with_461 ... FAILED
+test session::tests::setup_rejects_an_out_of_range_track_index ... ok
+test session::tests::setup_without_a_prior_describe_is_rejected ... ok
+test session::tests::unknown_method_gets_a_clean_error_response_not_a_panic ... ok
+
+failures:
+
+---- session::tests::setup_rejects_a_udp_transport_request_with_461 stdout ----
+
+thread 'session::tests::setup_rejects_a_udp_transport_request_with_461' (390605) panicked at crates/rtsp-restream/src/session.rs:451:9:
+assertion `left == right` failed
+  left: Ok
+ right: UnsupportedTransport
+
+
+failures:
+    session::tests::setup_rejects_a_udp_transport_request_with_461
+
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p rtsp-restream --lib`
+
+RESULT: FAIL, as expected -- the target test caught the injected defect.
+(The two other tests exercising SETUP with a TCP transport,
+`setup_after_describe_accepts_tcp_interleaved_transport` and
+`setup_rejects_an_out_of_range_track_index`, still pass under the mutation
+since they never send a UDP request; only the test targeting the transport
+gate itself is sensitive to this specific defect, which is the expected,
+correctly-scoped outcome.)
+
+=== Restoration ===
+`crates/rtsp-restream/src/session.rs` restored to the pre-mutation version
+verbatim (`diff` against the pre-mutation copy: no differences).
+
+=== Run 2: restored code -- `cargo test -p rtsp-restream` ===
+Command: nix develop --command bash -c 'cargo test -p rtsp-restream'
+Expected: all tests PASS, including setup_rejects_a_udp_transport_request_with_461.
+
+warning: Git tree '/home/cvandesande/github/corvette' is dirty
+   Compiling rtsp-restream v0.1.0 (/home/cvandesande/github/corvette/crates/rtsp-restream)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running unittests src/lib.rs (target/debug/deps/rtsp_restream-1d7a55f083e5cd3c)
+
+running 15 tests
+test sdp::tests::aac_fmtp_matches_rfc_3640_mpeg4_generic_template_shape ... ok
+test sdp::tests::assigns_sequential_payload_types_and_track_ids_in_declaration_order ... ok
+test sdp::tests::h265_fmtp_matches_rfc_7798_minimal_template_shape ... ok
+test session::tests::play_before_setup_is_rejected ... ok
+test session::tests::setup_without_a_prior_describe_is_rejected ... ok
+test session::tests::setup_after_describe_accepts_tcp_interleaved_transport ... ok
+test session::tests::unknown_method_gets_a_clean_error_response_not_a_panic ... ok
+test session::tests::setup_rejects_a_udp_transport_request_with_461 ... ok
+test sdp::tests::panics_on_a_too_short_h264_sps - should panic ... ok
+test sdp::tests::h264_fmtp_matches_rfc_6184_template_shape ... ok
+test session::tests::full_play_teardown_sequence_succeeds_in_order ... ok
+test session::tests::describe_returns_404_for_an_unknown_stream ... ok
+test session::tests::options_advertises_exactly_the_five_implemented_methods ... ok
+test session::tests::describe_returns_sdp_for_a_known_stream ... ok
+test session::tests::setup_rejects_an_out_of_range_track_index ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/inv1_license_manifest.rs (target/debug/deps/inv1_license_manifest-5a0cd5afd09e6d38)
+
+running 3 tests
+test this_crates_own_declared_license_is_not_agpl ... ok
+test no_agpl_restream_server_appears_as_a_dependency_in_the_workspace_lockfile ... ok
+test source_never_references_a_forbidden_literal ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rtsp_restream
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+RESULT: PASS, as expected -- restoring the real TCP-only gate makes every
+test pass again, confirming the failure above was caused by the injected
+defect and not by an unrelated issue.
