@@ -31,6 +31,20 @@ url = { version = "2.5.2", features = ["serde"] }
 # dial small and free of moq-native's multi-backend (quiche/noq/iroh) surface,
 # per D-5's "small in-repo binary" framing.
 web-transport-quinn = "0.11.12"
+# Hosts the grid tile's fMP4-over-WebSocket listener (issue #12 item G2, Do
+# step 3). MIT-licensed, actively maintained, and the de facto standard
+# WebSocket implementation for Tokio -- no in-workspace or std alternative
+# exists for the WebSocket wire protocol itself (framing, the opening
+# handshake, ping/pong/close semantics), and hand-rolling RFC 6455 would
+# duplicate a well-tested third-party implementation for no benefit this
+# item needs. Only the "handshake" feature (server-side accept) is enabled;
+# the client-dialing half ("connect") is added back for tests only, below.
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+# `WebSocketStream`'s `Stream`/`Sink` impls need `StreamExt`/`SinkExt` for the
+# ergonomic `.next()`/`.send()` used in `ws_repackager`; already a transitive
+# dependency of `tokio-tungstenite` itself, so this adds no new dependency
+# surface, only the trait extension methods.
+futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink", "async-await"] }
 
 [dev-dependencies]
 corvette-rtsp-client = { path = "../corvette-rtsp-client", features = ["mock-camera"] }
@@ -38,9 +52,16 @@ corvette-rtsp-client = { path = "../corvette-rtsp-client", features = ["mock-cam
 # built directly against rtsp-types, not against corvette-rtsp-client, for
 # the same self-referential-oracle reason X3's own test convention gives
 # (`crates/rtsp-restream/src/server.rs` doc, "using a CLIENT crate to test a
-# SERVER would risk a self-referential oracle").
+# SERVER would risk a self-referential oracle"). That reasoning does not
+# extend to using tokio-tungstenite's own WebSocket CLIENT to test this
+# item's WebSocket server: both sides come from the same independently
+# authored, protocol-compliant third-party library, so using it as a test
+# client cannot mask a project-specific misunderstanding of the WebSocket
+# protocol -- only this item's own application-level framing (camera-name
+# routing, init-segment-then-fragments ordering) is actually under test.
 rtsp-types = "0.1.3"
 sdp-types = "0.2.0"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect"] }
 
 [lints]
 workspace = true

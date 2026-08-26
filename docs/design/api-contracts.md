@@ -275,3 +275,31 @@ DNS name (rather than a literal cluster-internal IP) needs to either race candid
 confirm the deployed resolver's answer order matches the relay's actual bound address family —
 this crate's own direct `web-transport-quinn` dependency does not do that automatically the way
 `moq-native`'s own dial would.
+
+## The fMP4-over-WebSocket grid-tile transport carries no per-viewer timestamp epoch
+
+`crates/corvette-media-bridge`'s fMP4 repackager (issue #12 G2, `fmp4::Fragmenter`) builds one
+`moof`/`mdat` fragment per access unit and broadcasts the identical bytes to every WebSocket
+viewer of a given camera. Each fragment's `tfdt` (`baseMediaDecodeTime`) is relative to when that
+camera's own repackaging task first observed a frame — one shared per-camera epoch, not a
+per-connection one — because the fragment bytes themselves are precomputed once and fanned out
+unchanged to however many viewers are currently connected; giving each viewer its own zeroed
+epoch would mean rewriting each fragment's `tfdt` per connection, which this item's own broadcast
+design does not do.
+
+A viewer that connects long after a camera's repackaging task started therefore receives a first
+fragment whose `tfdt` is a large, arbitrary offset from zero, not from that viewer's own
+connection time. A real MSE `SourceBuffer` in the default `"segments"` append mode positions
+buffered data at its own declared timestamps, so a viewer relying on that default would see a
+buffered range starting at that same large offset — never covering `currentTime` 0 — and never
+reach `HAVE_CURRENT_DATA` (confirmed directly: this item's own headless-browser check,
+`crates/corvette-media-bridge/tests/browser/g2_fmp4_ws.spec.cjs`, reproduced exactly this symptom
+before switching modes).
+
+Corvette's contract: a consumer of this transport (this item's own browser check today; U1's grid
+tile, a later item, in production) sets `sourceBuffer.mode = "sequence"` before appending
+anything, so the browser plays appended segments back-to-back on its own timeline starting at 0
+and ignores each segment's own absolute `tfdt` — using only each sample's declared duration to
+advance. This is a client-side integration requirement this transport's own wire format assumes;
+it is not negotiated or advertised anywhere in the protocol itself, so any future consumer of this
+same WebSocket endpoint needs to know to set it.

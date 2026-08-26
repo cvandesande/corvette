@@ -37,15 +37,23 @@
 //! `moq_mux::codec::{h264,h265}::{Split,Import}` (D-9), dialing the relay via
 //! `moq_net`/`web_transport_quinn` directly (D-5).
 //!
+//! `fmp4`/`ws_repackager` are role (c) (issue #12 item G2, DP-4): a third
+//! independent per-camera subscription that repackages the same frame stream
+//! into fragmented MP4 and serves it over one WebSocket connection per
+//! viewer, for the UI's grid tile.
+//!
+//! `parameter_sets` is the Annex-B parameter-set NAL scanning `restream_provider`
+//! and `fmp4` both need, shared between them rather than duplicated.
+//!
 //! `supervise` is this item's own restart-on-panic convention (INV-5(b),
-//! DP-3), matching `corvette-rtsp-client`'s own established shape.
+//! DP-3/DP-4), matching `corvette-rtsp-client`'s own established shape.
 //!
 //! `rtp_clock` converts each track's raw RTP timestamps into elapsed
-//! `Duration`s, shared by both roles.
+//! `Duration`s, shared by every role.
 //!
-//! `run` wires every configured camera's `corvette_rtsp_client::Client` to
-//! both roles and hosts the one whole-process `rtsp_restream::RtspServer`
-//! (Do steps 3-5).
+//! `start` wires every configured camera's `corvette_rtsp_client::Client` to
+//! all three roles and hosts the two whole-process listeners
+//! (`rtsp_restream::RtspServer` and [`ws_repackager::Fmp4WsServer`]).
 //!
 //! **A real, currently-shipped gap this crate inherits but does not fix**
 //! (see `moq_publish`'s and `restream_provider`'s own module docs, and G1's
@@ -60,30 +68,38 @@
 #![allow(clippy::multiple_crate_versions)]
 
 pub mod config;
+pub mod fmp4;
 pub mod moq_publish;
+pub mod parameter_sets;
 pub mod restream_provider;
 pub mod rtp_clock;
 pub mod supervise;
+pub mod ws_repackager;
 
 use config::Config;
 use corvette_rtsp_client::client::Client;
 use restream_provider::MultiCameraProvider;
 use std::sync::Arc;
 use supervise::{Supervised, log_event};
+use ws_repackager::MultiCameraFmp4Store;
 
 /// One configured camera's running state: the `Client` dialing it, and the
-/// two independent supervised tasks (Do step 5, INV-5, DP-3) reading its two
-/// independent subscriptions.
+/// three independent supervised tasks (Do step 5, INV-5, DP-3/DP-4) reading
+/// its three independent subscriptions.
 #[derive(Debug)]
 pub struct RunningCamera {
     pub client: Arc<Client>,
     pub restream_feed: Supervised,
     pub moq_publish: Supervised,
+    pub fmp4_repackage: Supervised,
 }
 
-/// Wires every configured camera to both roles and hosts the one
-/// whole-process `rtsp_restream::RtspServer` (Do steps 3-5). Never returns on
-/// success -- `RtspServer::serve` itself never returns.
+/// Wires every configured camera to all three roles and hosts the two
+/// whole-process listeners (`rtsp_restream::RtspServer` and
+/// [`ws_repackager::Fmp4WsServer`], Do steps 3-5).
+///
+/// Never returns on success -- both listeners' own `serve` methods never
+/// return.
 ///
 /// Returns the started cameras' own handles (needed only so a caller, e.g.
 /// this item's own integration tests, can hold or drop them) alongside the
@@ -91,18 +107,22 @@ pub struct RunningCamera {
 ///
 /// # Errors
 ///
-/// Returns an error if the RTSP-restream listener fails to bind.
+/// Returns an error if either listener fails to bind.
 pub async fn start(
     config: Config,
 ) -> std::io::Result<(Vec<RunningCamera>, impl std::future::Future<Output = ()>)> {
-    // Every camera is registered before any task that reads the provider is
-    // spawned, so the map itself is never mutated concurrently with a
-    // lookup -- see `MultiCameraProvider::camera`'s own doc.
+    // Every camera is registered before any task that reads either store is
+    // spawned, so neither map is ever mutated concurrently with a lookup --
+    // see `MultiCameraProvider::camera`'s and `MultiCameraFmp4Store`'s own
+    // doc.
     let mut provider = MultiCameraProvider::default();
+    let mut fmp4_store = MultiCameraFmp4Store::default();
     for camera in &config.cameras {
         provider.register(&camera.name);
+        fmp4_store.register(&camera.name);
     }
     let provider = Arc::new(provider);
+    let fmp4_store = Arc::new(fmp4_store);
 
     let mut running = Vec::with_capacity(config.cameras.len());
     for camera in &config.cameras {
@@ -130,6 +150,19 @@ pub async fn start(
             })
         };
 
+        let fmp4_repackage = {
+            let name = camera.name.clone();
+            let client = Arc::clone(&client);
+            let fmp4_store = Arc::clone(&fmp4_store);
+            supervise::spawn_supervised_with(format!("{name}/fmp4-repackage"), move || {
+                ws_repackager::run_fmp4_repackage(
+                    name.clone(),
+                    client.subscribe(),
+                    Arc::clone(&fmp4_store),
+                )
+            })
+        };
+
         log_event(
             &camera.name,
             "camera-started",
@@ -139,14 +172,29 @@ pub async fn start(
             client,
             restream_feed,
             moq_publish,
+            fmp4_repackage,
         });
     }
 
-    let server = rtsp_restream::RtspServer::bind(config.rtsp_bind_addr).await?;
+    let rtsp_server = rtsp_restream::RtspServer::bind(config.rtsp_bind_addr).await?;
+    let fmp4_ws_server = ws_repackager::Fmp4WsServer::bind(config.fmp4_ws_bind_addr).await?;
     let listener = async move {
-        server
-            .serve(provider as Arc<dyn rtsp_restream::StreamProvider>)
-            .await;
+        // `Fmp4WsServer::serve` never returns on success either (it is
+        // `-> !`, matching `RtspServer::serve`), so a task join completing
+        // here always means it panicked -- propagated into this future's own
+        // caller rather than silently leaving only the RTSP listener
+        // running, matching what awaiting `RtspServer::serve` directly would
+        // already do on its own panic.
+        let fmp4_ws_task = tokio::spawn(fmp4_ws_server.serve(fmp4_store));
+        tokio::select! {
+            () = rtsp_server.serve(provider as Arc<dyn rtsp_restream::StreamProvider>) => {}
+            joined = fmp4_ws_task => {
+                // `serve`'s own `-> !` return type means this join can never
+                // observe `Ok`.
+                let join_error = joined.expect_err("the fMP4-WS listener task never returns Ok");
+                std::panic::resume_unwind(join_error.into_panic());
+            }
+        }
     };
 
     Ok((running, listener))

@@ -8,13 +8,16 @@
 //! each track's own parameter-set NAL units (SPS/PPS, or VPS/SPS/PPS for
 //! H.265) out of the frame stream itself, since neither
 //! `corvette_rtsp_client::Client`'s public API nor `rtsp_restream`'s own
-//! `StreamProvider::describe` contract gives another source for them (see
-//! [`ParameterSetCache`]'s own doc).
+//! `StreamProvider::describe` contract gives another source for them. The
+//! scan itself is `crate::parameter_sets` (shared with this crate's own fMP4
+//! muxer, issue #12 item G2); [`ParameterSetCache`] here only layers this
+//! role's own "resolve once, never again" policy on top of it.
 //!
 //! `docs/design/api-contracts.md` records this crate's own honest limit: no
 //! AAC track is ever resolved here, because `corvette-rtsp-client`'s own SDP
 //! resolution never produces one today (see this crate's top-level doc).
 
+use crate::parameter_sets::RawParameterSets;
 use crate::rtp_clock::RtpClock;
 use crate::supervise::log_event;
 use bytes::Bytes;
@@ -23,17 +26,6 @@ use rtsp_restream::{Frame as RestreamFrame, FrameReceiver, StreamInfo, StreamPro
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
-
-/// The Annex-B start code every `corvette_rtsp_client::depacketize::Frame`
-/// payload begins with (`depacketize::annex_b_frame`, confirmed by direct
-/// source read): four bytes, so a NAL's own header byte(s) start at index 4.
-const START_CODE_LEN: usize = 4;
-
-const H264_NAL_TYPE_SPS: u8 = 7;
-const H264_NAL_TYPE_PPS: u8 = 8;
-const H265_NAL_TYPE_VPS: u8 = 32;
-const H265_NAL_TYPE_SPS: u8 = 33;
-const H265_NAL_TYPE_PPS: u8 = 34;
 
 /// The only per-camera capacity this item's own internal (restream-feed to
 /// `FrameReceiver`) broadcast channel needs; matches
@@ -218,9 +210,13 @@ pub async fn run_restream_feed(
     }
 }
 
-/// Accumulates the parameter-set NAL units (SPS/PPS, or VPS/SPS/PPS) a
-/// camera's own frame stream carries in-band, resolving a [`StreamInfo`] once
-/// a complete set for one codec has been observed.
+/// Resolves a [`StreamInfo`] the moment a complete parameter set for one
+/// codec becomes available, backed by the shared [`RawParameterSets`]
+/// accumulator -- this role's own policy layered on top of it: resolve once,
+/// and never update again even if the underlying bytes later change
+/// (unchanged behavior from before this accumulator was extracted; see
+/// [`RawParameterSets`]'s own doc for why `crate::fmp4`'s tracker needs a
+/// different policy).
 ///
 /// This is the one piece of real plumbing this adapter needs: `rtsp_restream`
 /// requires the parameter sets up front to answer `DESCRIBE`
@@ -229,30 +225,12 @@ pub async fn run_restream_feed(
 /// itself, not the camera's SDP-resolved track description that also carries
 /// them (an internal type of that crate, per its own `session`/`client::task`
 /// modules -- not modified or reached into here, matching this item's own
-/// Scope guard). A real camera's own depacketizer emits its parameter sets as
-/// ordinary in-band `Frame`s (either from the camera's own periodic in-stream
-/// repetition, or from `sprop-parameter-sets`/`sprop-vps`/`sprop-sps`/
-/// `sprop-pps` SDP attributes the depacketizer was constructed with), so
-/// scanning the frame stream for them is the only avenue this adapter has,
-/// and needs no cooperation from corvette-rtsp-client beyond what it already
-/// ships.
+/// Scope guard).
 #[derive(Default)]
 struct ParameterSetCache {
-    h264: H264Sets,
-    h265: H265Sets,
-}
-
-#[derive(Default)]
-struct H264Sets {
-    sps: Option<Bytes>,
-    pps: Option<Bytes>,
-}
-
-#[derive(Default)]
-struct H265Sets {
-    vps: Option<Bytes>,
-    sps: Option<Bytes>,
-    pps: Option<Bytes>,
+    raw: RawParameterSets,
+    h264_resolved: bool,
+    h265_resolved: bool,
 }
 
 impl ParameterSetCache {
@@ -263,48 +241,23 @@ impl ParameterSetCache {
     /// [`MultiCameraProvider`]'s own cached value does not need to be
     /// rewritten on every later frame).
     fn observe(&mut self, frame: &ClientFrame) -> Option<StreamInfo> {
+        self.raw.observe(frame);
         match frame.codec {
             ClientCodec::H264 => {
-                let was_incomplete = self.h264.sps.is_none() || self.h264.pps.is_none();
-                if let Some(nal_type) = nal_type_h264(&frame.payload) {
-                    match nal_type {
-                        H264_NAL_TYPE_SPS => {
-                            self.h264.sps = Some(parameter_set_bytes(&frame.payload));
-                        }
-                        H264_NAL_TYPE_PPS => {
-                            self.h264.pps = Some(parameter_set_bytes(&frame.payload));
-                        }
-                        _ => {}
-                    }
-                }
-                let (Some(sps), Some(pps)) = (&self.h264.sps, &self.h264.pps) else {
+                if self.h264_resolved {
                     return None;
-                };
-                was_incomplete.then(|| stream_info_h264(sps, pps))
+                }
+                let (sps, pps) = self.raw.h264()?;
+                self.h264_resolved = true;
+                Some(stream_info_h264(sps, pps))
             }
             ClientCodec::H265 => {
-                let was_incomplete =
-                    self.h265.vps.is_none() || self.h265.sps.is_none() || self.h265.pps.is_none();
-                if let Some(nal_type) = nal_type_h265(&frame.payload) {
-                    match nal_type {
-                        H265_NAL_TYPE_VPS => {
-                            self.h265.vps = Some(parameter_set_bytes(&frame.payload));
-                        }
-                        H265_NAL_TYPE_SPS => {
-                            self.h265.sps = Some(parameter_set_bytes(&frame.payload));
-                        }
-                        H265_NAL_TYPE_PPS => {
-                            self.h265.pps = Some(parameter_set_bytes(&frame.payload));
-                        }
-                        _ => {}
-                    }
-                }
-                let (Some(vps), Some(sps), Some(pps)) =
-                    (&self.h265.vps, &self.h265.sps, &self.h265.pps)
-                else {
+                if self.h265_resolved {
                     return None;
-                };
-                was_incomplete.then(|| stream_info_h265(vps, sps, pps))
+                }
+                let (vps, sps, pps) = self.raw.h265()?;
+                self.h265_resolved = true;
+                Some(stream_info_h265(vps, sps, pps))
             }
             // A real, currently-shipped gap this item inherits rather than
             // fixes (see this crate's top-level doc and G1's own Premise):
@@ -318,31 +271,6 @@ impl ParameterSetCache {
             ClientCodec::Aac => None,
         }
     }
-}
-
-/// The NAL header byte's low 5 bits (H.264, RFC 6184 section 1.3), read past
-/// the frame's own 4-byte Annex-B start code -- or `None` for a payload too
-/// short to hold one (never produced by `corvette-rtsp-client`'s own
-/// depacketizer, which always emits at least a start code plus one NAL byte,
-/// but checked defensively since this module does not control that
-/// invariant).
-fn nal_type_h264(payload: &[u8]) -> Option<u8> {
-    payload.get(START_CODE_LEN).map(|header| header & 0x1F)
-}
-
-/// The NAL header's type field (H.265, RFC 7798 section 1.1.4: bits 1-6 of
-/// the first header byte), read the same way as [`nal_type_h264`].
-fn nal_type_h265(payload: &[u8]) -> Option<u8> {
-    payload
-        .get(START_CODE_LEN)
-        .map(|header| (header >> 1) & 0x3F)
-}
-
-/// The full NAL unit (including its own header byte(s)), without the
-/// 4-byte Annex-B start code -- exactly the framing
-/// `rtsp_restream::provider::TrackInfo::H264`/`H265`'s own doc requires.
-fn parameter_set_bytes(payload: &Bytes) -> Bytes {
-    payload.slice(START_CODE_LEN..)
 }
 
 fn stream_info_h264(sps: &Bytes, pps: &Bytes) -> StreamInfo {
@@ -369,6 +297,7 @@ fn stream_info_h265(vps: &Bytes, sps: &Bytes, pps: &Bytes) -> StreamInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parameter_sets::START_CODE_LEN;
 
     fn annex_b(nal: &[u8]) -> Bytes {
         let mut payload = Vec::with_capacity(nal.len() + START_CODE_LEN);

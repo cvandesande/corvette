@@ -1,0 +1,195 @@
+Issue #12 item G2 -- INV-5(b) mutation evidence
+================================================================================
+
+Base commit (parent of this item's own commit): 9876cde7a0bd2e4620a3194f67292c8307d461ca
+
+This targets restart-on-panic recovery for the SAME failed unit (INV-5(b)),
+not cross-unit isolation -- a panic inside one Tokio task is already caught
+at that task's own boundary regardless of supervision, so it can never
+propagate to an unrelated sibling task or role; that part (INV-5(a)) is
+verified directly, not by this mutation, by the "unaffected throughout"
+assertions in the same harness run below (the same camera's own MoQ-publish
+output, the other camera's every output including its own fMP4-repackage
+output) -- their passing in both the BROKEN and RESTORED runs is what
+confirms INV-5(a) held unconditionally regardless of which run was active,
+matching G1's own precedent (`G1-mutation.log`) for wording this
+distinction correctly.
+
+What was broken and how
+------------------------
+Two temporary edits, both reverted after capture (confirmed by `git diff`
+showing no residue in the final commit):
+
+1. `crates/corvette-media-bridge/src/ws_repackager.rs` -- inside
+   `run_fmp4_repackage`'s frame-received arm, a process-lifetime counter and
+   a one-line injected panic keyed to a camera literally named "cam-target":
+
+       static PANIC_AFTER_NTH_FRAME: std::sync::atomic::AtomicUsize =
+           std::sync::atomic::AtomicUsize::new(0);
+       if name == "cam-target"
+           && PANIC_AFTER_NTH_FRAME.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+               == 100
+       {
+           panic!("deliberately injected panic for issue #12 G2's INV-5(b) mutation");
+       }
+
+   A `static` counter (not a per-worker-instance one) so a restart under
+   real supervision does not re-arm it: across the whole test process this
+   fires exactly once, on "cam-target"'s 100th processed frame (roughly half
+   a second in, at the harness's own 5ms-per-frame synthetic feed rate) --
+   late enough that a fresh WebSocket connection has already received real
+   output before the panic hits, so "must still be flowing" below is a real
+   transition, not an absence that was never present. Left in place
+   unmodified across BOTH runs, matching G1's own approach of proving the
+   supervised pattern recovers from the exact same panic, not a different
+   one.
+
+2. A temporary test harness, `crates/corvette-media-bridge/tests/g2_mutation_temp.rs`
+   (not committed -- deleted once this log was captured), wiring two full
+   cameras ("cam-target", "cam-healthy") through all three of this crate's
+   own per-camera roles (restream-feed, MoQ-publish, fMP4-repackage) against
+   a real local `moq-relay` (pinned commit `7b73c43381a7f9c309e3045a8f0f858aa32ef48c`,
+   matching this item's own `moq-net`/`moq-mux` dependency pin) and this
+   crate's own real `rtsp_restream::RtspServer`/`ws_repackager::Fmp4WsServer`.
+   Both cameras are fed a real, valid H.264 SPS/PPS/IDR triple directly onto a
+   `broadcast::Sender<corvette_rtsp_client::depacketize::Frame>` (the same
+   `cam-synth` pattern `g1_integration.rs`/`tests/g2_integration.rs` both use)
+   -- not through a real RTSP dial, so every role actually produces real,
+   observable output for the assertions below.
+
+   Controlled by one environment variable, `G2_MUTATION_BARE_SPAWN`:
+   - Set (BROKEN run): "cam-target"'s own fMP4-repackage task is spawned via
+     a bare, unsupervised `tokio::spawn`, bypassing
+     `supervise::spawn_supervised_with`.
+   - Unset (RESTORED run): the normal, correct `spawn_supervised_with` call.
+
+   Everything downstream of that one spawn-mechanism choice is ONE
+   unconditional set of assertions describing the CORRECT, expected
+   behavior (a production camera always uses `spawn_supervised_with`) --
+   the harness does not branch to assert a different "expected" outcome per
+   scenario, since that would prove nothing about whether the mutation is
+   actually caught. The real oracle, checked twice with a wait in between:
+   does a fresh WebSocket connection to "cam-target" still receive its init
+   segment and at least one further fragment after the injected panic. A
+   `is_finished()` check on the bare `JoinHandle` is also printed, but
+   labelled a diagnostic, not the oracle.
+
+Both runs below used the same command, differing only in
+`G2_MUTATION_BARE_SPAWN`:
+
+    MOQ_RELAY_BIN=<path to the pinned-commit moq-relay binary> \
+      cargo test -p corvette-media-bridge --test g2_mutation_temp -- --nocapture --test-threads=1
+
+--- BROKEN (G2_MUTATION_BARE_SPAWN=1, bare spawn for cam-target's fMP4-repackage) -- FAIL ---
+
+warning: Git tree '/home/cvandesande/github/corvette' is dirty
+   Compiling corvette-media-bridge v0.1.0 (/home/cvandesande/github/corvette/crates/corvette-media-bridge)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.03s
+     Running tests/g2_mutation_temp.rs (target/debug/deps/g2_mutation_temp-2af79ca1a7c60b95)
+
+running 1 test
+test g2_inv5b_mutation ... MUTATION HARNESS: bare_spawn_for_target=true
+corvette-media-bridge unit="cam-healthy" event=moq-publish-connect detail="relay=https://127.0.0.1:45957/anon"
+corvette-media-bridge unit="cam-target" event=moq-publish-connect detail="relay=https://127.0.0.1:45957/anon"
+corvette-media-bridge unit="cam-target" event=fmp4-ws-viewer-disconnect detail="reading from the viewer: WebSocket protocol error: Connection reset without closing handshake"
+
+thread 'g2_inv5b_mutation' (623499) panicked at crates/corvette-media-bridge/src/ws_repackager.rs:150:25:
+deliberately injected panic for issue #12 G2's INV-5(b) mutation
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+DIAGNOSTIC (not the oracle): bare-spawned task is_finished()=true
+
+thread 'g2_inv5b_mutation' (623499) panicked at crates/corvette-media-bridge/tests/g2_mutation_temp.rs:460:5:
+cam-target's WS output must still be flowing (or have resumed) after the injected panic
+FAILED
+
+failures:
+
+failures:
+    g2_inv5b_mutation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.34s
+
+error: test failed, to rerun pass `-p corvette-media-bridge --test g2_mutation_temp`
+
+Confirms the defect: "cam-target"'s bare-spawned fMP4-repackage task died on
+the injected panic (`is_finished()=true`, the diagnostic line) and nothing
+restarted it, so a fresh WebSocket connection made after the panic never
+receives a second binary message (only whatever the connection already
+buffered, if anything) within the harness's own timeout -- the test's own
+"must still be flowing" assertion fails, exactly the observable "stops and
+never resumes" this item's own plan text names. Re-run once more to rule out
+a one-off timing fluke: same failure, same line, same message.
+
+--- AFTER RESTORE (spawn_supervised_with restored for cam-target's fMP4-repackage) -- PASS ---
+
+(The bare, unsupervised `tokio::spawn` in `tests/g2_mutation_temp.rs` for
+this run is the one gated OFF by leaving `G2_MUTATION_BARE_SPAWN` unset --
+`src/ws_repackager.rs`'s own injected panic was deliberately LEFT IN for
+this run, unmodified, since the whole point is proving the *supervised*
+pattern recovers from the exact same panic.)
+
+warning: Git tree '/home/cvandesande/github/corvette' is dirty
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running tests/g2_mutation_temp.rs (target/debug/deps/g2_mutation_temp-2af79ca1a7c60b95)
+
+running 1 test
+test g2_inv5b_mutation ... MUTATION HARNESS: bare_spawn_for_target=false
+corvette-media-bridge unit="cam-healthy" event=moq-publish-connect detail="relay=https://127.0.0.1:42505/anon"
+corvette-media-bridge unit="cam-target" event=moq-publish-connect detail="relay=https://127.0.0.1:42505/anon"
+corvette-media-bridge unit="cam-target" event=fmp4-ws-viewer-disconnect detail="reading from the viewer: WebSocket protocol error: Connection reset without closing handshake"
+
+thread 'g2_inv5b_mutation' (623651) panicked at crates/corvette-media-bridge/src/ws_repackager.rs:150:25:
+deliberately injected panic for issue #12 G2's INV-5(b) mutation
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+corvette-media-bridge unit="cam-target/fmp4-repackage" event=panic detail="task 16 panicked with message "deliberately injected panic for issue #12 G2's INV-5(b) mutation""
+corvette-media-bridge unit="cam-target" event=fmp4-ws-viewer-disconnect detail="reading from the viewer: WebSocket protocol error: Connection reset without closing handshake"
+corvette-media-bridge unit="cam-target" event=fmp4-ws-viewer-disconnect detail="reading from the viewer: WebSocket protocol error: Connection reset without closing handshake"
+corvette-media-bridge unit="cam-healthy" event=fmp4-ws-viewer-disconnect detail="reading from the viewer: WebSocket protocol error: Connection reset without closing handshake"
+RESULT bare_spawn_for_target=false all assertions passed
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.41s
+
+Confirms the fix: with the real `spawn_supervised_with` pattern restored,
+"cam-target"'s fMP4-repackage task panics once on its own 100th frame (the
+`corvette-media-bridge unit="cam-target/fmp4-repackage" event=panic` line),
+its supervisor immediately respawns it, and the fresh worker builds up a new
+initialization segment and fragments from scratch -- a fresh WebSocket
+connection made after the panic receives its init segment and at least one
+further fragment well within the timeout, so all of this test's own
+assertions pass: cam-target's WS output resumes (and stays resumed on a
+second check after a further wait); cam-target's own MoQ-publish output
+stayed reachable throughout; cam-healthy's MoQ-publish, fMP4-WS, and
+RTSP-restream outputs all stayed reachable throughout -- confirming
+INV-5(a)'s cross-unit isolation held unconditionally regardless of which run
+was active, exactly as the plan's own text says it must (verified directly
+by these same "unaffected throughout" assertions passing in both runs, not
+inferred from the mutation's own pass/fail alone). Re-run once more to rule
+out a one-off timing fluke: same pass, same log shape.
+
+The recurring "WebSocket protocol error: Connection reset without closing
+handshake" lines in both runs are this test harness's own connection
+teardown (`fmp4_ws_output_is_flowing`'s test client is dropped without
+sending a WebSocket close frame once it has read the messages it needed) --
+an artifact of the test client, not a server-side defect; it appears
+identically in both the BROKEN and RESTORED runs and for both cameras.
+
+Full revert and re-verification
+---------------------------------
+After capturing both runs above:
+  - `crates/corvette-media-bridge/src/ws_repackager.rs`'s injected panic
+    (the `PANIC_AFTER_NTH_FRAME` static and its `if` block) was removed.
+  - `crates/corvette-media-bridge/tests/g2_mutation_temp.rs` was deleted.
+
+Confirmed clean afterward:
+
+    $ grep -rn "PANIC_AFTER_NTH_FRAME\|cam-target\|G2_MUTATION_BARE_SPAWN" crates/corvette-media-bridge/src/ crates/corvette-media-bridge/tests/
+    clean -- no mutation artifacts remain
+
+    $ cargo clippy --workspace --all-targets --all-features --locked
+      -> clean: one pre-existing clippy::result_large_err warning from
+         tokio-tungstenite's own fixed Callback trait signature (see this
+         item's own commit message/report), 0 errors; unrelated to this
+         mutation.
+    $ cargo test --workspace
+      -> every crate's test result line reported "ok", 0 failed.

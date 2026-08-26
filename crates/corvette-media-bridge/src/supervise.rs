@@ -63,6 +63,22 @@ pub struct Supervised {
     supervisor: JoinHandle<()>,
 }
 
+impl Supervised {
+    /// Whether the supervisor's own task has ended.
+    ///
+    /// The supervisor loop in [`spawn_supervised_with`] only returns when its
+    /// worker's `JoinHandle` reports a cancelled panic (i.e. this
+    /// `Supervised` itself was already dropped) -- a live, un-dropped
+    /// `Supervised` whose worker keeps panicking is respawned forever and
+    /// never finishes. This is a diagnostic for a caller (an item's own
+    /// tests, e.g.) to confirm a worker is still being supervised, not a
+    /// signal that the worker itself is currently healthy.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.supervisor.is_finished()
+    }
+}
+
 impl Drop for Supervised {
     fn drop(&mut self) {
         self.supervisor.abort();
