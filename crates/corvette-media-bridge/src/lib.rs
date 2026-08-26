@@ -42,6 +42,12 @@
 //! into fragmented MP4 and serves it over one WebSocket connection per
 //! viewer, for the UI's grid tile.
 //!
+//! `hls` is role (d) (issue #12 item G3, DP-4): a fourth independent
+//! per-camera subscription that groups the same fMP4 fragmentation core
+//! `fmp4` already builds (reused directly, not duplicated -- see `hls`'s own
+//! module doc) into CMAF media segments plus a rolling `m3u8` playlist,
+//! served over a plain HTTP listener, for the UI's expanded-view fallback.
+//!
 //! `parameter_sets` is the Annex-B parameter-set NAL scanning `restream_provider`
 //! and `fmp4` both need, shared between them rather than duplicated.
 //!
@@ -52,8 +58,9 @@
 //! `Duration`s, shared by every role.
 //!
 //! `start` wires every configured camera's `corvette_rtsp_client::Client` to
-//! all three roles and hosts the two whole-process listeners
-//! (`rtsp_restream::RtspServer` and [`ws_repackager::Fmp4WsServer`]).
+//! all four roles and hosts the three whole-process listeners
+//! (`rtsp_restream::RtspServer`, [`ws_repackager::Fmp4WsServer`], and
+//! [`hls::HlsServer`]).
 //!
 //! **A real, currently-shipped gap this crate inherits but does not fix**
 //! (see `moq_publish`'s and `restream_provider`'s own module docs, and G1's
@@ -69,6 +76,7 @@
 
 pub mod config;
 pub mod fmp4;
+pub mod hls;
 pub mod moq_publish;
 pub mod parameter_sets;
 pub mod restream_provider;
@@ -78,25 +86,27 @@ pub mod ws_repackager;
 
 use config::Config;
 use corvette_rtsp_client::client::Client;
+use hls::MultiCameraHlsStore;
 use restream_provider::MultiCameraProvider;
 use std::sync::Arc;
 use supervise::{Supervised, log_event};
 use ws_repackager::MultiCameraFmp4Store;
 
 /// One configured camera's running state: the `Client` dialing it, and the
-/// three independent supervised tasks (Do step 5, INV-5, DP-3/DP-4) reading
-/// its three independent subscriptions.
+/// four independent supervised tasks (Do step 5, INV-5, DP-3/DP-4) reading
+/// its four independent subscriptions.
 #[derive(Debug)]
 pub struct RunningCamera {
     pub client: Arc<Client>,
     pub restream_feed: Supervised,
     pub moq_publish: Supervised,
     pub fmp4_repackage: Supervised,
+    pub hls_segment: Supervised,
 }
 
-/// Wires every configured camera to all three roles and hosts the two
-/// whole-process listeners (`rtsp_restream::RtspServer` and
-/// [`ws_repackager::Fmp4WsServer`], Do steps 3-5).
+/// Wires every configured camera to all four roles and hosts the three
+/// whole-process listeners (`rtsp_restream::RtspServer`,
+/// [`ws_repackager::Fmp4WsServer`], and [`hls::HlsServer`], Do steps 3-5).
 ///
 /// Never returns on success -- both listeners' own `serve` methods never
 /// return.
@@ -117,12 +127,15 @@ pub async fn start(
     // doc.
     let mut provider = MultiCameraProvider::default();
     let mut fmp4_store = MultiCameraFmp4Store::default();
+    let mut hls_store = MultiCameraHlsStore::default();
     for camera in &config.cameras {
         provider.register(&camera.name);
         fmp4_store.register(&camera.name);
+        hls_store.register(&camera.name);
     }
     let provider = Arc::new(provider);
     let fmp4_store = Arc::new(fmp4_store);
+    let hls_store = Arc::new(hls_store);
 
     let mut running = Vec::with_capacity(config.cameras.len());
     for camera in &config.cameras {
@@ -163,6 +176,15 @@ pub async fn start(
             })
         };
 
+        let hls_segment = {
+            let name = camera.name.clone();
+            let client = Arc::clone(&client);
+            let hls_store = Arc::clone(&hls_store);
+            supervise::spawn_supervised_with(format!("{name}/hls-segment"), move || {
+                hls::run_hls_segment(name.clone(), client.subscribe(), Arc::clone(&hls_store))
+            })
+        };
+
         log_event(
             &camera.name,
             "camera-started",
@@ -173,25 +195,32 @@ pub async fn start(
             restream_feed,
             moq_publish,
             fmp4_repackage,
+            hls_segment,
         });
     }
 
     let rtsp_server = rtsp_restream::RtspServer::bind(config.rtsp_bind_addr).await?;
     let fmp4_ws_server = ws_repackager::Fmp4WsServer::bind(config.fmp4_ws_bind_addr).await?;
+    let hls_server = hls::HlsServer::bind(config.hls_bind_addr).await?;
     let listener = async move {
-        // `Fmp4WsServer::serve` never returns on success either (it is
-        // `-> !`, matching `RtspServer::serve`), so a task join completing
-        // here always means it panicked -- propagated into this future's own
-        // caller rather than silently leaving only the RTSP listener
-        // running, matching what awaiting `RtspServer::serve` directly would
-        // already do on its own panic.
+        // Neither `Fmp4WsServer::serve` nor `HlsServer::serve` ever returns
+        // on success either (both are `-> !`, matching `RtspServer::serve`),
+        // so a task join completing here always means it panicked --
+        // propagated into this future's own caller rather than silently
+        // leaving the other two listeners running, matching what awaiting
+        // `RtspServer::serve` directly would already do on its own panic.
         let fmp4_ws_task = tokio::spawn(fmp4_ws_server.serve(fmp4_store));
+        let hls_task = tokio::spawn(hls_server.serve(hls_store));
         tokio::select! {
             () = rtsp_server.serve(provider as Arc<dyn rtsp_restream::StreamProvider>) => {}
             joined = fmp4_ws_task => {
                 // `serve`'s own `-> !` return type means this join can never
                 // observe `Ok`.
                 let join_error = joined.expect_err("the fMP4-WS listener task never returns Ok");
+                std::panic::resume_unwind(join_error.into_panic());
+            }
+            joined = hls_task => {
+                let join_error = joined.expect_err("the HLS listener task never returns Ok");
                 std::panic::resume_unwind(join_error.into_panic());
             }
         }

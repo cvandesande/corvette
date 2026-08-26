@@ -14,10 +14,12 @@
 //!
 //! This module builds bytes; it performs no I/O and owns no task or
 //! connection -- `crate::ws_repackager` drives it per camera and hosts the
-//! WebSocket transport. Kept free of any WebSocket concern so a later HLS/
-//! CMAF packager (a separate, not-yet-built item) can reuse the same
-//! fragmentation core through this module's own public API rather than
-//! through `ws_repackager`.
+//! WebSocket transport. Kept free of any WebSocket concern so the HLS/CMAF
+//! packager (`crate::hls`, issue #12 item G3) can reuse the same
+//! fragmentation core through this module's own public API ([`Fragmenter`],
+//! [`InitSegmentTracker`]) rather than through `ws_repackager` -- see
+//! [`Fragment`]'s own doc for exactly what G3 needed added here to make that
+//! reuse possible.
 
 use crate::parameter_sets::RawParameterSets;
 use crate::rtp_clock::VIDEO_CLOCK_RATE_HZ;
@@ -138,10 +140,28 @@ pub struct Fragmenter {
     previous_timestamp: Option<u32>,
 }
 
+/// One access-unit fragment [`Fragmenter::next`] produces: the `moof`+`mdat`
+/// bytes themselves, plus the two facts a segment-boundary policy needs that
+/// plain bytes don't expose without re-parsing them -- whether this fragment
+/// carries a keyframe/sync sample, and its own sample duration in the same
+/// RTP tick units `ClientFrame::timestamp` uses.
+///
+/// `ws_repackager` (issue #12 item G2) only ever needed the bytes themselves;
+/// this richer return type exists so `crate::hls` (issue #12 item G3) can
+/// decide where to cut a CMAF media segment (on a keyframe, once a segment
+/// has run long enough -- see that module's own doc) without re-parsing the
+/// `moof` box it was just handed.
+#[derive(Debug, Clone)]
+pub struct Fragment {
+    pub bytes: Bytes,
+    pub is_keyframe: bool,
+    pub duration_ticks: u32,
+}
+
 impl Fragmenter {
     /// Consumes one frame, returning a `moof`+`mdat` fragment if it carries
     /// an access unit (`None` for a parameter-set or other non-sample NAL).
-    pub fn next(&mut self, frame: &ClientFrame) -> Option<Bytes> {
+    pub fn next(&mut self, frame: &ClientFrame) -> Option<Fragment> {
         let (_nal_type, is_keyframe) = classify(frame)?;
 
         let duration_ticks = self
@@ -152,13 +172,18 @@ impl Fragmenter {
         self.previous_timestamp = Some(frame.timestamp);
 
         self.sequence_number += 1;
-        Some(boxes::fragment(
+        let bytes = boxes::fragment(
             self.sequence_number,
             u64::from(frame.timestamp),
             duration_ticks,
             &frame.payload[super::parameter_sets::START_CODE_LEN..],
             is_keyframe,
-        ))
+        );
+        Some(Fragment {
+            bytes,
+            is_keyframe,
+            duration_ticks,
+        })
     }
 }
 
@@ -715,19 +740,39 @@ mod tests {
             .next(&frame(ClientCodec::H264, 0, IDR))
             .expect("a VCL slice NAL produces one fragment");
 
-        let (moof_type, moof_len) = read_box_header(&fragment, 0);
+        let (moof_type, moof_len) = read_box_header(&fragment.bytes, 0);
         assert_eq!(&moof_type, b"moof");
-        let (mdat_type, mdat_len) = read_box_header(&fragment, moof_len);
+        let (mdat_type, mdat_len) = read_box_header(&fragment.bytes, moof_len);
         assert_eq!(&mdat_type, b"mdat");
-        assert_eq!(moof_len + mdat_len, fragment.len());
+        assert_eq!(moof_len + mdat_len, fragment.bytes.len());
 
         // mdat's payload is length-prefixed (AVCC), not Annex-B
         // start-code-prefixed: a 4-byte big-endian length, then the NAL
         // bytes without their own start code.
-        let mdat_payload = &fragment[moof_len + 8..];
+        let mdat_payload = &fragment.bytes[moof_len + 8..];
         let declared_len = u32::from_be_bytes(mdat_payload[0..4].try_into().unwrap()) as usize;
         assert_eq!(declared_len, IDR.len());
         assert_eq!(&mdat_payload[4..4 + declared_len], IDR);
+    }
+
+    #[test]
+    fn fragmenter_reports_the_keyframe_flag_matching_the_nal_type() {
+        let mut fragmenter = Fragmenter::default();
+        let idr_fragment = fragmenter
+            .next(&frame(ClientCodec::H264, 0, IDR))
+            .expect("a VCL slice NAL produces one fragment");
+        assert!(
+            idr_fragment.is_keyframe,
+            "an IDR slice is a keyframe/sync sample"
+        );
+
+        let non_idr_fragment = fragmenter
+            .next(&frame(ClientCodec::H264, 3000, NON_IDR))
+            .expect("a VCL slice NAL produces one fragment");
+        assert!(
+            !non_idr_fragment.is_keyframe,
+            "a non-IDR slice is not a keyframe/sync sample"
+        );
     }
 
     #[test]
@@ -743,8 +788,8 @@ mod tests {
             // sequence_number.
             u32::from_be_bytes(fragment[8 + 8 + 4..8 + 8 + 8].try_into().unwrap())
         };
-        assert_eq!(sequence_number(&first), 1);
-        assert_eq!(sequence_number(&second), 2);
+        assert_eq!(sequence_number(&first.bytes), 1);
+        assert_eq!(sequence_number(&second.bytes), 2);
     }
 
     #[test]
@@ -755,10 +800,14 @@ mod tests {
             .next(&frame(ClientCodec::H264, 3000, NON_IDR))
             .unwrap();
 
+        assert_eq!(second.duration_ticks, 3000);
+
         // sample_duration sits right after trun's own data_offset field,
         // which the fragment builder itself documents at byte 84 (see
-        // boxes::fragment's DATA_OFFSET_FIELD_OFFSET) -- so 88.
-        let sample_duration = u32::from_be_bytes(second[88..92].try_into().unwrap());
+        // boxes::fragment's DATA_OFFSET_FIELD_OFFSET) -- so 88. Confirms the
+        // box's own encoded bytes agree with the field above, not just the
+        // returned struct.
+        let sample_duration = u32::from_be_bytes(second.bytes[88..92].try_into().unwrap());
         assert_eq!(sample_duration, 3000);
     }
 }

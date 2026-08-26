@@ -45,6 +45,19 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = ["h
 # dependency of `tokio-tungstenite` itself, so this adds no new dependency
 # surface, only the trait extension methods.
 futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink", "async-await"] }
+# Parses the HLS listener's own inbound HTTP/1.x request line and headers
+# (issue #12 item G3, `src/hls.rs`). Already resolves in this crate's own
+# dependency tree at this exact version via `tungstenite`'s WebSocket
+# handshake (`cargo tree -i httparse` confirms a single resolved version), so
+# depending on it directly adds no new version to this crate's own
+# `clippy::multiple_crate_versions` surface -- only the one dependency edge.
+# Minimal, well-tested, and already this project's own precedent
+# (`tokio-tungstenite`'s doc above) for using an independently authored
+# library for wire-protocol framing rather than hand-rolling it; this item
+# only needs the request-line/header parse itself, so everything past that
+# (response formatting, routing) is this module's own small, deterministic
+# code.
+httparse = "1.10.1"
 
 [dev-dependencies]
 corvette-rtsp-client = { path = "../corvette-rtsp-client", features = ["mock-camera"] }

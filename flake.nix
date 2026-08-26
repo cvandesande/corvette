@@ -123,6 +123,12 @@
             pkgs.cargo-leptos
             pkgs.clang-tools
             pkgs.cmake
+            # Bundles ffprobe, the real-world CMAF/HLS consumer issue #12
+            # item G3's own Verify step requires (validating this crate's
+            # HLS segments and playlist against a real parser, not a
+            # hand-rolled one) -- not used to encode or transcode anything at
+            # runtime.
+            pkgs.ffmpeg
             pkgs.gnumake
             pkgs.nixfmt
             pkgs.nginx

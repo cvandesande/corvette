@@ -140,7 +140,7 @@ pub async fn run_fmp4_repackage(
                     camera.init.send_replace(Some(segment));
                 }
                 if let Some(fragment) = fragmenter.next(&frame) {
-                    let _ = camera.fragments.send(fragment);
+                    let _ = camera.fragments.send(fragment.bytes);
                 }
             }
             Err(broadcast::error::RecvError::Lagged(_)) => {}

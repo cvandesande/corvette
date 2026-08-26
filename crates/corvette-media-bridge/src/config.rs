@@ -89,6 +89,10 @@ pub struct Config {
     /// listener (issue #12 item G2, Do step 3; D-3's "configuration point"
     /// convention, matching `rtsp_bind_addr`'s own shape).
     pub fmp4_ws_bind_addr: SocketAddr,
+    /// Bind address for the single, whole-process HLS listener (issue #12
+    /// item G3, Do step 3; D-3's "configuration point" convention, matching
+    /// `rtsp_bind_addr`'s and `fmp4_ws_bind_addr`'s own shape).
+    pub hls_bind_addr: SocketAddr,
     pub moq: MoqConfig,
     pub cameras: Vec<CameraSpec>,
 }
@@ -180,6 +184,7 @@ mod tests {
         let json = r#"{
             "rtsp_bind_addr": "127.0.0.1:8554",
             "fmp4_ws_bind_addr": "127.0.0.1:8555",
+            "hls_bind_addr": "127.0.0.1:8556",
             "moq": { "relay_url": "https://127.0.0.1:4443/anon", "tls_disable_verify": true },
             "cameras": [
                 { "name": "front_door", "host": "192.168.1.50", "port": 554, "path": "/Streaming/Channels/101", "username": "admin", "password": "secret" }
@@ -202,6 +207,7 @@ mod tests {
         let json = r#"{
             "rtsp_bind_addr": "127.0.0.1:8554",
             "fmp4_ws_bind_addr": "127.0.0.1:8555",
+            "hls_bind_addr": "127.0.0.1:8556",
             "moq": { "relay_url": "https://127.0.0.1:4443/anon" },
             "cameras": [
                 { "name": "dup", "host": "127.0.0.1", "port": 554, "path": "/a" },

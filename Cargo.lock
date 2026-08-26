@@ -444,6 +444,7 @@ dependencies = [
  "corvette-rtsp-client",
  "futures-util",
  "hang",
+ "httparse",
  "moq-mux",
  "moq-net",
  "rtsp-restream",
