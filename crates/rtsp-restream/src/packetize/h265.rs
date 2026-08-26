@@ -74,11 +74,20 @@ impl H265Packetizer {
     /// unchanged, with `nal_unit_type` replaced by 49 (FU); the 1-byte FU
     /// header then carries the S/E bits and the *original* `nal_unit_type`
     /// -- the exact inverse of `depacketize::h265::reassemble_fu`.
-    fn fragment_nal(&mut self, nal: &[u8], timestamp: u32, marker: bool, packets: &mut Vec<Vec<u8>>) {
+    fn fragment_nal(
+        &mut self,
+        nal: &[u8],
+        timestamp: u32,
+        marker: bool,
+        packets: &mut Vec<Vec<u8>>,
+    ) {
         let original_byte0 = nal[0];
         let original_byte1 = nal[1];
         let original_type = (original_byte0 >> 1) & 0x3F;
-        let fu_payload_header = [(original_byte0 & 0b1000_0001) | (NAL_TYPE_FU << 1), original_byte1];
+        let fu_payload_header = [
+            (original_byte0 & 0b1000_0001) | (NAL_TYPE_FU << 1),
+            original_byte1,
+        ];
         let fragment_payload_size = MAX_SINGLE_NAL_SIZE - 3; // FU payload header (2) + FU header (1)
 
         let fragments: Vec<&[u8]> = nal[2..].chunks(fragment_payload_size).collect();
@@ -195,7 +204,11 @@ mod tests {
         assert_eq!((first_payload[0] >> 1) & 0x3F, NAL_TYPE_FU);
         assert_eq!(first_payload[2] & 0x80, 0x80, "S bit set on first fragment");
         assert_eq!(first_payload[2] & 0x40, 0, "E bit clear on first fragment");
-        assert_eq!(first_payload[2] & 0x3F, 19, "FU header carries the original type");
+        assert_eq!(
+            first_payload[2] & 0x3F,
+            19,
+            "FU header carries the original type"
+        );
 
         let last_payload = &packets[packets.len() - 1][12..];
         assert_eq!(last_payload[2] & 0x80, 0, "S bit clear on last fragment");

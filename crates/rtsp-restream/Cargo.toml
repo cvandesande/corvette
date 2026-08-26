@@ -20,8 +20,14 @@ sdp-types = "0.2.0"
 # own corvette-rtsp-client depends on for the same purpose in the opposite
 # direction (decoding, not encoding).
 base64 = "0.22.1"
+# Only for issue #12 item X3's own async I/O layer (`TcpListener`/per-
+# connection tasks): `net`/`rt`/`sync`/`io-util` mirror exactly the feature
+# set `corvette-rtsp-client` already depends on for the same TCP/async-task
+# purpose in the opposite (client) direction.
+tokio = { version = "1.53.1", features = ["net", "rt", "sync", "io-util"] }
 
 [dev-dependencies]
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time"] }
 # Test-only: issue #12 item X2's own round-trip fixtures feed this crate's
 # packetizer output back through issue #18's already-shipped, already-
 # reviewed H264Depacketizer/H265Depacketizer as an independent correctness

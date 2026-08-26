@@ -80,7 +80,9 @@ fn h264_single_nal_round_trips_byte_for_byte() {
     let original = annex_b(&[&[0x65, 0xAA, 0xBB, 0xCC]]);
     let mut packetizer = H264Packetizer::new(96, 0x1234_5678);
 
-    let packets = packetizer.packetize(&frame(original.clone())).expect("packetizes");
+    let packets = packetizer
+        .packetize(&frame(original.clone()))
+        .expect("packetizes");
     assert_eq!(packets.len(), 1, "small NAL stays a single packet");
 
     let reassembled = depacketize_h264(&packets);
@@ -94,7 +96,9 @@ fn h264_fu_a_fragmented_nal_round_trips_byte_for_byte() {
     let original = annex_b(&[&nal]);
     let mut packetizer = H264Packetizer::new(96, 1);
 
-    let packets = packetizer.packetize(&frame(original.clone())).expect("packetizes");
+    let packets = packetizer
+        .packetize(&frame(original.clone()))
+        .expect("packetizes");
     assert!(packets.len() > 1, "a 3001-byte NAL must fragment");
 
     let reassembled = depacketize_h264(&packets);
@@ -115,7 +119,9 @@ fn h264_multiple_small_nals_stap_a_eligible_round_trip_in_order() {
     let original = annex_b(&[&sps, &pps, &idr]);
     let mut packetizer = H264Packetizer::new(96, 1);
 
-    let packets = packetizer.packetize(&frame(original.clone())).expect("packetizes");
+    let packets = packetizer
+        .packetize(&frame(original.clone()))
+        .expect("packetizes");
     assert_eq!(packets.len(), 3, "each small NAL becomes its own packet");
 
     let reassembled = depacketize_h264(&packets);
@@ -129,7 +135,9 @@ fn h265_single_nal_round_trips_byte_for_byte() {
     let original = annex_b(&[&[0x26, 0x01, 0xDE, 0xAD, 0xBE, 0xEF]]);
     let mut packetizer = H265Packetizer::new(96, 0x1234_5678);
 
-    let packets = packetizer.packetize(&frame(original.clone())).expect("packetizes");
+    let packets = packetizer
+        .packetize(&frame(original.clone()))
+        .expect("packetizes");
     assert_eq!(packets.len(), 1);
 
     let reassembled = depacketize_h265(&packets);
@@ -143,7 +151,9 @@ fn h265_fu_fragmented_nal_round_trips_byte_for_byte() {
     let original = annex_b(&[&nal]);
     let mut packetizer = H265Packetizer::new(96, 1);
 
-    let packets = packetizer.packetize(&frame(original.clone())).expect("packetizes");
+    let packets = packetizer
+        .packetize(&frame(original.clone()))
+        .expect("packetizes");
     assert!(packets.len() > 1, "a 3002-byte NAL must fragment");
 
     let reassembled = depacketize_h265(&packets);
@@ -162,7 +172,9 @@ fn h265_multiple_small_nals_ap_eligible_round_trip_in_order() {
     let original = annex_b(&[&vps, &sps, &pps]);
     let mut packetizer = H265Packetizer::new(96, 1);
 
-    let packets = packetizer.packetize(&frame(original.clone())).expect("packetizes");
+    let packets = packetizer
+        .packetize(&frame(original.clone()))
+        .expect("packetizes");
     assert_eq!(packets.len(), 3);
 
     let reassembled = depacketize_h265(&packets);

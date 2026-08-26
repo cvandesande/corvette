@@ -135,8 +135,12 @@ mod tests {
             payload,
         };
 
-        let first = packetizer.packetize(&frame(vec![1, 2])).expect("packetizes");
-        let second = packetizer.packetize(&frame(vec![3, 4])).expect("packetizes");
+        let first = packetizer
+            .packetize(&frame(vec![1, 2]))
+            .expect("packetizes");
+        let second = packetizer
+            .packetize(&frame(vec![3, 4]))
+            .expect("packetizes");
 
         assert_eq!(u16::from_be_bytes([first[2], first[3]]), 0);
         assert_eq!(u16::from_be_bytes([second[2], second[3]]), 1);

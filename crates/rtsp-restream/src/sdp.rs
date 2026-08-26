@@ -18,6 +18,23 @@ const VIDEO_CLOCK_RATE_HZ: u32 = 90_000;
 /// `session.rs`.
 const FIRST_DYNAMIC_PAYLOAD_TYPE: u8 = 96;
 
+/// The RTP payload type this crate assigns to the track at `index` in a
+/// stream's declared track order -- the same numbering [`build_sdp`] embeds
+/// in the `DESCRIBE` response's `m=`/`a=rtpmap` lines. An embedder's own
+/// async I/O layer (issue #12 item X3) calls this to build a packetizer
+/// with the exact payload type value the client already learned from
+/// `DESCRIBE`, without duplicating this crate's own numbering scheme.
+///
+/// # Panics
+///
+/// Panics if `index` is 32 or higher, matching [`build_sdp`]'s own limit.
+#[must_use]
+pub(crate) fn payload_type_for_track(index: usize) -> u8 {
+    FIRST_DYNAMIC_PAYLOAD_TYPE
+        .checked_add(u8::try_from(index).expect("fewer than 32 tracks per stream"))
+        .expect("fewer than 32 tracks per stream")
+}
+
 /// Builds the SDP body a `DESCRIBE` response returns for `stream`.
 ///
 /// Each track is assigned a payload type starting at 96, in declaration
@@ -38,9 +55,7 @@ pub fn build_sdp(stream: &StreamInfo) -> Vec<u8> {
     session.connection = Some(Connection::from_ip_addr(Ipv4Addr::UNSPECIFIED));
 
     for (index, track) in stream.tracks.iter().enumerate() {
-        let payload_type = FIRST_DYNAMIC_PAYLOAD_TYPE
-            .checked_add(u8::try_from(index).expect("fewer than 32 tracks per stream"))
-            .expect("fewer than 32 tracks per stream");
+        let payload_type = payload_type_for_track(index);
         let mut media = build_media(payload_type, track);
         media.add_attribute_with_value("control", format!("trackID={index}"));
         session.medias.push(media);

@@ -19,17 +19,20 @@
 //!
 //! `packetize` turns a [`Frame`] back into the RTP payloads a real camera
 //! would have sent for the same access unit (issue #12 item X2) -- the
-//! mirror image of issue #18's own `depacketize` module. This crate
-//! deliberately does not implement the actual `TcpListener`/`accept()` loop
-//! that drives an [`RtspSession`] over a real socket and a packetizer's
-//! output onto it -- that is a separate concern layered on top of this
-//! crate.
+//! mirror image of issue #18's own `depacketize` module.
+//!
+//! `server` is the async I/O layer (issue #12 item X3): [`RtspServer`] runs
+//! the actual `TcpListener`/`accept()` loop, one isolated task per inbound
+//! connection, driving an [`RtspSession`] over the real socket and
+//! `packetize`'s output onto its negotiated interleaved channel.
 
 pub mod packetize;
 pub mod provider;
 pub mod sdp;
+pub mod server;
 pub mod session;
 
 pub use packetize::{AacPacketizer, H264Packetizer, H265Packetizer, PacketizeError};
 pub use provider::{Frame, FrameReceiver, StreamInfo, StreamProvider, TrackInfo};
-pub use session::RtspSession;
+pub use server::RtspServer;
+pub use session::{RtspSession, SetupTrack};

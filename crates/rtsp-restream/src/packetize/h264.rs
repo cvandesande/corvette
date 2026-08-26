@@ -75,7 +75,13 @@ impl H264Packetizer {
     /// indicator/header. `marker` is this NAL's own access-unit-boundary
     /// marker; only the fragment carrying the FU-A end bit also carries the
     /// RTP marker bit.
-    fn fragment_nal(&mut self, nal: &[u8], timestamp: u32, marker: bool, packets: &mut Vec<Vec<u8>>) {
+    fn fragment_nal(
+        &mut self,
+        nal: &[u8],
+        timestamp: u32,
+        marker: bool,
+        packets: &mut Vec<Vec<u8>>,
+    ) {
         let nal_header = nal[0];
         let fu_indicator = (nal_header & 0xE0) | NAL_TYPE_FU_A;
         let nal_type = nal_header & 0x1F;

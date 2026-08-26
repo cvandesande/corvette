@@ -52,12 +52,45 @@ enum State {
         session_id: String,
         stream_name: String,
         stream: StreamInfo,
+        track_index: usize,
+        rtp_channel: u8,
     },
     Playing {
         session_id: String,
         stream_name: String,
         stream: StreamInfo,
+        track_index: usize,
+        rtp_channel: u8,
     },
+}
+
+/// The stream, track, and RTP interleaved channel a session is set up to
+/// play, once a client's `SETUP` has succeeded -- returned by
+/// [`RtspSession::setup_track`].
+///
+/// This crate performs no socket I/O of its own (see the module doc), so it
+/// never uses this itself; it exists for an embedder's own async I/O layer
+/// (issue #12 item X3) to learn, after driving a `PLAY` request through
+/// [`RtspSession::handle_request`], which named stream to subscribe to via
+/// [`StreamProvider::subscribe`], which of that stream's tracks to
+/// packetize, and which interleaved channel to write that track's RTP
+/// payloads on -- all state this session already computed and tracked
+/// internally during `SETUP`, just not previously exposed.
+#[derive(Debug, Clone, Copy)]
+pub struct SetupTrack<'a> {
+    /// The stream name the client named in `DESCRIBE`/`SETUP`.
+    pub stream_name: &'a str,
+    /// The stream's full track list, as returned by
+    /// [`StreamProvider::describe`] -- `tracks[track_index]` is the one this
+    /// session set up.
+    pub stream: &'a StreamInfo,
+    /// Index into `stream.tracks` naming the track this session set up.
+    pub track_index: usize,
+    /// The interleaved channel this track's RTP payloads belong on (RTCP,
+    /// which this crate does not implement, would belong on
+    /// `rtp_channel + 1`, matching the `Transport` header's own
+    /// `interleaved=` range this session already returned from `SETUP`).
+    pub rtp_channel: u8,
 }
 
 /// Allocates session ids unique within this process. A plain counter, not
@@ -162,6 +195,8 @@ impl RtspSession {
             session_id: session_id.clone(),
             stream_name: stream_name.clone(),
             stream: stream.clone(),
+            track_index,
+            rtp_channel: interleaved_low,
         };
 
         response_builder(request, StatusCode::Ok)
@@ -171,17 +206,27 @@ impl RtspSession {
     }
 
     fn handle_play(&mut self, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
-        let (session_id, stream_name, stream) = match &self.state {
+        let (session_id, stream_name, stream, track_index, rtp_channel) = match &self.state {
             State::Ready {
                 session_id,
                 stream_name,
                 stream,
+                track_index,
+                rtp_channel,
             }
             | State::Playing {
                 session_id,
                 stream_name,
                 stream,
-            } => (session_id.clone(), stream_name.clone(), stream.clone()),
+                track_index,
+                rtp_channel,
+            } => (
+                session_id.clone(),
+                stream_name.clone(),
+                stream.clone(),
+                *track_index,
+                *rtp_channel,
+            ),
             State::Init | State::Described { .. } => {
                 return respond_empty(request, StatusCode::MethodNotValidInThisState);
             }
@@ -191,6 +236,8 @@ impl RtspSession {
             session_id: session_id.clone(),
             stream_name,
             stream,
+            track_index,
+            rtp_channel,
         };
 
         response_builder(request, StatusCode::Ok)
@@ -201,6 +248,36 @@ impl RtspSession {
     fn handle_teardown(&mut self, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         self.state = State::Init;
         respond_empty(request, StatusCode::Ok)
+    }
+
+    /// Returns this session's set-up stream/track/channel, once `SETUP` has
+    /// succeeded (`Ready` or `Playing` state); `None` in `Init` or
+    /// `Described` state, before a client has completed `SETUP`. See
+    /// [`SetupTrack`].
+    #[must_use]
+    pub fn setup_track(&self) -> Option<SetupTrack<'_>> {
+        match &self.state {
+            State::Ready {
+                stream_name,
+                stream,
+                track_index,
+                rtp_channel,
+                ..
+            }
+            | State::Playing {
+                stream_name,
+                stream,
+                track_index,
+                rtp_channel,
+                ..
+            } => Some(SetupTrack {
+                stream_name,
+                stream,
+                track_index: *track_index,
+                rtp_channel: *rtp_channel,
+            }),
+            State::Init | State::Described { .. } => None,
+        }
     }
 }
 
