@@ -1,0 +1,372 @@
+# Issue #12 item K1 -- drafted StatefulSet/Service diff (DRAFT ONLY)
+#
+# This file is a reviewable document. It is NOT applied to any cluster, NOT
+# written back to `~/dockers/kubernetes`, and NOT read by any script or
+# process outside this repo's own scripts/check_k1_manifest_draft.sh. None of
+# INV-3's forbidden verbs against a live cluster or registry, and no
+# `git add`/`git commit`/working-tree edit inside `~/dockers/kubernetes`,
+# appears anywhere in this item's evidence -- confirmed both by this item's
+# own `git status` runs (before and after, pasted in the implementer's
+# report) and by scripts/check_no_mutation.sh's own scan of this directory.
+#
+# The body below is a real `diff -u` produced by diffing the actual live
+# manifest (`~/dockers/kubernetes/tirnanog/frigate.yaml`, read-only source of
+# truth, read directly for this item) against a scratch copy edited with
+# exactly this item's changes -- not hand-transcribed, so it cannot silently
+# drift from what the live file actually contains today.
+#
+# ---------------------------------------------------------------------------
+# Premise verified: Kubernetes Service named-targetPort resolution
+# ---------------------------------------------------------------------------
+#
+# This item's Do step (b) moves the `rtsp`-named `containerPort: 8554` from
+# the `frigate` container to the new `corvette-media-bridge` container,
+# without touching the existing `frigate` Service's own `rtsp` port entry
+# (`targetPort: rtsp`, a NAME, not a number). That is only correct if a
+# Service's named targetPort resolves against the pod's aggregate set of
+# named containerPorts across ALL of its containers -- not only the
+# container the name happened to be declared on first.
+#
+# In-manifest precedent check (required by this item's own Premise before
+# relying on official documentation): `~/dockers/kubernetes/tirnanog/
+# frigate.yaml`, as it stands today, defines exactly ONE container
+# (`frigate`) in the StatefulSet's pod template. There is no existing
+# multi-container pod anywhere in this file, so there is no existing
+# precedent in this specific manifest for a named targetPort resolving
+# against a non-first container -- NOT FOUND, as the item's own Premise
+# anticipated as a possible outcome.
+#
+# Falling back to Kubernetes' own primary source, per the item's Premise:
+# the resolution this project's own EndpointSlice/Endpoints objects actually
+# depend on is implemented by `FindPort` in
+# `staging/src/k8s.io/endpointslice/utils.go` (kubernetes/kubernetes,
+# read directly at `master`,
+# https://github.com/kubernetes/kubernetes/blob/master/staging/src/k8s.io/endpointslice/utils.go#L381):
+#
+#   func FindPort(pod *v1.Pod, svcPort *v1.ServicePort) (int, error) {
+#       portName := svcPort.TargetPort
+#       switch portName.Type {
+#       case intstr.String:
+#           name := portName.StrVal
+#           for _, container := range pod.Spec.Containers {
+#               for _, port := range container.Ports {
+#                   if port.Name == name && port.Protocol == svcPort.Protocol {
+#                       return int(port.ContainerPort), nil
+#                   }
+#               }
+#           }
+#           // also support sidecar container (initContainer with restartPolicy=Always)
+#           for _, container := range pod.Spec.InitContainers {
+#               ...
+#           }
+#       case intstr.Int:
+#           return portName.IntValue(), nil
+#       }
+#       return 0, fmt.Errorf("no suitable port for manifest: %s", pod.UID)
+#   }
+#
+# The outer loop is `for _, container := range pod.Spec.Containers` --
+# EVERY container in the pod spec, in declaration order, not just the first
+# or a named one -- confirming the Premise exactly: a named targetPort
+# resolves against the pod's aggregate named containerPorts across all
+# containers, first match wins. One consequence this drafted diff also
+# respects: the match requires `port.Protocol == svcPort.Protocol` too, so
+# the `rtsp` containerPort must keep `protocol: TCP` wherever it lives (it
+# does, both before and after this diff) or the Service's own `rtsp` port
+# would stop resolving.
+#
+# Conclusion: the `frigate` Service's own `rtsp` port entry needs NO change
+# in this diff. Only which container declares the `rtsp`-named containerPort
+# moves, exactly as this item's Do describes.
+#
+# ---------------------------------------------------------------------------
+# Cert-manager Secret name
+# ---------------------------------------------------------------------------
+#
+# This manifest's own Ingress (unchanged, below) already terminates real TLS
+# for one public hostname via cert-manager
+# (`acme.cert-manager.io/http01-edit-in-place: "true"`,
+# `spec.tls[].secretName: orkcams-opendmz-com`). This diff mounts that SAME
+# Secret into the new `moq-relay` container (INV-6): one real, CA-issued
+# certificate for the one public hostname this deployment owns, not a second
+# Certificate request for the same host.
+#
+# A live re-confirmation (`kubectl get secret orkcams-opendmz-com -n icams`,
+# a read permitted unconditionally by INV-3) was attempted for this item and
+# was blocked by this session's own sandbox/classifier -- an environmental
+# limitation of this run, not a policy one; INV-3 itself permits this read.
+# This draft relies instead on the live manifest file's own Ingress
+# declaration as its read-only source of truth for the Secret's name, per
+# AGENTS.md's instruction to establish contracts from the actual deployed
+# source. scripts/check_k1_manifest_draft.sh asserts the drafted mount name
+# matches this same literal string mechanically, so a future edit to either
+# side cannot drift silently.
+#
+# ---------------------------------------------------------------------------
+# D-3 "configuration point": hostPort and LoadBalancer, the alternatives
+# NodePort was chosen among for tirnanog specifically
+# ---------------------------------------------------------------------------
+#
+# D-3: "All three exposure mechanisms (hostPort, NodePort, LoadBalancer) are
+# supported as implementation options; NodePort is chosen for this
+# deployment (human judgment: 'more secure than hostPort'). The exposure
+# mechanism is a configuration point, not hard-coded." The same `moq-relay`
+# container spec drafted below is unchanged under all three; only the
+# container's own `ports` entry and whether/how a Service exists differ.
+#
+# Option: hostPort (not chosen for tirnanog)
+#   No separate Service resource is needed for external reach -- the
+#   kubelet binds the NODE's own port directly to the container:
+#
+#     ports:
+#       - name: moq
+#         containerPort: 4443
+#         protocol: UDP
+#         hostPort: 4443
+#
+#   Tradeoff: ties the pod to whichever node it is scheduled on (only one
+#   pod cluster-wide can ever bind a given hostPort), and every node in the
+#   cluster that could schedule this pod must have that port reachable
+#   directly -- the human's own stated reason NodePort was preferred here
+#   ("more secure than hostPort").
+#
+# Option: LoadBalancer (not chosen for tirnanog)
+#   Same container ports as this diff's own NodePort choice; the Service's
+#   `type` changes and `nodePort` becomes unnecessary (though the apiserver
+#   still allocates one internally unless `allocateLoadBalancerNodePorts:
+#   false` is set):
+#
+#     apiVersion: v1
+#     kind: Service
+#     metadata:
+#       name: frigate-moq
+#       namespace: icams
+#     spec:
+#       type: LoadBalancer
+#       ports:
+#         - name: moq
+#           port: 4443
+#           protocol: UDP
+#           targetPort: moq
+#       selector:
+#         app.kubernetes.io/name: frigate
+#         app.kubernetes.io/instance: frigate
+#
+#   Tradeoff: a `LoadBalancer`-type Service only actually receives an
+#   external IP when some controller (a cloud provider's own integration, or
+#   an on-prem implementation such as MetalLB) provisions one; without such
+#   a controller running, the Service's external IP stays permanently
+#   `<pending>` (kubernetes.io/docs/concepts/services-networking/service,
+#   "Type LoadBalancer"). This draft does not assert whether tirnanog
+#   currently runs such a controller -- that was not re-confirmed live for
+#   this item (see the Cert-manager Secret section above for why) -- only
+#   that the mechanism carries this external dependency NodePort does not.
+#
+# ---------------------------------------------------------------------------
+# NodePort collision-free choice
+# ---------------------------------------------------------------------------
+#
+# Chosen: 30443. The default apiserver `--service-node-port-range` is
+# 30000-32767 (kubernetes.io/docs/reference/command-line-tools-reference/
+# kube-apiserver, `--service-node-port-range` flag; confirmed directly
+# against that reference page for this item, not assumed). 30443 sits inside
+# that range and is distinct from every other port this manifest declares
+# anywhere, before or after this diff: 8971 (http-auth), 5000
+# (http/http-noauth), 1935 (rtmp), 8554 (rtsp), and this diff's own new 4443
+# (moq, the relay's containerPort). scripts/check_k1_manifest_draft.sh
+# asserts this collision-freedom mechanically against the drafted file
+# itself, not only this comment.
+#
+# ---------------------------------------------------------------------------
+# Deliberate scope boundary
+# ---------------------------------------------------------------------------
+#
+# This diff drafts exactly what this item's Do enumerates: the two new
+# containers, the `rtsp` port's move, the relay's own MoQ containerPort and
+# NodePort Service entry, and the cert Secret volumeMount on the relay
+# container. It deliberately does NOT: provision
+# `corvette-media-bridge`'s own config file (a follow-up item's scope, noted
+# inline below); declare G2's/G3's own listener ports as containerPorts
+# (N1's own item decides how they are reached); or touch F1's own
+# `frigate` image reference (a separate item, separate repo).
+#
+--- a/tirnanog/frigate.yaml (live, read-only source: ~/dockers/kubernetes/tirnanog/frigate.yaml)
++++ b/tirnanog/frigate.yaml (drafted only -- never applied, never written back to ~/dockers/kubernetes)
+@@ -29,6 +29,49 @@
+     app.kubernetes.io/name: frigate
+     app.kubernetes.io/instance: frigate
+ ---
++# New Service (issue #12 item K1, D-3/D-6): exposes moq-relay's external
++# QUIC/WebTransport listener directly, not proxied through nginx
++# (RESEARCH-webtransport-ingress.md F-2). A separate Service object, not a
++# port added to the existing `frigate` Service above, because `nodePort` is
++# only a valid field on a Service whose spec.type is NodePort or
++# LoadBalancer -- the api server rejects it on a ClusterIP Service
++# (kubernetes.io/docs/concepts/services-networking/service, "Type NodePort"
++# section). D-3: NodePort is the exposure mechanism chosen for tirnanog
++# specifically (human judgment: "more secure than hostPort"); hostPort and
++# LoadBalancer are both supported alternatives -- see this file's own
++# trailing comment for the same container/Service under each.
++apiVersion: v1
++kind: Service
++metadata:
++  name: frigate-moq
++  namespace: icams
++  labels:
++    app.kubernetes.io/name: frigate
++spec:
++  type: NodePort
++  ports:
++    - name: moq
++      port: 4443
++      protocol: UDP
++      # Resolved against the POD's aggregate named containerPorts across ALL
++      # containers, not only this Service's own first/only container --
++      # confirmed directly against the Kubernetes endpoint-resolution source
++      # (see this file's header comment, "Premise verified" section, for the
++      # exact function and citation). The `moq` name lives on the new
++      # `moq-relay` container below.
++      targetPort: moq
++      # Default apiserver --service-node-port-range is 30000-32767
++      # (kubernetes.io/docs/reference/command-line-tools-reference/
++      # kube-apiserver, --service-node-port-range flag). 30443 is chosen
++      # inside that range, distinct from every other port this manifest
++      # declares anywhere (8971, 5000, 1935, 8554, 4443) -- see
++      # scripts/check_k1_manifest_draft.sh, which asserts this mechanically
++      # rather than trusting this comment.
++      nodePort: 30443
++  selector:
++    app.kubernetes.io/name: frigate
++    app.kubernetes.io/instance: frigate
++---
+ apiVersion: apps/v1
+ kind: StatefulSet
+ metadata:
+@@ -81,9 +124,22 @@
+             - name: rtmp
+               containerPort: 1935
+               protocol: TCP
+-            - name: rtsp
+-              containerPort: 8554
+-              protocol: TCP
++          # `rtsp` (8554) moved off this container to `corvette-media-bridge`
++          # below (issue #12 item K1, D-6): that container now hosts the
++          # RTSP-restream server Frigate's own ffmpeg dials at
++          # 127.0.0.1:8554/<camera>[_sub], replacing go2rtc in that role
++          # (F1 disables go2rtc's own process; this repo's
++          # DESIGN-live-view.md records the shared-pod-network-namespace
++          # finding that makes moving the LISTENER, with no change to
++          # Frigate's own ffmpeg.inputs, sufficient). The `frigate` Service's
++          # own `rtsp` port entry (unchanged, above) needs no edit: a
++          # Service's named targetPort resolves against the pod's aggregate
++          # named containerPorts across every container, not only this one --
++          # see this file's header comment for the verified citation.
++          # Removing this declaration here and adding it, once only, to
++          # corvette-media-bridge below is asserted by
++          # scripts/check_k1_manifest_draft.sh (never zero occurrences,
++          # never two).
+           # Probes target /api/version on port 5000 (the internal, unauthenticated
+           # API). Do NOT probe "/" -- that is served by nginx, which binds and
+           # returns 200 long before the Frigate backend is up, so the pod would
+@@ -155,6 +211,85 @@
+               amd.com/gpu: 1
+             requests:
+               amd.com/gpu: 1
++        # --- New containers (issue #12 item K1, DT-1/P1) --------------------
++        # Both from P1's one Corvette-owned image (two entrypoints, one
++        # binary each). @PENDING-DIGEST is the INV-2 placeholder: a real
++        # `@sha256:<64 hex>` digest replaces it once P1's own
++        # publish_media_bridge_image.sh --push has actually run and recorded
++        # one (.agents/issue-12/evidence/corvette-media-bridge-digest.txt) --
++        # this draft never fabricates one. scripts/check_k1_manifest_draft.sh
++        # asserts every `image:` line added by this diff carries one form or
++        # the other, never a bare tag.
++        - name: moq-relay
++          image: docker.io/cvandesande/corvette-media-bridge@PENDING-DIGEST
++          imagePullPolicy: IfNotPresent
++          # This image bakes in no ENTRYPOINT/CMD of its own (P1's Dockerfile
++          # comment); `command` selects which of the two adopted binaries
++          # this container runs.
++          command: ["/usr/local/bin/moq-relay"]
++          args:
++            # --server-bind / --tls-cert / --tls-key: real moq-native flags
++            # (moq-dev/moq, rs/moq-native/src/tls.rs and rs/moq-native/src/
++            # server.rs, at R1's pinned commit
++            # 7b73c43381a7f9c309e3045a8f0f858aa32ef48c), not fabricated. Dual
++            # stack `[::]` so the NodePort's IPv4 path reaches it too
++            # (rs/moq-native/src/bind.rs's own dual-stack rationale, same
++            # commit). Port matches this container's own `moq` containerPort
++            # below.
++            - --server-bind
++            - "[::]:4443"
++            # INV-6: real TLS from the mounted cert-manager Secret, never
++            # --tls-generate (that flag self-signs). Same Secret backing this
++            # file's own Ingress (`orkcams-opendmz-com`, below) -- one real,
++            # publicly-valid certificate for the one public hostname this
++            # deployment terminates TLS for, reused rather than requesting a
++            # second Certificate for the same host.
++            - --tls-cert
++            - /etc/moq-tls/tls.crt
++            - --tls-key
++            - /etc/moq-tls/tls.key
++            - --auth-public
++            - /
++          ports:
++            - name: moq
++              containerPort: 4443
++              protocol: UDP
++          volumeMounts:
++            # INV-6's mount: the existing cert-manager Secret, read-only.
++            # scripts/check_k1_manifest_draft.sh asserts this Secret name
++            # matches the live manifest's own Ingress tls.secretName below.
++            - name: moq-tls
++              mountPath: /etc/moq-tls
++              readOnly: true
++        - name: corvette-media-bridge
++          image: docker.io/cvandesande/corvette-media-bridge@PENDING-DIGEST
++          imagePullPolicy: IfNotPresent
++          command: ["/usr/local/bin/corvette-media-bridge"]
++          env:
++            # TODO (out of K1's own scope -- not one of this item's Do
++            # steps): corvette-media-bridge reads its camera list and both
++            # other listener addresses from the JSON file this env var names
++            # (crates/corvette-media-bridge/src/config.rs). Provisioning that
++            # file (a ConfigMap built from this deployment's own camera list,
++            # or reusing frigate-rtsp-credentials for the per-camera
++            # username/password) is a follow-up item's job, not drafted here.
++            - name: CORVETTE_MEDIA_BRIDGE_CONFIG
++              value: /etc/corvette-media-bridge/config.json
++          ports:
++            # Moved from the `frigate` container above (D-6): this container
++            # now hosts the whole-process RTSP-restream server
++            # (rtsp_restream::RtspServer) Frigate's own ffmpeg dials at
++            # 127.0.0.1:8554. Exactly one `rtsp`-named containerPort exists
++            # anywhere in this pod template after this diff --
++            # scripts/check_k1_manifest_draft.sh asserts that count directly.
++            - name: rtsp
++              containerPort: 8554
++              protocol: TCP
++          # G2's fMP4-over-WebSocket port (8555) and G3's HLS port (8556) are
++          # deliberately NOT declared here: K1's own Do step (b)/(c) names
++          # only the `rtsp` port's move and the relay's MoQ port. How N1
++          # (frigate-vulkan, a separate repo/item) reaches G3's listener is
++          # that item's own scope, not silently folded in here.
+       volumes:
+         - name: config
+           persistentVolumeClaim:
+@@ -170,6 +305,15 @@
+           emptyDir:
+             medium: Memory
+             sizeLimit: 1Gi
++        # issue #12 item K1 (INV-6): the SAME cert-manager Secret this file's
++        # own Ingress already references (`spec.tls[].secretName`, below) --
++        # read-only source of truth confirmed directly against this manifest
++        # (a live `kubectl get secret` re-confirmation was attempted for this
++        # item and blocked by this session's own sandbox, not by INV-3, which
++        # permits it -- see this file's header comment).
++        - name: moq-tls
++          secret:
++            secretName: orkcams-opendmz-com
+       tolerations:
+         - effect: NoSchedule
+           key: node-role.kubernetes.io/control-plane
