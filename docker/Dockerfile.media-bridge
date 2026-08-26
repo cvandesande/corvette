@@ -1,0 +1,98 @@
+# syntax=docker/dockerfile:1.7
+#
+# Corvette's own media-relay image (issue #12, item P1): one Corvette-owned
+# OCI image with two entrypoints, `moq-relay` (adopted, not modified) and
+# `corvette-media-bridge` (this workspace's own binary), per the plan's DT-1
+# topology. They ship in one image because the plan puts them in sibling
+# containers of the same pod (K1, drafted only) sharing one Corvette-owned
+# build, not because either binary depends on the other at runtime.
+#
+# Base-image precedent: frigate-vulkan/docker/Dockerfile.py313 runs its real
+# Frigate process (needing libc, TLS roots, and a handful of shared libraries)
+# on a plain Debian base (python:3.13-slim-trixie, itself Debian trixie);
+# docker/Dockerfile.spike in *this* repo already runs its own real process on
+# debian:trixie for the same reason (a minimal glibc + apt base, not
+# `FROM scratch`). This Dockerfile follows both: Debian trixie throughout, to
+# match this repo's own rust-toolchain.toml-pinned Rust generation without a
+# glibc-generation mismatch between the build and runtime stages.
+ARG RUST_IMAGE=rust:1.97.1-trixie
+ARG RUNTIME_IMAGE=debian:trixie-slim
+
+# Pinned per issue #12 item R1 (`.agents/issue-12/evidence/R1-dependency-pin.md`):
+# the exact moq-dev/moq commit R1's own build/QUIC-handshake/codec checks were
+# run against, not moq-dev/moq's current HEAD.
+ARG MOQ_REV=7b73c43381a7f9c309e3045a8f0f858aa32ef48c
+
+# --- Stage 1: build moq-relay from R1's pinned upstream commit -------------
+#
+# INV-1: nothing in this stage installs, downloads, or COPYs any third-party
+# Go-language streaming server binary -- moq-relay is the only relay binary
+# this image ever ships, built from Rust source at the pinned rev.
+FROM ${RUST_IMAGE} AS moq-builder
+ARG MOQ_REV
+# build-essential/cmake/pkg-config: moq-relay's dependency graph builds
+# aws-lc-sys (its default TLS crypto provider, see moq-native's Cargo.toml)
+# from C source via cmake; git clones the pinned commit; ca-certificates lets
+# that clone happen over https.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates cmake git pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+# Full clone, then checkout by sha, mirroring exactly how R1's own evidence
+# built this same pinned commit standalone (R1-dependency-pin.md section 3) --
+# GitHub's smart-HTTP server does not reliably serve an arbitrary commit sha
+# as a shallow fetch target, only a full clone is guaranteed to have it.
+RUN git clone https://github.com/moq-dev/moq.git /src/moq \
+    && cd /src/moq \
+    && git checkout "${MOQ_REV}"
+WORKDIR /src/moq
+# Same command R1's own evidence ran standalone: default features, no
+# Redis/moq-api auth backend baked in as a build-time requirement.
+RUN cargo build --release --bin moq-relay
+
+# --- Stage 2: build this workspace's corvette-media-bridge ------------------
+FROM ${RUST_IMAGE} AS corvette-builder
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates cmake git pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates crates
+# The workspace Cargo.toml's own [patch.crates-io] entry for proc-macro-error2
+# (Leptos still relying on that archived release) points at a local path, not
+# a registry or git source, so it has to be present for cargo to resolve the
+# graph at all, even though corvette-media-bridge itself does not depend on
+# Leptos or on proc-macro-error2 directly.
+COPY vendor vendor
+RUN cargo build --release --locked --bin corvette-media-bridge
+
+# --- Stage 3: minimal runtime ------------------------------------------------
+#
+# Not `FROM scratch`: both binaries are real running processes that link
+# glibc dynamically (the Rust build images above are glibc-based, not musl)
+# and moq-relay dials outbound TLS (its cluster-peer connect, R1 evidence
+# section 3) and corvette-media-bridge dials the relay over QUIC/TLS
+# (web-transport-quinn) -- both need an OS certificate store to verify a peer
+# unless verification is explicitly disabled (a test-only flag, never this
+# image's default -- see INV-6 below).
+FROM ${RUNTIME_IMAGE} AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=moq-builder /src/moq/target/release/moq-relay /usr/local/bin/moq-relay
+COPY --from=corvette-builder /src/target/release/corvette-media-bridge /usr/local/bin/corvette-media-bridge
+COPY LICENSE /usr/share/licenses/corvette/LICENSE
+
+# INV-6: this image bakes in no default `command:`. K1's drafted manifest (a
+# later, separate item) selects which of the two binaries a given container
+# runs and with what arguments -- including moq-relay's TLS flags, which
+# point at a mounted cert-manager Secret's files, never a self-signed or
+# generated cert. Baking either binary in as ENTRYPOINT/CMD here would either
+# force a choice between the two adopted binaries this one image ships, or
+# (for moq-relay specifically) require a placeholder TLS flag that INV-6
+# forbids as a default. `docker run --entrypoint <binary> ... -- <args>` (or
+# an explicit `command:`/`args:` in the eventual pod spec) is how either
+# binary is actually invoked. (This stage sets no CMD/ENTRYPOINT of its own,
+# so the image's baked-in default is ${RUNTIME_IMAGE}'s own -- `bash` for
+# debian:trixie-slim -- never a moq-relay invocation of any kind.)

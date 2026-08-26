@@ -1,0 +1,23 @@
+# Keeps the buildx context small. target/ alone is tens of GB of host build
+# artifacts almost no Dockerfile in this repo reads: docker/Dockerfile.site
+# copies only target/site-publish/, and every other Dockerfile (including
+# docker/Dockerfile.media-bridge) builds fresh inside its own build stage
+# from source, never from a host target/ directory.
+#
+# Docker's ignore-pattern negation cannot re-include a path whose parent
+# directory is itself excluded, so this lists target/'s other subdirectories
+# individually instead of excluding target/ and un-excluding site-publish/.
+target/debug/
+target/release/
+target/front/
+target/wasm32-unknown-unknown/
+target/wasm-bindgen/
+target/nginx-parity/
+target/doc/
+target/site/
+target/tmp/
+target/flycheck0/
+out/
+.git/
+node_modules/
+.agents/

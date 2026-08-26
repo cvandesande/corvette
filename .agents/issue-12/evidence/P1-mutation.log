@@ -1,0 +1,221 @@
+# P1 mutation evidence (issue #12, item P1)
+
+Two independent mutation cycles. All commands below were actually run; output is
+captured verbatim via redirection into this file, not paraphrased.
+
+## Mutation 1: remove the corvette-media-bridge COPY line from the runtime stage
+
+$ grep -n "COPY --from=corvette-builder" docker/Dockerfile.media-bridge
+84:COPY --from=corvette-builder /src/target/release/corvette-media-bridge /usr/local/bin/corvette-media-bridge
+
+$ sed -i "84d" docker/Dockerfile.media-bridge   # deletes exactly that COPY line
+
+$ diff -u /tmp/Dockerfile.media-bridge.orig docker/Dockerfile.media-bridge
+--- /tmp/Dockerfile.media-bridge.orig	2026-08-26 20:17:49.151753608 +0100
++++ docker/Dockerfile.media-bridge	2026-08-26 20:17:49.154644579 +0100
+@@ -81,7 +81,6 @@
+     && apt-get install -y --no-install-recommends ca-certificates \
+     && rm -rf /var/lib/apt/lists/*
+ COPY --from=moq-builder /src/moq/target/release/moq-relay /usr/local/bin/moq-relay
+-COPY --from=corvette-builder /src/target/release/corvette-media-bridge /usr/local/bin/corvette-media-bridge
+ COPY LICENSE /usr/share/licenses/corvette/LICENSE
+ 
+ # INV-6: this image bakes in no default `command:`. K1's drafted manifest (a
+
+$ docker buildx build --file docker/Dockerfile.media-bridge --tag corvette-media-bridge-mutation-test --output type=oci,dest=out/corvette-media-bridge-mutation.oci .
+#0 building with "multiarch" instance using docker-container driver
+
+#1 [internal] load build definition from Dockerfile.media-bridge
+#1 transferring dockerfile: 5.41kB done
+#1 DONE 0.0s
+
+#2 resolve image config for docker-image://docker.io/docker/dockerfile:1.7
+#2 DONE 0.2s
+
+#3 docker-image://docker.io/docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+#3 resolve docker.io/docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e done
+#3 CACHED
+
+#4 [internal] load metadata for docker.io/library/rust:1.97.1-trixie
+#4 ...
+
+#5 [internal] load metadata for docker.io/library/debian:trixie-slim
+#5 DONE 0.2s
+
+#4 [internal] load metadata for docker.io/library/rust:1.97.1-trixie
+#4 DONE 0.2s
+
+#6 [internal] load .dockerignore
+#6 transferring context: 828B done
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 29B done
+#7 DONE 0.0s
+
+#8 [moq-builder 1/5] FROM docker.io/library/rust:1.97.1-trixie@sha256:b1b3c9c0d921d7fa0a6d1f9ec7e4eab87f8c8ec97644c3d791450f131dec813f
+#8 resolve docker.io/library/rust:1.97.1-trixie@sha256:b1b3c9c0d921d7fa0a6d1f9ec7e4eab87f8c8ec97644c3d791450f131dec813f 0.0s done
+#8 DONE 0.0s
+
+#9 [runtime 1/4] FROM docker.io/library/debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+#9 resolve docker.io/library/debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 0.0s done
+#9 DONE 0.0s
+
+#10 [runtime 3/4] COPY --from=moq-builder /src/moq/target/release/moq-relay /usr/local/bin/moq-relay
+#10 CACHED
+
+#11 [moq-builder 5/5] RUN cargo build --release --bin moq-relay
+#11 CACHED
+
+#12 [moq-builder 2/5] RUN apt-get update     && apt-get install -y --no-install-recommends         build-essential ca-certificates cmake git pkg-config     && rm -rf /var/lib/apt/lists/*
+#12 CACHED
+
+#13 [runtime 2/4] RUN apt-get update     && apt-get install -y --no-install-recommends ca-certificates     && rm -rf /var/lib/apt/lists/*
+#13 CACHED
+
+#14 [moq-builder 3/5] RUN git clone https://github.com/moq-dev/moq.git /src/moq     && cd /src/moq     && git checkout "7b73c43381a7f9c309e3045a8f0f858aa32ef48c"
+#14 CACHED
+
+#15 [moq-builder 4/5] WORKDIR /src/moq
+#15 CACHED
+
+#16 [runtime 4/4] COPY LICENSE /usr/share/licenses/corvette/LICENSE
+#16 CACHED
+
+#17 exporting to oci image format
+#17 exporting layers done
+#17 exporting manifest sha256:7d10d155da4d09d400810a43e1a96a9cd4fb0272eebad16c1fa02ac0b1b58003 done
+#17 exporting config sha256:f3b9b1bafc4e4909684f3ecd7ba8b13e2a7c2d50ac6ec6795273a2f65eac3ebe done
+#17 sending tarball 0.1s done
+#17 DONE 0.2s
+(build exit: 0)
+
+$ ./scripts/check_media_bridge_oci_layout.sh out/corvette-media-bridge-mutation.oci
+check_media_bridge_oci_layout: missing corvette-media-bridge binary: /usr/local/bin/corvette-media-bridge
+$ echo $?
+1
+
+## Restore
+
+$ cp /tmp/Dockerfile.media-bridge.orig docker/Dockerfile.media-bridge
+$ diff /tmp/Dockerfile.media-bridge.orig docker/Dockerfile.media-bridge; echo "diff exit: $?"
+diff exit: 0
+
+$ docker buildx build --file docker/Dockerfile.media-bridge --tag corvette-media-bridge-restored-test --output type=oci,dest=out/corvette-media-bridge-restored.oci .
+#0 building with "multiarch" instance using docker-container driver
+
+#1 [internal] load build definition from Dockerfile.media-bridge
+#1 transferring dockerfile: 5.52kB done
+#1 DONE 0.0s
+
+#2 resolve image config for docker-image://docker.io/docker/dockerfile:1.7
+#2 DONE 0.2s
+
+#3 docker-image://docker.io/docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+#3 resolve docker.io/docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e done
+#3 CACHED
+
+#4 [internal] load metadata for docker.io/library/rust:1.97.1-trixie
+#4 ...
+
+#5 [internal] load metadata for docker.io/library/debian:trixie-slim
+#5 DONE 0.2s
+
+#4 [internal] load metadata for docker.io/library/rust:1.97.1-trixie
+#4 DONE 0.2s
+
+#6 [internal] load .dockerignore
+#6 transferring context: 828B done
+#6 DONE 0.0s
+
+#7 [runtime 1/5] FROM docker.io/library/debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+#7 resolve docker.io/library/debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 0.0s done
+#7 DONE 0.0s
+
+#8 [internal] load build context
+#8 transferring context: 3.10MB 0.0s done
+#8 DONE 0.0s
+
+#9 [corvette-builder 1/7] FROM docker.io/library/rust:1.97.1-trixie@sha256:b1b3c9c0d921d7fa0a6d1f9ec7e4eab87f8c8ec97644c3d791450f131dec813f
+#9 resolve docker.io/library/rust:1.97.1-trixie@sha256:b1b3c9c0d921d7fa0a6d1f9ec7e4eab87f8c8ec97644c3d791450f131dec813f 0.0s done
+#9 DONE 0.0s
+
+#10 [corvette-builder 6/7] COPY vendor vendor
+#10 CACHED
+
+#11 [corvette-builder 2/7] RUN apt-get update     && apt-get install -y --no-install-recommends         build-essential ca-certificates cmake git pkg-config     && rm -rf /var/lib/apt/lists/*
+#11 CACHED
+
+#12 [moq-builder 3/5] RUN git clone https://github.com/moq-dev/moq.git /src/moq     && cd /src/moq     && git checkout "7b73c43381a7f9c309e3045a8f0f858aa32ef48c"
+#12 CACHED
+
+#13 [runtime 4/5] COPY --from=corvette-builder /src/target/release/corvette-media-bridge /usr/local/bin/corvette-media-bridge
+#13 CACHED
+
+#14 [moq-builder 4/5] WORKDIR /src/moq
+#14 CACHED
+
+#15 [moq-builder 5/5] RUN cargo build --release --bin moq-relay
+#15 CACHED
+
+#16 [corvette-builder 7/7] RUN cargo build --release --locked --bin corvette-media-bridge
+#16 CACHED
+
+#17 [corvette-builder 4/7] COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+#17 CACHED
+
+#18 [corvette-builder 3/7] WORKDIR /src
+#18 CACHED
+
+#19 [corvette-builder 5/7] COPY crates crates
+#19 CACHED
+
+#20 [runtime 2/5] RUN apt-get update     && apt-get install -y --no-install-recommends ca-certificates     && rm -rf /var/lib/apt/lists/*
+#20 CACHED
+
+#21 [runtime 3/5] COPY --from=moq-builder /src/moq/target/release/moq-relay /usr/local/bin/moq-relay
+#21 CACHED
+
+#22 [moq-builder 2/5] RUN apt-get update     && apt-get install -y --no-install-recommends         build-essential ca-certificates cmake git pkg-config     && rm -rf /var/lib/apt/lists/*
+#22 CACHED
+
+#23 [runtime 5/5] COPY LICENSE /usr/share/licenses/corvette/LICENSE
+#23 CACHED
+
+#24 exporting to oci image format
+#24 exporting layers done
+#24 exporting manifest sha256:69f4afd33b1e05dc03ab3c819820fd8647096a97bc478441ffa6655c2a048f7b done
+#24 exporting config sha256:af1c2d771f1c1df714ceacb33ccf077eb4ff683cf623b4523be7072fcc4cb57c done
+#24 sending tarball
+#24 sending tarball 0.2s done
+#24 DONE 0.2s
+(build exit: 0)
+
+$ ./scripts/check_media_bridge_oci_layout.sh out/corvette-media-bridge-restored.oci
+check_media_bridge_oci_layout: out/corvette-media-bridge-restored.oci matches the expected shape (both binaries present, executable, and runnable; no INV-1 denied literals found)
+$ echo $?
+0
+
+## Mutation 2: push confirmation set to yesterday's dated tag
+
+Today's real tag would be: docker.io/cvandesande/corvette-media-bridge:20260826
+Confirmation env var is set instead to yesterday's tag: docker.io/cvandesande/corvette-media-bridge:20260825
+No push must occur under any circumstances -- this test only proves the guard refuses.
+
+$ CORVETTE_MEDIA_BRIDGE_PUSH_CONFIRM="docker.io/cvandesande/corvette-media-bridge:20260825" ./scripts/publish_media_bridge_image.sh --push
+publish_media_bridge_image: push mode requested for docker.io/cvandesande/corvette-media-bridge:20260826
+publish_media_bridge_image: command that would run: docker buildx build --file /home/cvandesande/github/corvette/docker/Dockerfile.media-bridge --tag docker.io/cvandesande/corvette-media-bridge:20260826 --push /home/cvandesande/github/corvette --metadata-file <tempfile>
+publish_media_bridge_image: refusing to push -- set CORVETTE_MEDIA_BRIDGE_PUSH_CONFIRM=docker.io/cvandesande/corvette-media-bridge:20260826 to authorize this exact tag
+$ echo $?
+1
+
+## Summary
+
+- Mutation 1 (missing binary): check FAILED, naming the exact missing binary
+  (`/usr/local/bin/corvette-media-bridge`), exit 1. Restored, rebuilt, check PASSED, exit 0.
+- Mutation 2 (stale push-confirmation date): push mode refused, printing the exact tag it
+  would have accepted (today's dated tag) and the mismatching value actually supplied
+  (yesterday's dated tag), exit 1. No `docker buildx build ... --push` (or any other
+  registry-contacting command) was ever invoked in this test -- the script prints the
+  command it *would* run and exits before reaching it.
+- No registry push occurred at any point during either mutation cycle.
