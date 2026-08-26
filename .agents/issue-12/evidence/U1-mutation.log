@@ -1,0 +1,152 @@
+Issue #12 item U1 -- mutation evidence (INV-7)
+================================================================================
+
+Base commit (parent of this item's own commit): fd46fed0db06aa3f66f3dda7aada8dff18f31ee3
+
+What was mutated and how
+-------------------------
+One temporary edit to `crates/corvette-ui/src/dashboard.rs`, reverted after
+capture (confirmed by `diff` against the pre-mutation file showing no
+residue, and by `git status`/`git diff` showing only this item's own real
+changes afterward): the go2rtc `<iframe src="/live/webrtc/webrtc.html?src=...">`
+this item's own Do step 1 removed was reintroduced, mounted alongside (not
+instead of) the new `<LiveCameraTile>` inside the same `<article
+class="camera-card">`:
+
+    {cameras.into_iter().map(|camera| {
+        let player_url = format!(
+            "/live/webrtc/webrtc.html?src={}",
+            camera.name,
+        );
+        let player_title = format!("{} live video", camera.display_name);
+        view! {
+            <article class="camera-card">
+                <iframe
+                    class="camera-player"
+                    src=player_url
+                    title=player_title.clone()
+                    allow="autoplay; fullscreen"
+                ></iframe>
+                <LiveCameraTile camera_name=camera.name.clone() title=player_title/>
+                <h2>{camera.display_name}</h2>
+                <p>{camera.name}</p>
+            </article>
+        }
+    }).collect_view()}
+
+This exercises exactly the defect this item's own Mutation text names --
+"reintroduce the iframe rendering path" -- against two independent oracles:
+the extended `scripts/check_no_go2rtc.sh` (a static source-text check, INV-7)
+and a real headless-browser Playwright assertion that no `<iframe>` element
+is present on the rendered page
+(`tests/ui/live_view.spec.cjs`, "the grid tile renders no iframe, with or
+without a live media-bridge endpoint" -- deliberately written to need only a
+mocked `/api/config` response, not a live `corvette-media-bridge` fixture, so
+it runs unconditionally as part of a plain `make check-ui`).
+
+--- BROKEN (iframe reintroduced) -- both oracles FAIL ---
+
+$ ./scripts/check_no_go2rtc.sh
+check_no_go2rtc: found '/live/webrtc/webrtc.html' references:
+/home/cvandesande/github/corvette/crates/corvette-ui/src/dashboard.rs:68:                                        "/live/webrtc/webrtc.html?src={}",
+(exit code: 1)
+
+$ grep -rn 'webrtc.html' crates/corvette-ui/src
+crates/corvette-ui/src/dashboard.rs:68:                                        "/live/webrtc/webrtc.html?src={}",
+
+$ make check-ui   (relevant excerpt; full run built the release UI bundle first)
+  ✘  1 tests/ui/live_view.spec.cjs:27:1 › the grid tile renders no iframe, with or without a live media-bridge endpoint (5.1s)
+Skipping host requirements validation logic because `PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS` env variable is set.
+  -  21 tests/ui/live_view.spec.cjs:44:1 › the grid tile's video element reaches HAVE_CURRENT_DATA against G2's real endpoint
+
+  1) tests/ui/live_view.spec.cjs:27:1 › the grid tile renders no iframe, with or without a live media-bridge endpoint
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('iframe')
+    Expected: 0
+    Received: 1
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveCount" with timeout 5000ms
+      - waiting for locator('iframe')
+        14 x locator resolved to 1 element
+           - unexpected value "1"
+
+      39 |
+      40 |   await expect(page.locator(".camera-grid video")).toHaveCount(1);
+    > 41 |   await expect(page.locator("iframe")).toHaveCount(0);
+         |                                        ^
+      42 | });
+
+  1 failed
+    tests/ui/live_view.spec.cjs:27:1 › the grid tile renders no iframe, with or without a live media-bridge endpoint
+  1 skipped
+  19 passed (6.0s)
+make: *** [Makefile:27: check-ui] Error 1
+
+Confirms the defect: with the iframe rendering path back in place, both the
+static grep-based check (INV-7's own enforcement mechanism) and a real
+browser's DOM query both catch it -- neither is a status-code-only or
+self-evident assertion; each inspects the actual rendered/source content.
+
+--- AFTER RESTORE (iframe removed again) -- both oracles PASS ---
+
+$ ./scripts/check_no_go2rtc.sh
+check_no_go2rtc: no '/go2rtc/' or '/live/webrtc/webrtc.html' references under /home/cvandesande/github/corvette/crates/corvette-ui/src
+
+$ grep -rn 'webrtc.html' crates/corvette-ui/src
+(no hits)
+
+$ make check-ui   (relevant excerpt)
+  ✓  17 tests/ui/split.spec.cjs:351:3 › recording timeline › a cleared start time is reported instead of loading a range (192ms)
+  ✓  18 tests/ui/split.spec.cjs:365:1 › recent events are filtered review activity from the last six hours (228ms)
+  ✓  19 tests/ui/split.spec.cjs:441:1 › event cards show the detection snapshot, falling back to the review crop (85ms)
+  ✓  20 tests/ui/split.spec.cjs:508:1 › a review whose footage expired reports the absence, not a media error (141ms)
+  ✓  21 tests/ui/split.spec.cjs:552:1 › events route browses a selected day and filters severity (379ms)
+
+  1 skipped
+  20 passed (4.0s)
+
+(The "1 skipped" row in both runs is
+"the grid tile's video element reaches HAVE_CURRENT_DATA against G2's real
+endpoint" -- U1_LIVE_VIEW_WS_ORIGIN is unset in a plain `make check-ui` run,
+by design; see `scripts/run_u1_live_view_browser_check.sh` and this item's
+own separate real-endpoint evidence below.)
+
+Full revert and re-verification
+---------------------------------
+After capturing both runs above, `crates/corvette-ui/src/dashboard.rs` was
+restored from the pre-mutation copy and confirmed byte-identical:
+
+    $ diff /tmp/dashboard.rs.orig crates/corvette-ui/src/dashboard.rs
+    (no output -- files identical)
+
+    $ grep -rn 'webrtc.html\|player_url' crates/corvette-ui/src
+    (no hits -- no mutation artifact remains)
+
+    $ cargo clippy --workspace --all-targets --all-features --locked
+      -> clean: one pre-existing clippy::result_large_err warning from
+         tokio-tungstenite's own fixed Callback trait signature
+         (crates/corvette-media-bridge/src/ws_repackager.rs, documented in
+         G2's own commit), 0 errors; unrelated to this item.
+    $ cargo test --workspace --all-targets --all-features --locked
+      -> every crate's test result line reported "ok", 0 failed, including
+         corvette-ui's own new `live_view::backoff_tests` (2 tests) and
+         `live_view::codec_sniff_tests` (2 tests).
+
+Separately (not part of this mutation cycle, but the item's own required
+real-endpoint Verify): `scripts/run_u1_live_view_browser_check.sh` builds the
+release UI bundle, starts a real `corvette-media-bridge` process
+(`examples/g2_browser_fixture`, the same fixture G2's own browser check
+drives), and runs `tests/ui/live_view.spec.cjs`'s real-endpoint test against
+it end to end:
+
+    Booting the real grid tile against the fixture's own output
+
+    Running 1 test using 1 worker
+    Skipping host requirements validation logic because `PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS` env variable is set.
+      ✓  1 tests/ui/live_view.spec.cjs:44:1 › the grid tile's video element reaches HAVE_CURRENT_DATA against G2's real endpoint (496ms)
+
+      1 passed (1.0s)

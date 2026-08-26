@@ -22,6 +22,7 @@ mod dashboard;
 mod events;
 #[cfg(feature = "split")]
 mod lazy_route;
+mod live_view;
 mod local_time;
 mod media;
 mod recordings;

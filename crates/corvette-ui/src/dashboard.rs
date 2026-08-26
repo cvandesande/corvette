@@ -6,6 +6,7 @@ use crate::activity::{
     ActivityFilter, ActivityFilters, EventListLayout, RECENT_ACTIVITY_HOURS, ReviewEventList,
     recent_activity_empty_heading, review_and_motion_events,
 };
+use crate::live_view::LiveCameraTile;
 use crate::shell::{NAVIGATION, Status, StatusGlyph};
 
 #[component]
@@ -63,19 +64,10 @@ pub(crate) fn Dashboard() -> impl IntoView {
                         Some(Ok(cameras)) => view! {
                             <div class="camera-grid" aria-label="Configured cameras">
                                 {cameras.into_iter().map(|camera| {
-                                    let player_url = format!(
-                                        "/live/webrtc/webrtc.html?src={}",
-                                        camera.name,
-                                    );
                                     let player_title = format!("{} live video", camera.display_name);
                                     view! {
                                         <article class="camera-card">
-                                            <iframe
-                                                class="camera-player"
-                                                src=player_url
-                                                title=player_title
-                                                allow="autoplay; fullscreen"
-                                            ></iframe>
+                                            <LiveCameraTile camera_name=camera.name.clone() title=player_title/>
                                             <h2>{camera.display_name}</h2>
                                             <p>{camera.name}</p>
                                         </article>
