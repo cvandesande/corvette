@@ -254,3 +254,24 @@ one packet, then keeps reading — as long as the underlying connection
 (`PlayingSession::next_packet`) keeps delivering data, an isolated malformed
 fragment is not treated as a reason to tear down the session and force a full
 DESCRIBE/SETUP/PLAY reconnect.
+
+## Dialing the MoQ relay by hostname needs address racing, not the first DNS answer
+
+`crates/corvette-media-bridge`'s own MoQ-publish role (issue #12 G1, D-5) dials the relay
+directly against `web_transport_quinn::Client::connect`, not through `moq-native` (kept out per
+D-5's "small in-repo binary" framing — `moq-native` wraps multiple QUIC backends and a
+Happy-Eyeballs dialer this crate doesn't need). Reading `web-transport-quinn` 0.11.12's own
+`Client::connect` (`src/client.rs`) directly: for a domain host it calls `tokio::net::lookup_host`
+once and dials only the *first* resolved address — no IPv4/IPv6 racing, unlike `moq-native`'s own
+dial (`rs/moq-native/src/quinn.rs`, which races every candidate address it resolves). Dialing
+`https://localhost:<port>/...` against a relay bound only to `127.0.0.1` timed out outright in
+this item's own integration test until this was diagnosed: the test's own resolver returned an
+IPv6 `::1` candidate first, and nothing was listening there.
+
+Corvette's contract: `corvette-media-bridge` dials the relay by a literal IP address (from
+`MoqConfig::relay_url`), never a hostname requiring DNS resolution, so this single-candidate
+behavior can't pick the wrong address family. A future item (K1) that dials a relay by a real
+DNS name (rather than a literal cluster-internal IP) needs to either race candidates itself or
+confirm the deployed resolver's answer order matches the relay's actual bound address family —
+this crate's own direct `web-transport-quinn` dependency does not do that automatically the way
+`moq-native`'s own dial would.

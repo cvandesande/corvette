@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/corvette-api",
+    "crates/corvette-media-bridge",
     "crates/corvette-rtsp-client",
     "crates/corvette-ui",
     "crates/corvette-ui-server",
@@ -31,8 +32,7 @@ edition = "2024"
 rust-version = "1.97.1"
 license = "MIT"
 
-# Pinned per issue #12 item R1. Not yet consumed by any crate (that starts at
-# X1-X3/G1); this only establishes the commit every later item builds against.
+# Pinned per issue #12 item R1. Consumed by crates/corvette-media-bridge (G1).
 # The commit is the one RESEARCH-d4-ingest-source.md F-1/F-2 actually read
 # source at (2026-08-16), not moq-dev/moq's current HEAD (2026-08-26, 65
 # commits ahead as of the pin date): the diff between the two touches
