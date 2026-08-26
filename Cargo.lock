@@ -1240,6 +1240,7 @@ name = "rtsp-restream"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "corvette-rtsp-client",
  "rtsp-types",
  "sdp-types",
 ]

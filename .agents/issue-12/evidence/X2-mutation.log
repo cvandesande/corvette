@@ -1,0 +1,70 @@
+Issue #12 item X2 -- RTP packetizer -- mutation evidence
+=========================================================
+
+Base commit (parent of this item's own commit): dea735fe84d914a6980c5362c2826498bf64fdd7
+Command run in both halves, from the repo root:
+  nix develop --command cargo test -p rtsp-restream --test packetize_roundtrip
+
+Mutation under test
+--------------------
+File: crates/rtsp-restream/src/packetize/h264.rs, inside `H264Packetizer::fragment_nal`.
+
+Original line:
+    let fu_header = (u8::from(is_start) << 7) | (u8::from(is_end) << 6) | nal_type;
+
+Mutated to (drops the FU-A end bit on every fragment, including the last one):
+    let fu_header = (u8::from(is_start) << 7) | nal_type; // MUTATION: FU-A end bit dropped
+
+This is the mutation the plan itself names: "drop the FU-A end-bit on the
+last fragment". Issue #18's own `H264Depacketizer::reassemble_fu_a` only
+completes and emits a reassembled NAL when it observes a fragment with the
+end bit (`fu_header & 0x40 != 0`) set; with the bit dropped it holds the
+fragment open forever and never emits a frame for that NAL.
+
+Run 1 -- mutation applied -- FAIL (expected)
+---------------------------------------------
+$ nix develop --command cargo test -p rtsp-restream --test packetize_roundtrip h264_fu_a_fragmented_nal_round_trips_byte_for_byte -- --nocapture
+
+running 1 test
+
+thread 'h264_fu_a_fragmented_nal_round_trips_byte_for_byte' panicked at crates/rtsp-restream/tests/packetize_roundtrip.rs:101:5:
+assertion `left == right` failed
+  left: []
+  right: [0, 0, 0, 1, 101, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ... (3005 bytes total: a
+    4-byte Annex-B start code, the 0x65 NAL header, and 3000 payload bytes) ]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test h264_fu_a_fragmented_nal_round_trips_byte_for_byte ... FAILED
+
+failures:
+    h264_fu_a_fragmented_nal_round_trips_byte_for_byte
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+Reassembly produced zero bytes (`left: []`) where the full original NAL was
+expected (`right: [...]`) -- exactly the "visibly wrong reassembled NAL"
+failure mode the plan asks this mutation to demonstrate: the depacketizer
+oracle never saw an end-of-fragmentation-unit fragment, so it never
+completed a frame at all.
+
+Run 2 -- mutation reverted -- PASS
+------------------------------------
+Reverted `fragment_nal` to:
+    let fu_header = (u8::from(is_start) << 7) | (u8::from(is_end) << 6) | nal_type;
+
+$ nix develop --command cargo test -p rtsp-restream --test packetize_roundtrip
+
+running 7 tests
+test aac_access_unit_round_trips_byte_for_byte ... ok
+test h264_single_nal_round_trips_byte_for_byte ... ok
+test h265_single_nal_round_trips_byte_for_byte ... ok
+test h264_multiple_small_nals_stap_a_eligible_round_trip_in_order ... ok
+test h265_multiple_small_nals_ap_eligible_round_trip_in_order ... ok
+test h264_fu_a_fragmented_nal_round_trips_byte_for_byte ... ok
+test h265_fu_fragmented_nal_round_trips_byte_for_byte ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Conclusion
+----------
+The round-trip fixture for the FU-A-fragmented case is a load-bearing test:
+it fails when the FU-A end-bit framing is broken, and passes once restored.

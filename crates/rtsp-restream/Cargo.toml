@@ -21,5 +21,17 @@ sdp-types = "0.2.0"
 # direction (decoding, not encoding).
 base64 = "0.22.1"
 
+[dev-dependencies]
+# Test-only: issue #12 item X2's own round-trip fixtures feed this crate's
+# packetizer output back through issue #18's already-shipped, already-
+# reviewed H264Depacketizer/H265Depacketizer as an independent correctness
+# oracle. A dev-dependency never ships with this crate's own published
+# artifact and adds nothing to what an external reuser of this crate
+# depends on, so it does not compromise D-6's "usable outside Corvette"
+# requirement -- unlike the crate's own `src/`, which INV-1's license
+# manifest check (tests/inv1_license_manifest.rs) keeps free of this
+# literal.
+corvette-rtsp-client = { path = "../corvette-rtsp-client" }
+
 [lints]
 workspace = true

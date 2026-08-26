@@ -17,14 +17,19 @@
 //! logic over public types, so it is exposed rather than hidden behind an
 //! artificial boundary.
 //!
-//! This crate deliberately does not implement RTP packetization (turning
-//! frames into RTP payloads) or the actual `TcpListener`/`accept()` loop
-//! that drives an [`RtspSession`] over a real socket -- both are a
-//! separate concern layered on top of this crate.
+//! `packetize` turns a [`Frame`] back into the RTP payloads a real camera
+//! would have sent for the same access unit (issue #12 item X2) -- the
+//! mirror image of issue #18's own `depacketize` module. This crate
+//! deliberately does not implement the actual `TcpListener`/`accept()` loop
+//! that drives an [`RtspSession`] over a real socket and a packetizer's
+//! output onto it -- that is a separate concern layered on top of this
+//! crate.
 
+pub mod packetize;
 pub mod provider;
 pub mod sdp;
 pub mod session;
 
+pub use packetize::{AacPacketizer, H264Packetizer, H265Packetizer, PacketizeError};
 pub use provider::{Frame, FrameReceiver, StreamInfo, StreamProvider, TrackInfo};
 pub use session::RtspSession;
