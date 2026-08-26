@@ -103,6 +103,7 @@ use crate::supervise::log_event;
 use bytes::{Bytes, BytesMut};
 use corvette_rtsp_client::depacketize::Frame as ClientFrame;
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -131,14 +132,37 @@ const MAX_REQUEST_HEADER_BYTES: usize = 8192;
 /// Pure and synchronous, matching `crate::fmp4::Fragmenter`'s own shape: no
 /// I/O, no task, no shared state. [`run_hls_segment`] is what drives one of
 /// these per camera and publishes its finished segments.
+///
+/// Deliberately does not assign a sequence number to what it produces --
+/// see [`FinishedSegment`]'s own doc for why that has to live in
+/// [`CameraHls`] instead.
 #[derive(Debug, Default)]
 struct SegmentBuilder {
     current: BytesMut,
     duration_ticks: u64,
-    next_sequence: u64,
 }
 
-/// One finished CMAF media segment: everything a playlist entry and a
+/// One finished CMAF media segment, before it has been assigned the sequence
+/// number that makes it externally addressable (`CameraHls::push_segment`'s
+/// own job).
+///
+/// A fresh [`SegmentBuilder`] is constructed on every [`run_hls_segment`]
+/// invocation -- including a restart after a supervised panic (INV-5(b)) --
+/// so a sequence counter kept on `SegmentBuilder` itself would restart from
+/// zero after every restart, while [`CameraHls`]'s own segment window (keyed
+/// by sequence number, and surviving a restart of the task that feeds it)
+/// would not: a second, unrelated segment could then collide with an
+/// already-published "segment-0.m4s" URL still sitting in the live window.
+/// Keeping sequence assignment in `CameraHls` -- the one thing that actually
+/// outlives a restart -- avoids that collision entirely.
+#[derive(Debug, Clone)]
+struct FinishedSegment {
+    duration_ticks: u64,
+    bytes: Bytes,
+}
+
+/// One finished CMAF media segment, now assigned the sequence number that
+/// makes it externally addressable: everything a playlist entry and a
 /// segment `GET` response both need.
 #[derive(Debug, Clone)]
 struct StoredSegment {
@@ -151,7 +175,7 @@ impl SegmentBuilder {
     /// Feeds one fragment in, returning a finished segment exactly when this
     /// fragment's own arrival closes out the previous one (`None` while a
     /// segment is still accumulating).
-    fn push(&mut self, fragment: Fragment) -> Option<StoredSegment> {
+    fn push(&mut self, fragment: &Fragment) -> Option<FinishedSegment> {
         let should_cut = !self.current.is_empty()
             && fragment.is_keyframe
             && self.duration_ticks >= u64::from(TARGET_SEGMENT_DURATION_TICKS);
@@ -163,12 +187,9 @@ impl SegmentBuilder {
     }
 
     /// Takes the in-progress segment's bytes and duration, resetting both for
-    /// the next one, and assigns it the next sequence number.
-    fn cut(&mut self) -> StoredSegment {
-        let sequence = self.next_sequence;
-        self.next_sequence += 1;
-        StoredSegment {
-            sequence,
+    /// the next one.
+    fn cut(&mut self) -> FinishedSegment {
+        FinishedSegment {
             duration_ticks: std::mem::take(&mut self.duration_ticks),
             bytes: std::mem::take(&mut self.current).freeze(),
         }
@@ -177,8 +198,10 @@ impl SegmentBuilder {
 
 /// One camera's HLS state as an HTTP request sees it: the current
 /// initialization segment (`None` until this camera's own segmenting task
-/// has resolved a parameter set) and a bounded live window of the most
-/// recently finished media segments.
+/// has resolved a parameter set), a bounded live window of the most recently
+/// finished media segments, and the next sequence number to assign (see
+/// [`FinishedSegment`]'s own doc for why this lives here rather than on the
+/// per-invocation [`SegmentBuilder`]).
 ///
 /// A plain [`Mutex`], not `crate::ws_repackager`'s `watch`/`broadcast` pair:
 /// an HTTP client pulls a snapshot on its own schedule rather than being
@@ -190,6 +213,7 @@ impl SegmentBuilder {
 struct CameraHlsState {
     init: Option<Bytes>,
     segments: VecDeque<StoredSegment>,
+    next_sequence: u64,
 }
 
 #[derive(Debug, Default)]
@@ -202,15 +226,27 @@ impl CameraHls {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).init = Some(segment);
     }
 
-    fn push_segment(&self, segment: StoredSegment) {
+    /// Assigns `finished` the next sequence number this camera has ever
+    /// handed out (monotonic for the process's own lifetime, regardless of
+    /// how many times this camera's segmenting task has restarted -- see
+    /// [`FinishedSegment`]'s own doc) and stores it, evicting the oldest
+    /// segment once the live window is full.
+    fn push_segment(&self, finished: FinishedSegment) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.segments.push_back(segment);
+        let sequence = state.next_sequence;
+        state.next_sequence += 1;
+        state.segments.push_back(StoredSegment {
+            sequence,
+            duration_ticks: finished.duration_ticks,
+            bytes: finished.bytes,
+        });
         while state.segments.len() > PLAYLIST_WINDOW_SEGMENT_COUNT {
             state.segments.pop_front();
         }
+        drop(state);
     }
 
     fn init_bytes(&self) -> Option<Bytes> {
@@ -231,47 +267,77 @@ impl CameraHls {
             .map(|segment| segment.bytes.clone())
     }
 
-    /// Builds this camera's current media playlist, or `None` if no
-    /// initialization segment has resolved yet (nothing a player could do
-    /// anything useful with -- matching `ws_repackager`'s own "no such
-    /// camera"/"not yet resolved" precedent of naming an absence rather than
-    /// serving an empty or placeholder body).
-    fn playlist_text(&self) -> Option<String> {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.init.as_ref()?;
+    /// Builds this camera's current media playlist.
+    ///
+    /// Always a structurally valid live playlist, even before this camera
+    /// has resolved any parameter set: a real camera's own init-segment
+    /// resolution can lag its first RTSP frames by an observable amount (see
+    /// `crate::fmp4::InitSegmentTracker`'s own doc), and a player -- or, as
+    /// this item's own browser-based Verify step found directly, `hls.js`
+    /// itself -- that requests the playlist during that window needs a
+    /// genuine "nothing yet, keep polling" live document, not a 404. A 404
+    /// stays reserved for "no such camera at all" (`route`'s own dispatch,
+    /// one level up) -- a registered camera's playlist always exists, even
+    /// when it is currently empty. The one thing gated on init resolution is
+    /// the `#EXT-X-MAP` line itself: emitting it before any initialization
+    /// segment exists would point a player at a segment resource this server
+    /// cannot yet serve.
+    fn playlist_text(&self) -> String {
+        // Collects everything needed from the locked state up front (plain
+        // integers plus each segment's own sequence/duration, not the
+        // segment bytes themselves) so the lock is held only for that
+        // snapshot, not while the playlist text below is built.
+        let (has_init, target_duration_secs, media_sequence, segments) = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let has_init = state.init.is_some();
 
-        // EXT-X-TARGETDURATION must be an integer at least as large as every
-        // EXTINF in the playlist (RFC 8216 section 4.3.3.1), so this is the
-        // ceiling of the larger of the configured target and the longest
-        // segment actually in the current window -- not simply the
-        // configured target -- since a sparse-keyframe stream can produce an
-        // individual segment longer than [`TARGET_SEGMENT_DURATION_TICKS`].
-        let longest_ticks = state
-            .segments
-            .iter()
-            .map(|segment| segment.duration_ticks)
-            .max()
-            .unwrap_or(0)
-            .max(u64::from(TARGET_SEGMENT_DURATION_TICKS));
-        let target_duration_secs =
-            (longest_ticks as f64 / f64::from(VIDEO_CLOCK_RATE_HZ)).ceil() as u64;
-
-        let media_sequence = state.segments.front().map_or(0, |segment| segment.sequence);
+            // EXT-X-TARGETDURATION must be an integer at least as large as
+            // every EXTINF in the playlist (RFC 8216 section 4.3.3.1), so
+            // this is the ceiling of the larger of the configured target and
+            // the longest segment actually in the current window -- not
+            // simply the configured target -- since a sparse-keyframe stream
+            // can produce an individual segment longer than
+            // [`TARGET_SEGMENT_DURATION_TICKS`].
+            let longest_ticks = state
+                .segments
+                .iter()
+                .map(|segment| segment.duration_ticks)
+                .max()
+                .unwrap_or(0)
+                .max(u64::from(TARGET_SEGMENT_DURATION_TICKS));
+            let target_duration_secs = longest_ticks.div_ceil(u64::from(VIDEO_CLOCK_RATE_HZ));
+            let media_sequence = state.segments.front().map_or(0, |segment| segment.sequence);
+            let segments: Vec<(u64, u64)> = state
+                .segments
+                .iter()
+                .map(|segment| (segment.sequence, segment.duration_ticks))
+                .collect();
+            drop(state);
+            (has_init, target_duration_secs, media_sequence, segments)
+        };
 
         let mut playlist = format!(
-            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target_duration_secs}\n#EXT-X-MEDIA-SEQUENCE:{media_sequence}\n#EXT-X-MAP:URI=\"init.mp4\"\n"
+            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target_duration_secs}\n#EXT-X-MEDIA-SEQUENCE:{media_sequence}\n"
         );
-        for segment in &state.segments {
-            let duration_secs = segment.duration_ticks as f64 / f64::from(VIDEO_CLOCK_RATE_HZ);
-            playlist.push_str(&format!(
-                "#EXTINF:{duration_secs:.3},\nsegment-{}.m4s\n",
-                segment.sequence
-            ));
+        if has_init {
+            playlist.push_str("#EXT-X-MAP:URI=\"init.mp4\"\n");
         }
-        Some(playlist)
+        for (sequence, duration_ticks) in segments {
+            // Millisecond-resolution EXTINF via integer arithmetic (no
+            // float): real-world tick counts here are always well under
+            // `u64::MAX / 1000`, so this can't overflow.
+            let millis = duration_ticks * 1000 / u64::from(VIDEO_CLOCK_RATE_HZ);
+            let _ = writeln!(
+                playlist,
+                "#EXTINF:{}.{:03},\nsegment-{sequence}.m4s",
+                millis / 1000,
+                millis % 1000
+            );
+        }
+        playlist
     }
 }
 
@@ -346,7 +412,7 @@ pub async fn run_hls_segment(
                     camera.set_init(segment);
                 }
                 if let Some(fragment) = fragmenter.next(&frame)
-                    && let Some(finished) = builder.push(fragment)
+                    && let Some(finished) = builder.push(&fragment)
                 {
                     camera.push_segment(finished);
                 }
@@ -531,14 +597,14 @@ fn route(path: &str, store: &MultiCameraHlsStore) -> Response {
     };
 
     match resource {
-        Resource::Playlist => camera.playlist_text().map_or_else(
-            || Response::not_found("this camera has not resolved a parameter set yet"),
-            |playlist| Response {
-                status: "200 OK",
-                content_type: "application/vnd.apple.mpegurl",
-                body: playlist.into_bytes(),
-            },
-        ),
+        // Always 200: see `CameraHls::playlist_text`'s own doc for why a
+        // registered camera's playlist is never a 404, even before it has
+        // resolved a parameter set.
+        Resource::Playlist => Response {
+            status: "200 OK",
+            content_type: "application/vnd.apple.mpegurl",
+            body: camera.playlist_text().into_bytes(),
+        },
         Resource::Init => camera.init_bytes().map_or_else(
             || Response::not_found("this camera has not resolved a parameter set yet"),
             |segment| Response {
@@ -654,10 +720,10 @@ mod tests {
         // keyframes one second apart is under TARGET_SEGMENT_DURATION_TICKS
         // (2 seconds), so neither should cut a segment yet.
         let first = fragmenter.next(&frame(90_000, IDR)).unwrap();
-        assert!(builder.push(first).is_none());
+        assert!(builder.push(&first).is_none());
         let second = fragmenter.next(&frame(2 * 90_000, IDR)).unwrap();
         assert!(
-            builder.push(second).is_none(),
+            builder.push(&second).is_none(),
             "one second of accumulated duration must not yet reach the 2-second target"
         );
     }
@@ -669,47 +735,54 @@ mod tests {
         prime(&mut fragmenter);
 
         let first = fragmenter.next(&frame(90_000, IDR)).unwrap();
-        assert!(builder.push(first).is_none());
+        assert!(builder.push(&first).is_none());
 
         // 3 seconds later (past the 2-second target), but a non-keyframe --
         // must not cut here.
         let non_keyframe = fragmenter.next(&frame(4 * 90_000, NON_IDR)).unwrap();
         assert!(
-            builder.push(non_keyframe).is_none(),
+            builder.push(&non_keyframe).is_none(),
             "must not cut mid-GOP even once the target duration has passed"
         );
 
         // The next keyframe, arbitrarily later, closes out the first segment.
         let keyframe = fragmenter.next(&frame(5 * 90_000, IDR)).unwrap();
         let finished = builder
-            .push(keyframe)
+            .push(&keyframe)
             .expect("a keyframe past the target duration must cut the segment");
-        assert_eq!(finished.sequence, 0);
         assert_eq!(finished.duration_ticks, 4 * 90_000);
     }
 
     #[test]
-    fn camera_hls_playlist_is_none_until_an_init_segment_resolves() {
+    fn camera_hls_playlist_is_valid_but_carries_no_ext_x_map_until_init_resolves() {
         let camera = CameraHls::default();
-        assert!(camera.playlist_text().is_none());
+        let playlist = camera.playlist_text();
+        assert!(
+            playlist.starts_with("#EXTM3U\n"),
+            "a registered camera's playlist is always structurally valid, even before it has \
+             resolved a parameter set (a real player -- or hls.js itself, as this item's own \
+             browser-based Verify step found directly -- must never see a 404 here): {playlist}"
+        );
+        assert!(
+            !playlist.contains("#EXT-X-MAP"),
+            "no EXT-X-MAP before an initialization segment actually exists to point at: {playlist}"
+        );
     }
 
     #[test]
     fn camera_hls_playlist_lists_every_segment_currently_in_the_window() {
         let camera = CameraHls::default();
         camera.set_init(Bytes::from_static(b"fake-init"));
-        camera.push_segment(StoredSegment {
-            sequence: 0,
-            duration_ticks: 2 * VIDEO_CLOCK_RATE_HZ as u64,
+        camera.push_segment(FinishedSegment {
+            duration_ticks: 2 * u64::from(VIDEO_CLOCK_RATE_HZ),
             bytes: Bytes::from_static(b"seg0"),
         });
-        camera.push_segment(StoredSegment {
-            sequence: 1,
-            duration_ticks: 2 * VIDEO_CLOCK_RATE_HZ as u64,
+        camera.push_segment(FinishedSegment {
+            duration_ticks: 2 * u64::from(VIDEO_CLOCK_RATE_HZ),
             bytes: Bytes::from_static(b"seg1"),
         });
 
-        let playlist = camera.playlist_text().expect("an init segment resolved");
+        let playlist = camera.playlist_text();
         assert!(playlist.starts_with("#EXTM3U\n"));
         assert!(playlist.contains("#EXT-X-MAP:URI=\"init.mp4\"\n"));
         assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:0\n"));
@@ -721,15 +794,14 @@ mod tests {
     fn camera_hls_playlist_drops_the_oldest_segment_past_the_window() {
         let camera = CameraHls::default();
         camera.set_init(Bytes::from_static(b"fake-init"));
-        for sequence in 0..(PLAYLIST_WINDOW_SEGMENT_COUNT as u64 + 2) {
-            camera.push_segment(StoredSegment {
-                sequence,
-                duration_ticks: 2 * VIDEO_CLOCK_RATE_HZ as u64,
+        for _ in 0..(PLAYLIST_WINDOW_SEGMENT_COUNT + 2) {
+            camera.push_segment(FinishedSegment {
+                duration_ticks: 2 * u64::from(VIDEO_CLOCK_RATE_HZ),
                 bytes: Bytes::from_static(b"seg"),
             });
         }
 
-        let playlist = camera.playlist_text().unwrap();
+        let playlist = camera.playlist_text();
         assert!(
             !playlist.contains("segment-0.m4s"),
             "the oldest segment must have rolled out of the live window"
@@ -743,16 +815,75 @@ mod tests {
     fn camera_hls_playlist_target_duration_covers_a_longer_than_configured_segment() {
         let camera = CameraHls::default();
         camera.set_init(Bytes::from_static(b"fake-init"));
-        camera.push_segment(StoredSegment {
-            sequence: 0,
-            duration_ticks: 5 * VIDEO_CLOCK_RATE_HZ as u64, // 5s, past the 2s target
+        camera.push_segment(FinishedSegment {
+            duration_ticks: 5 * u64::from(VIDEO_CLOCK_RATE_HZ), // 5s, past the 2s target
             bytes: Bytes::from_static(b"seg0"),
         });
 
-        let playlist = camera.playlist_text().unwrap();
+        let playlist = camera.playlist_text();
         assert!(
             playlist.contains("#EXT-X-TARGETDURATION:5\n"),
             "EXT-X-TARGETDURATION must cover the longest actual segment, not only the configured target: {playlist}"
+        );
+    }
+
+    /// The real defect the INV-5(b) mutation cycle (`.agents/issue-12/
+    /// evidence/G3-mutation.log`) surfaced during this item's own
+    /// development: a naive per-invocation sequence counter on
+    /// `SegmentBuilder` would restart at 0 after every supervised restart,
+    /// colliding with an already-published, still-in-window "segment-0.m4s"
+    /// from before the restart. `CameraHls` -- the one thing that actually
+    /// survives a restart -- owns sequence assignment instead, so it never
+    /// repeats regardless of how many times `push_segment` is called across
+    /// however many separate `SegmentBuilder` instances.
+    #[test]
+    fn camera_hls_sequence_numbers_never_repeat_across_a_simulated_restart() {
+        let camera = CameraHls::default();
+        camera.set_init(Bytes::from_static(b"fake-init"));
+
+        // First "task instance": a fresh `SegmentBuilder`/`Fragmenter` pair,
+        // exactly as `run_hls_segment` constructs on entry, cuts one segment.
+        // The first fragment's own duration (200_000 ticks, past the
+        // 180_000-tick target) is enough on its own, so a second keyframe
+        // immediately cuts it -- no need for a third fragment the way
+        // `segment_builder_cuts_only_on_a_keyframe_...` above demonstrates
+        // separately (a non-keyframe must not cut mid-GOP).
+        let mut fragmenter = Fragmenter::default();
+        let mut builder = SegmentBuilder::default();
+        prime(&mut fragmenter);
+        let first = fragmenter.next(&frame(200_000, IDR)).unwrap();
+        assert!(builder.push(&first).is_none());
+        let cutting = fragmenter.next(&frame(300_000, IDR)).unwrap();
+        let finished = builder
+            .push(&cutting)
+            .expect("the first fragment's own duration already passed the 2-second target");
+        camera.push_segment(finished);
+
+        // A brand-new `SegmentBuilder`/`Fragmenter` pair -- as
+        // `run_hls_segment` constructs on a fresh invocation after a
+        // supervised restart -- would, without this fix, start cutting from
+        // sequence 0 again.
+        let mut restarted_fragmenter = Fragmenter::default();
+        let mut restarted_builder = SegmentBuilder::default();
+        prime(&mut restarted_fragmenter);
+        let first_after_restart = restarted_fragmenter.next(&frame(200_000, IDR)).unwrap();
+        assert!(restarted_builder.push(&first_after_restart).is_none());
+        let cutting_after_restart = restarted_fragmenter.next(&frame(300_000, IDR)).unwrap();
+        let finished_after_restart = restarted_builder
+            .push(&cutting_after_restart)
+            .expect("the first fragment's own duration already passed the 2-second target");
+        camera.push_segment(finished_after_restart);
+
+        let playlist = camera.playlist_text();
+        assert!(
+            playlist.contains("segment-0.m4s") && playlist.contains("segment-1.m4s"),
+            "one segment from each of two separate SegmentBuilder instances must get two \
+             distinct, never-repeating sequence numbers: {playlist}"
+        );
+        assert!(
+            camera.segment_bytes(0).is_some() && camera.segment_bytes(1).is_some(),
+            "the post-restart segment must be reachable at its own, unique sequence number \
+             rather than colliding with the pre-restart one"
         );
     }
 
@@ -807,9 +938,8 @@ mod tests {
     async fn wait_for_playlist(camera: &CameraHls) -> String {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if let Some(playlist) = camera.playlist_text()
-                    && playlist.contains(".m4s")
-                {
+                let playlist = camera.playlist_text();
+                if playlist.contains(".m4s") {
                     return playlist;
                 }
                 tokio::task::yield_now().await;

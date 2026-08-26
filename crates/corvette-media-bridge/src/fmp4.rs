@@ -140,17 +140,17 @@ pub struct Fragmenter {
     previous_timestamp: Option<u32>,
 }
 
-/// One access-unit fragment [`Fragmenter::next`] produces: the `moof`+`mdat`
-/// bytes themselves, plus the two facts a segment-boundary policy needs that
-/// plain bytes don't expose without re-parsing them -- whether this fragment
-/// carries a keyframe/sync sample, and its own sample duration in the same
-/// RTP tick units `ClientFrame::timestamp` uses.
+/// One access-unit fragment [`Fragmenter::next`] produces.
 ///
-/// `ws_repackager` (issue #12 item G2) only ever needed the bytes themselves;
-/// this richer return type exists so `crate::hls` (issue #12 item G3) can
-/// decide where to cut a CMAF media segment (on a keyframe, once a segment
-/// has run long enough -- see that module's own doc) without re-parsing the
-/// `moof` box it was just handed.
+/// Carries the `moof`+`mdat` bytes themselves, plus the two facts a
+/// segment-boundary policy needs that plain bytes don't expose without
+/// re-parsing them -- whether this fragment carries a keyframe/sync sample,
+/// and its own sample duration in the same RTP tick units
+/// `ClientFrame::timestamp` uses. `ws_repackager` (issue #12 item G2) only
+/// ever needed the bytes themselves; this richer return type exists so
+/// `crate::hls` (issue #12 item G3) can decide where to cut a CMAF media
+/// segment (on a keyframe, once a segment has run long enough -- see that
+/// module's own doc) without re-parsing the `moof` box it was just handed.
 #[derive(Debug, Clone)]
 pub struct Fragment {
     pub bytes: Bytes,
