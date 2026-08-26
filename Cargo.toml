@@ -30,6 +30,21 @@ edition = "2024"
 rust-version = "1.97.1"
 license = "MIT"
 
+# Pinned per issue #12 item R1. Not yet consumed by any crate (that starts at
+# X1-X3/G1); this only establishes the commit every later item builds against.
+# The commit is the one RESEARCH-d4-ingest-source.md F-1/F-2 actually read
+# source at (2026-08-16), not moq-dev/moq's current HEAD (2026-08-26, 65
+# commits ahead as of the pin date): the diff between the two touches
+# moq-mux's h264/h265/aac Import and Split modules directly (e.g. Import::new
+# now derives its wire container from the caller's config instead of a
+# hardcoded Legacy value), so moving to HEAD would mean shipping against
+# source this issue has not read. See
+# .agents/issue-12/evidence/R1-dependency-pin.md for the full comparison.
+[workspace.dependencies]
+moq-net = { git = "https://github.com/moq-dev/moq", rev = "7b73c43381a7f9c309e3045a8f0f858aa32ef48c", package = "moq-net" }
+moq-mux = { git = "https://github.com/moq-dev/moq", rev = "7b73c43381a7f9c309e3045a8f0f858aa32ef48c", package = "moq-mux" }
+hang = { git = "https://github.com/moq-dev/moq", rev = "7b73c43381a7f9c309e3045a8f0f858aa32ef48c", package = "hang" }
+
 [profile.release]
 debug = 1
 
