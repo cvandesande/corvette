@@ -20,6 +20,7 @@ mod api;
 mod calendar;
 mod dashboard;
 mod events;
+mod expanded_view;
 #[cfg(feature = "split")]
 mod lazy_route;
 mod live_view;

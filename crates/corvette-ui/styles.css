@@ -213,6 +213,62 @@ main {
   padding-inline: 1rem;
 }
 
+.camera-card-link {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.camera-card-link:focus-visible {
+  outline: 2px solid #69d1ba;
+  outline-offset: -2px;
+}
+
+.expanded-view {
+  width: min(64rem, 100%);
+  padding: clamp(1rem, 3vw, 2rem);
+  border: 1px solid #344445;
+  border-radius: 1rem;
+  background: #101718;
+  box-shadow: 0 1.5rem 5rem rgb(0 0 0 / 55%);
+}
+
+.expanded-player {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 0.55rem;
+  background: #050808;
+}
+
+.expanded-player moq-watch,
+.expanded-player canvas,
+.expanded-player video {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.live-path-indicator {
+  margin: 0.35rem 0 0;
+  color: #8fa09e;
+  font-size: 0.85rem;
+}
+
+.live-path-indicator[data-live-path="moq"] {
+  color: #69d1ba;
+}
+
+.live-path-indicator[data-live-path="none"] {
+  color: #d6544d;
+}
+
 .event-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
@@ -916,6 +972,18 @@ main {
 
   .review-playback .recording-player {
     max-height: calc(100dvh - 8rem);
+  }
+
+  .expanded-view {
+    min-height: 100dvh;
+    padding: 1rem;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .expanded-player {
+    max-height: calc(100dvh - 8rem);
+    aspect-ratio: auto;
   }
 
   main {

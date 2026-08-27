@@ -23,7 +23,7 @@ leptos_router = "0.8.14"
 # here only to bound the shared response decoder.
 serde = "1.0.228"
 wasm-bindgen = "=0.2.121"
-web-sys = { version = "=0.3.98", features = ["BinaryType", "CloseEvent", "DomRect", "Element", "Event", "HtmlVideoElement", "KeyboardEvent", "Location", "MediaSource", "MessageEvent", "PointerEvent", "SourceBuffer", "SourceBufferAppendMode", "Url", "WebSocket", "WheelEvent", "Window"] }
+web-sys = { version = "=0.3.98", features = ["BinaryType", "CloseEvent", "Document", "Element", "Event", "HtmlScriptElement", "HtmlVideoElement", "KeyboardEvent", "Location", "MediaSource", "MessageEvent", "Node", "DomRect", "PointerEvent", "SourceBuffer", "SourceBufferAppendMode", "Url", "WebSocket", "WheelEvent", "Window"] }
 
 [lints]
 workspace = true

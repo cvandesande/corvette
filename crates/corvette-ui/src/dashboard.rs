@@ -1,11 +1,13 @@
 //! The landing page: the live camera grid and the last few hours of activity.
 
+use corvette_api::Camera;
 use leptos::prelude::*;
 
 use crate::activity::{
     ActivityFilter, ActivityFilters, EventListLayout, RECENT_ACTIVITY_HOURS, ReviewEventList,
     recent_activity_empty_heading, review_and_motion_events,
 };
+use crate::expanded_view::{ExpandedCamera, ExpandedView};
 use crate::live_view::LiveCameraTile;
 use crate::shell::{NAVIGATION, Status, StatusGlyph};
 
@@ -24,6 +26,7 @@ pub(crate) fn Dashboard() -> impl IntoView {
     });
     let active_section = RwSignal::new("/#live");
     let activity_filter = RwSignal::new(ActivityFilter::All);
+    let expanded_camera = RwSignal::new(None::<ExpandedCamera>);
 
     view! {
         <header class="site-header">
@@ -63,19 +66,15 @@ pub(crate) fn Dashboard() -> impl IntoView {
                         Some(Ok(cameras)) if cameras.is_empty() => view! { <Status heading="No cameras configured" detail="Add or enable a camera in Frigate, then reload this page." glyph=StatusGlyph::Camera/> }.into_any(),
                         Some(Ok(cameras)) => view! {
                             <div class="camera-grid" aria-label="Configured cameras">
-                                {cameras.into_iter().map(|camera| {
-                                    let player_title = format!("{} live video", camera.display_name);
-                                    view! {
-                                        <article class="camera-card">
-                                            <LiveCameraTile camera_name=camera.name.clone() title=player_title/>
-                                            <h2>{camera.display_name}</h2>
-                                            <p>{camera.name}</p>
-                                        </article>
-                                    }
+                                {cameras.into_iter().map(|camera| view! {
+                                    <CameraCard camera=camera expanded_camera=expanded_camera/>
                                 }).collect_view()}
                             </div>
                         }.into_any(),
                     }}
+                    {move || expanded_camera.get().map(|camera| view! {
+                        <ExpandedView camera=camera expanded=expanded_camera/>
+                    })}
                 </section>
 
                 <section id="events" class="page-section" aria-labelledby="events-heading">
@@ -100,5 +99,31 @@ pub(crate) fn Dashboard() -> impl IntoView {
                 </section>
             </main>
         </div>
+    }
+}
+
+/// One grid tile: U1's own live camera player, wrapped in a click/expand
+/// affordance (issue #12 item U2) that opens `expanded_view::ExpandedView`
+/// for this camera. Does not touch `LiveCameraTile` itself (U1's own scope).
+#[component]
+fn CameraCard(camera: Camera, expanded_camera: RwSignal<Option<ExpandedCamera>>) -> impl IntoView {
+    let player_title = format!("{} live video", camera.display_name);
+    let expand_camera = ExpandedCamera {
+        name: camera.name.clone(),
+        title: player_title.clone(),
+    };
+    view! {
+        <article class="camera-card">
+            <button
+                class="camera-card-link"
+                type="button"
+                aria-label=format!("Expand {} to full view", camera.display_name)
+                on:click=move |_| expanded_camera.set(Some(expand_camera.clone()))
+            >
+                <LiveCameraTile camera_name=camera.name.clone() title=player_title/>
+                <h2>{camera.display_name.clone()}</h2>
+                <p>{camera.name}</p>
+            </button>
+        </article>
     }
 }
