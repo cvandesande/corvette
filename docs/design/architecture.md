@@ -91,29 +91,65 @@ ncnn's C API with output identical to the Python binding.
 
 ## Media boundary
 
-Live view is Rust-native end to end. The grid tile is a native MSE player over
-WebSocket. The expanded view attempts a Rust-built MoQ relay first, over
-QUIC/WebTransport (`moq-dev/moq` — issue #12 D-1/D-2), falling back to
-HLS/LL-HLS on failure or timeout. A Rust ingest bridge (D-5) and a
-from-scratch Rust RTSP-restream server (D-6/D-7) together take over every
-role go2rtc played, including Frigate's own `detect`/`record` camera
-connections as well as the browser-facing player — the deployed image ships
-Corvette's own Rust media components. See
-`.agents/issue-12/DESIGN-live-view.md` for the decisions of record and
-`.agents/issue-12/PLAN-live-view.md` for the implementation plan.
+Live view is Rust-native end to end. `crates/rtsp-restream` is a standalone,
+from-scratch RTSP server (issue #12 D-6/D-7), reusable outside Corvette: five
+methods (`OPTIONS`, `DESCRIBE`, `SETUP`, `PLAY`, `TEARDOWN`), one transport
+(`RTP/AVP/TCP`, interleaved), no authentication — the narrowed surface every
+known consumer, including Frigate's own `detect`/`record` ffmpeg, actually
+uses. It owns no socket or transport code of its own; an embedder's async I/O
+layer drives one RTSP session per accepted connection against a
+caller-supplied stream provider.
 
-**Open:** the grid tile's own live MSE source, once go2rtc's replacement is
-complete. The current implementation plan sources it from go2rtc's
-`/live/mse/api/ws` (`PLAN-live-view.md` BLOCKER-1, reading (a)), which needs
-reconciling with D-6/D-7's Rust-native replacement — flagged here as a
-decision still to make.
+`crates/corvette-media-bridge` is the one process that embeds it (D-8). Per
+configured camera, it dials that camera once through issue #18's
+`corvette-rtsp-client` and fans the resulting broadcast channel of
+depacketized frames out to four independent, supervised Tokio tasks — one per
+role, so one role's failure for one camera never stops another role for that
+camera or any role for another camera (D-8/DP-3/DP-4):
+
+- an RTSP-restream feed, so Frigate's own `detect`/`record` ffmpeg (and any
+  other RTSP client) can play that camera back by name;
+- a direct MoQ-publish loop, dialing the relay (`moq-relay`, adopted from
+  `moq-dev/moq`, D-1/D-2) and publishing the camera's frames as a broadcast
+  named after the camera, with no container format anywhere in the path
+  (D-9);
+- an fMP4-over-WebSocket repackager: the grid tile's own live data source,
+  reusing the shared frame stream to build one WebSocket connection per
+  viewer, matching go2rtc's own previous MSE-tile transport shape;
+- an HLS/LL-HLS packager: the expanded view's fallback backend, likewise
+  reusing the shared frame stream, serving N1's `/live/hls/` location when
+  the MoQ relay is unreachable or times out.
+
+One Corvette-owned OCI image (`docker/Dockerfile.media-bridge`) carries both
+`moq-relay` and `corvette-media-bridge`; a deploying manifest chooses which of
+the image's two binaries each container runs.
+
+Kubernetes pods share one network namespace across their containers. Frigate's
+own `detect`/`record` ffmpeg dials `rtsp://127.0.0.1:8554/<camera>[_sub]`
+inside that shared namespace, and the media-bridge container's RTSP-restream
+server now answers that port from a sibling container in the same pod — a
+real topology change this document states plainly: detect/record footage
+flows through a different container than it did before. Frigate's own
+`ffmpeg.inputs` configuration needs no edit, since only which container
+answers the port changes. The MoQ relay's own external listener is reached
+directly through a dedicated NodePort UDP Service, since nginx has no QUIC/
+WebTransport support to proxy it through. See
+[API and media contracts](api-contracts.md) for the full
+RTSP-restream protocol contract, the media-bridge's broadcast/track naming,
+the NodePort choice, and the retired/replaced live-view routes.
+
+The cluster manifest change carrying the port move and the NodePort Service is
+drafted and reviewed but not yet applied to the running deployment; every
+component described above is implemented and verified in this repository
+today. See `.agents/issue-12/DESIGN-live-view.md` for the decisions of record
+and `.agents/issue-12/PLAN-live-view.md` for the implementation plan.
 
 Browser-native `MediaSource` performs decode and render for the MSE grid
-tile, the HLS fallback path, and recorded fragments. The single-camera
-expanded view carries audio over MoQ alongside video, when the camera itself
-provides it — D-4 already scopes the ingest transport to native
-H.264/H.265/AAC, so the relay and `hang`'s Web Component carry an audio track
-the same way they carry video, with no transcoding.
+tile, the HLS fallback path, and recorded fragments. The relay and `hang`'s
+Web Component, and the HLS/LL-HLS packager, each carry a configured camera's
+H.264/H.265 video track today. Audio follows the same paths once
+`corvette-rtsp-client` resolves a camera's SDP audio section — see API
+contracts for the current state of that gap.
 
 Recent-events detection boxes are a separate, simpler mechanism: no video
 decode is involved at all. The server stores each detection's box coordinates

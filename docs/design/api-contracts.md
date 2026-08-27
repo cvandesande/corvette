@@ -303,3 +303,135 @@ and ignores each segment's own absolute `tfdt` — using only each sample's decl
 advance. This is a client-side integration requirement this transport's own wire format assumes;
 it is not negotiated or advertised anywhere in the protocol itself, so any future consumer of this
 same WebSocket endpoint needs to know to set it.
+
+## The RTSP-restream server implements five methods, one transport, no authentication
+
+`crates/rtsp-restream` (issue #12 D-6/D-7) is a standalone, from-scratch RTSP server built to
+replace go2rtc's own restream role for Frigate's `detect`/`record` ffmpeg, without adopting a
+third-party server or any AGPL-licensed code. Confirmed directly from its own source
+(`src/session.rs`, `src/sdp.rs`): its `OPTIONS` response advertises exactly `OPTIONS`,
+`DESCRIBE`, `SETUP`, `PLAY`, `TEARDOWN` (`IMPLEMENTED_METHODS`) — go2rtc's own deployed RTSP
+server (`v1.9.10`) implements exactly this set despite advertising `PAUSE`/`ANNOUNCE`/`RECORD` in
+its own `OPTIONS` response, which it does not actually implement, and Frigate's own ffmpeg preset
+never requests any of those three either. `SETUP` accepts only
+`RTP/AVP/TCP;unicast;interleaved=<n>-<n+1>` and rejects any UDP transport request with `461
+Unsupported Transport` (`requests_tcp_interleaved_transport`) — go2rtc's own server rejects UDP
+the same way. No request carries or is checked against any credential; nothing this crate has
+needed to interoperate with today sends one.
+
+Corvette's contract: a client dials a camera by name at `rtsp://<host>:<port>/<camera>`, receives
+that camera's SDP from `DESCRIBE` (H.264/H.265 video today; see "No camera's audio track is
+published on any live-view transport yet" below), and must request `RTP/AVP/TCP` in `SETUP` — no
+other transport or method is honored. A future external consumer of this same restream port
+beyond Frigate's own ffmpeg needs exactly this surface and nothing more: five methods,
+TCP-interleaved only, no authentication. `RESEARCH-frigate-ingest-boundary.md` F-7 records that
+go2rtc's own restream documentation names Home Assistant as a precedent for this kind of consumer,
+and that this deployment's `frigate` Service already exposes the port outside the pod today —
+though DP-3 in the same document leaves open whether anything currently dials it.
+
+## One camera name identifies its stream across every live-view transport
+
+`crates/corvette-media-bridge` names a configured camera's `CameraSpec::name` field as that
+camera's identity on every transport it serves, so a single string is enough for a client to find
+one camera across all of them:
+
+- **RTSP-restream** (`restream_provider::MultiCameraProvider::register`): the stream name in
+  `DESCRIBE`/`SETUP`'s request URI (`rtsp://<host>:8554/<name>`).
+- **MoQ** (`moq_publish::run_publish_once`): `origin.create_broadcast(name, ...)` publishes the
+  camera under a broadcast named `<name>`, relative to the relay connect URL's own root path
+  (e.g. `https://<relay>:<port>/anon/<name>`, confirmed in both `crates/corvette-media-bridge`'s
+  own integration test and `crates/corvette-ui/src/expanded_view.rs`'s `hang` Web Component
+  attributes: `url` is the relay connect URL, `name` is the bare camera name). Each broadcast
+  carries a `catalog.json` track (from `moq_mux::catalog::Producer`) and a `video` track
+  (`moq_broadcast.create_track("video", ...)`) — no `audio` track is created today (see the
+  audio-gap section below).
+- **fMP4-over-WebSocket** (`ws_repackager`): one WebSocket connection per viewer, at path
+  `/<name>` on the repackager's own listener.
+- **HLS/LL-HLS** (`hls`): `GET /<name>/playlist.m3u8`, `GET /<name>/init.mp4`, `GET
+  /<name>/segment-<sequence>.m4s` on the packager's own listener.
+
+None of these four listeners hard-codes its own bind address or port — each takes one as a
+constructor parameter, matching D-3's "configuration point" convention (below) — so the actual
+deployed ports are a provisioning concern (K1), not a fact fixed by this crate.
+
+## The MoQ relay is exposed through a NodePort Service, one of three supported mechanisms
+
+Decision of record (D-3, `.agents/issue-12/DESIGN-live-view.md`, human-approved 2026-08-26),
+quoted verbatim:
+
+> All three exposure mechanisms (hostPort, NodePort, LoadBalancer) are supported as
+> implementation options; NodePort is chosen for this deployment (human judgment: "more secure
+> than hostPort"). The exposure mechanism is a configuration point, not hard-coded.
+
+K1's drafted manifest change (`.agents/issue-12/evidence/K1-manifest-draft.yaml`, reviewed, not
+yet applied to the live deployment) adds a dedicated `frigate-moq` Service, `type: NodePort`, one
+UDP port (`nodePort: 30443`, chosen inside the apiserver's default `30000-32767` range and
+colliding with no other port the manifest declares), targeting the new `moq-relay` container's own
+`moq` containerPort directly — not proxied through nginx, since nginx does not speak
+QUIC/WebTransport. The same container spec works unchanged under `hostPort` or `LoadBalancer`;
+only the container's own `ports` entry and whether/how a Service exists would differ (K1's own
+evidence spells out both alternatives in full).
+
+The same drafted change moves the `rtsp`-named `containerPort: 8554` off the `frigate` container
+onto the new `corvette-media-bridge` container, with no edit to the `frigate` Service's own `rtsp`
+port entry: a Kubernetes Service's named `targetPort` resolves against the pod's aggregate named
+container ports across every container it has, not only the container the name was originally
+declared on (`k8s.io/endpointslice`'s own `FindPort`, read directly and cited in K1's evidence).
+
+Corvette's contract: whichever exposure mechanism a deployment picks, the relay's own connect URL
+(the `url` attribute `hang`'s Web Component receives) is the one piece of configuration a client
+needs to change — nothing about the naming convention above depends on which mechanism exposes it.
+
+## `/live/hls/` and `/live/mse/ws/` are the two Rust-native live-view routes; five go2rtc routes are retired
+
+`frigate-vulkan`'s nginx proxies two live-view routes to `corvette-media-bridge`, and no longer
+proxies five others anywhere:
+
+- **`/live/hls/`** (issue #12 N1, resolving the grid-tile-fallback question left open by the prior
+  draft) proxies to G3's HLS/LL-HLS packager. Confirmed serving the expected content types end to
+  end (`.agents/issue-12/evidence/N1-mutation.log`): `/live/hls/<camera>/playlist.m3u8` →
+  `application/vnd.apple.mpegurl`; `/live/hls/<camera>/init.mp4` and
+  `/live/hls/<camera>/segment-<n>.m4s` → `video/mp4`. A donor-config drift guard and
+  `scripts/route_parity.sh` both fail if this location is ever silently removed, since its absence
+  falls through to the SPA shell at the same `200` status the real route also returns — a
+  status-only check would not catch that.
+- **`/live/mse/ws/<camera>`** (issue #12 N2, resolving the grid-tile-source question left open by
+  the prior draft) proxies to G2's fMP4-over-WebSocket repackager, replacing go2rtc's own
+  `/live/mse/api/ws`. `crates/corvette-ui/src/live_view.rs`'s `MEDIA_BRIDGE_WS_PATH_PREFIX`
+  constant is this exact path.
+
+Five locations that used to proxy to go2rtc are retired unconditionally, since go2rtc is fully
+removed from the deployed image rather than kept for any remaining role
+(`.agents/issue-12/evidence/N2-mutation.log`): `/live/mse/api/ws` (replaced by
+`/live/mse/ws/<camera>` above), `/live/webrtc/api/ws`, `/live/webrtc/webrtc.html`,
+`/api/go2rtc/api`, and `/api/go2rtc/webrtc` — the last four retired outright, including the
+embedded WebRTC player itself. Confirmed: the three `/live/*` routes among these
+five fall through to the SPA shell once removed; the two `/api/go2rtc/*` routes fall through to
+Frigate's own broader `/api/` location instead, since no more specific location matches them
+anymore. `/live/jsmpeg/` proxies to Frigate's own `jsmpeg` upstream, confirmed not go2rtc, and is
+unaffected by any of this.
+
+## No camera's audio track is published on any live-view transport yet
+
+The "RTSP camera frames carry Annex-B video, not a container format" contract above already
+records the root cause: `corvette-rtsp-client`'s SDP resolution locates only a camera's `m=video`
+section, so no audio `Frame` is ever produced. That gap propagates through every consumer built on
+top of it, each confirmed directly rather than assumed:
+
+- `crates/corvette-media-bridge`'s MoQ-publish role (`moq_publish::new_track`) is written
+  generically over `corvette_rtsp_client::depacketize::Codec`, but its `Codec::Aac` arm can only
+  return `FrameError::AacUnavailable` — `aac::Import::new` needs a resolved sample rate, channel
+  count, and `AudioSpecificConfig` this crate has no source for without the upstream fix. No AAC
+  frame has ever been exercised end to end, including in this crate's own integration test.
+- The expanded view's UI (`crates/corvette-ui/src/expanded_view.rs`) is written to degrade to
+  video-only cleanly when a broadcast announces no audio track, by design, rather than assuming
+  one is always present — but has nothing to degrade from today, since no broadcast ever announces
+  one.
+- The grid tile's fMP4-over-WebSocket repackager (G2) and the HLS/LL-HLS packager (G3) both
+  inherit the same video-only scope from the same upstream cause.
+
+Corvette's contract: every live-view transport this document describes — RTSP-restream, MoQ, the
+fMP4/WebSocket grid tile, and HLS/LL-HLS — carries a configured camera's video unconditionally, and
+its audio only once `corvette-rtsp-client` resolves an SDP audio section, a separate, unscoped
+future item. No component in this list needs to change shape when that fix lands: each already
+dispatches on a frame's own codec generically.
