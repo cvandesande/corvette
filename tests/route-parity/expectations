@@ -35,9 +35,17 @@
 /pkg/corvette.js | 200 | text/html | contains:id="root";contains:/assets/main-
 /pkg/corvette.wasm | 200 | text/html | contains:id="root";contains:/assets/main-
 
-/live/webrtc/webrtc.html | 200 | text/html | contains:go2rtc - WebRTC;absent:/assets/main-
-/live/mse/api/ws | 400 | text/plain | contains:Bad Request
-/api/go2rtc/api | 200 | application/json | starts_with:{;contains:"version"
+# These three rows described the CURRENT deployed reality (go2rtc still
+# proxied) until issue #12 item N2 (INV-4): they are superseded by the
+# target-contract block below, which documents what these same three paths
+# (plus the two other go2rtc-proxied routes N2 also removes) return once N2,
+# F1 (go2rtc disabled) and K1 (manifest cutover) ship together. Kept here,
+# commented out, only as the historical record of what this deployment
+# answered before that cutover -- re-add as literal rows and re-verify
+# against the live pod if this deployment is ever inspected before N2 ships.
+#   /live/webrtc/webrtc.html | 200 | text/html | contains:go2rtc - WebRTC;absent:/assets/main-
+#   /live/mse/api/ws | 400 | text/plain | contains:Bad Request
+#   /api/go2rtc/api | 200 | application/json | starts_with:{;contains:"version"
 
 # No /go2rtc/ location exists in deployed nginx at all, so this path falls
 # back to the site's own shell -- an iframe loading the app into itself, at
@@ -87,3 +95,50 @@
 /live/hls/front_door/playlist.m3u8 | 200 | application/vnd.apple.mpegurl | contains:#EXTM3U;absent:id="root"
 /live/hls/front_door/init.mp4 | 200 | video/mp4 | magic:00000018667479706d703432;absent:id="root"
 /live/hls/front_door/segment-0.m4s | 200 | video/mp4 | magic:00000018667479706d703432;absent:id="root"
+
+# Issue #12 item N2 (INV-4): every go2rtc-proxied location is gone once N2's
+# nginx patch lands, and one of the five (/live/mse/api/ws) is replaced by a
+# new location proxying to G2's fMP4-over-WebSocket packager
+# (corvette-media-bridge, crates/corvette-media-bridge/src/ws_repackager.rs)
+# instead of having no successor at all. Established directly against a real
+# nginx serving the patched config, with no go2rtc upstream running at all
+# (`.agents/issue-12/evidence/N2-mutation.log`), not assumed: nginx's own
+# location-matching means the five removed routes do NOT all fail the same
+# way.
+#
+# The three /live/* paths below (no other /live/* location claims them) fall
+# through all the way to the site's own SPA shell, at 200 -- the same
+# "unmatched path" failure mode /go2rtc/stream.html above documents, and
+# tabled here the same way.
+#
+# The other two, /api/go2rtc/api and /api/go2rtc/webrtc, are deliberately
+# NOT tabled: once their own location is gone they fall under the broader,
+# pre-existing `location /api/` prefix and proxy through to Frigate's own API
+# instead of the SPA shell -- confirmed in the harness only against a stub
+# standing in for Frigate, which is not a source for what Frigate's real API
+# answers for a path it never defined. Re-verify these two against the live
+# pod once N2/F1/K1 ship and table them then, rather than guessing Frigate's
+# real 404 shape now.
+#
+# NOT YET the live deployment's own behaviour, same caveat as N1's block
+# above: these describe the TARGET contract, become a real pod-mode
+# assertion once N2, F1 and K1 ship together, and use the same "front_door"
+# placeholder camera name N1's own rows use.
+/live/mse/api/ws | 200 | text/html | contains:id="root";contains:/assets/main-
+/live/webrtc/api/ws | 200 | text/html | contains:id="root";contains:/assets/main-
+/live/webrtc/webrtc.html | 200 | text/html | contains:id="root";contains:/assets/main-
+
+# The new replacement location, /live/mse/ws/<camera>, is deliberately NOT
+# tabled either, for a different reason than the two /api/go2rtc/* omissions
+# above: unlike G3's HLS packager (a plain HTTP server, which is why
+# /live/hls/front_door above is a real, tabled row), G2 is a WebSocket
+# listener (`ws_repackager::handle_connection`, a real
+# `tokio_tungstenite::accept_hdr_async` handshake) -- route_parity.sh's own
+# plain GET, with no Upgrade header, is not a real client request this
+# route ever actually serves, so a status/body pinned from that GET would
+# not describe G2's real contract. The harness proved something narrower and
+# real instead (`.agents/issue-12/evidence/N2-mutation.log`): nginx's own
+# proxy_pass wiring reaches the corvette_fmp4_ws upstream and forwards
+# whatever a stand-in backend answers, which is what this item's Verify step
+# asks for. Table a real row here once a WebSocket-capable check exists to
+# state its expectation honestly.
