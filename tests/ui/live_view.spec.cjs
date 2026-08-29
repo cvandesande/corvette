@@ -102,3 +102,68 @@ test("the grid tile's video element reaches HAVE_CURRENT_DATA against G2's real 
     "video reached HAVE_CURRENT_DATA, but the page logged unexpected console errors",
   ).toEqual([]);
 });
+
+// Issue #12's own fix (2026-08-29): `create_media_source` prefers Safari's
+// `ManagedMediaSource` over plain `MediaSource` when the browser exposes it
+// -- confirmed live on a real iPhone that plain `MediaSource` exists on iOS
+// Safari 17.1+ but is a non-functional stand-in for third-party pages,
+// leaving this tile permanently blank with no error at all until this fix.
+// `web_sys` has no typed binding for `ManagedMediaSource` and Chromium (this
+// harness's own browser) does not implement it, so this test defines a real
+// stand-in by subclassing the browser's own actual `MediaSource` -- every
+// method/event `live_view.rs` relies on (addSourceBuffer, sourceopen,
+// SourceBuffer.updateend) then behaves exactly as the real `MediaSource`
+// path does, so this reaches HAVE_CURRENT_DATA through the stand-in rather
+// than merely checking that its constructor fired.
+test("prefers ManagedMediaSource when present, disables remote playback, and still plays", async ({
+  page,
+}) => {
+  test.skip(
+    !wsOrigin,
+    "U1_LIVE_VIEW_WS_ORIGIN is not set -- run via scripts/run_u1_live_view_browser_check.sh",
+  );
+
+  await page.addInitScript((origin) => {
+    window.__corvetteMediaBridgeWsOrigin = origin;
+    window.__managedMediaSourceConstructed = 0;
+    window.ManagedMediaSource = class extends window.MediaSource {
+      constructor(...args) {
+        super(...args);
+        window.__managedMediaSourceConstructed += 1;
+      }
+    };
+  }, wsOrigin);
+
+  await page.route("**/api/config", (route) =>
+    route.fulfill({
+      json: {
+        cameras: {
+          [cameraName]: { enabled: true, friendly_name: "Browser check", ui: { order: 0 } },
+        },
+      },
+    }),
+  );
+  await page.route("**/api/review?*", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/review/activity/motion?*", (route) => route.fulfill({ json: [] }));
+
+  await page.goto("/");
+
+  const video = page.locator(".camera-grid video");
+  await expect(video).toHaveCount(1);
+
+  await expect
+    .poll(() => video.evaluate((element) => element.readyState), { timeout: 15_000 })
+    .toBeGreaterThanOrEqual(2);
+
+  const constructedCount = await page.evaluate(() => window.__managedMediaSourceConstructed);
+  expect(
+    constructedCount,
+    "create_media_source did not construct the mocked ManagedMediaSource even though it was present",
+  ).toBe(1);
+
+  const disableRemotePlayback = await video.evaluate((element) => element.disableRemotePlayback);
+  expect(
+    disableRemotePlayback,
+    "create_media_source did not set disableRemotePlayback for a ManagedMediaSource instance",
+  ).toBe(true);
+});

@@ -209,6 +209,43 @@ impl Drop for SourceBufferState {
     }
 }
 
+/// Constructs a fresh media source, preferring Safari's `ManagedMediaSource`
+/// over the plain `MediaSource` global whenever the browser exposes it. On
+/// iOS/iPadOS Safari 17.1+, plain `MediaSource` exists as a global but is a
+/// non-functional stand-in inaccessible to third-party pages -- confirmed
+/// live (issue #12, 2026-08-29): this tile stayed entirely blank on a real
+/// iPhone, with no error anywhere, until this fix. `web_sys` has no typed
+/// binding for `ManagedMediaSource` (a Safari-only, non-standard-track
+/// interface), so it is resolved and constructed via `js_sys::Reflect` and
+/// cast back with `unchecked_into` -- safe here because `ManagedMediaSource`
+/// implements the same `addSourceBuffer`/`sourceopen` surface this module
+/// already calls through the typed `MediaSource` API, and every downstream
+/// call is a plain JS method dispatch on the underlying object regardless of
+/// what Rust's type checker believes it is. Sets `disableRemotePlayback` on
+/// the video element when constructing a `ManagedMediaSource` instance,
+/// matching Safari's own documented requirement for it -- confirmed against
+/// the vendored `hls.js` (`public/vendor/hls.min.js`), which sets this exact
+/// property under this exact condition for its own equivalent fallback.
+fn create_media_source(video: &HtmlVideoElement) -> Option<MediaSource> {
+    let window = web_sys::window()?;
+    if let Ok(managed_ctor) =
+        js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("ManagedMediaSource"))
+            .and_then(wasm_bindgen::JsCast::dyn_into::<js_sys::Function>)
+        && let Ok(instance) = js_sys::Reflect::construct(&managed_ctor, &js_sys::Array::new())
+    {
+        // `web_sys` has no typed binding for `disableRemotePlayback` in this
+        // crate's enabled feature set; set it directly rather than adding a
+        // feature just for one property.
+        let _ = js_sys::Reflect::set(
+            video,
+            &wasm_bindgen::JsValue::from_str("disableRemotePlayback"),
+            &wasm_bindgen::JsValue::TRUE,
+        );
+        return Some(instance.unchecked_into::<MediaSource>());
+    }
+    MediaSource::new().ok()
+}
+
 /// Starts (or restarts, after a reconnect) one connection attempt: opens a
 /// fresh `WebSocket` and a fresh `MediaSource`, wires every event this
 /// module needs, and stores the result as `state`'s current [`Attempt`].
@@ -237,7 +274,7 @@ fn connect_once(state: Rc<RefCell<SessionState>>) {
     };
     socket.set_binary_type(BinaryType::Arraybuffer);
 
-    let Ok(media_source) = MediaSource::new() else {
+    let Some(media_source) = create_media_source(&video) else {
         schedule_reconnect(state);
         return;
     };
