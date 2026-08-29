@@ -20,5 +20,11 @@ rm -rf "$PUBLISH_ROOT"
 mkdir -p "$PUBLISH_ROOT"
 cp "$APP_HTML" "$PUBLISH_ROOT/index.html"
 cp -r "$SITE_ROOT/pkg" "$PUBLISH_ROOT/pkg"
+# U2's vendored @moq/watch/hls.js bundles (crates/corvette-ui/public/vendor/,
+# copied into $SITE_ROOT/vendor by cargo-leptos's own assets-dir handling).
+# Without this, U2's expanded view ships code that references
+# /vendor/moq-watch.bundle.js and /vendor/hls.min.js but the publish tree --
+# and everything downstream of it -- never actually contains them.
+cp -r "$SITE_ROOT/vendor" "$PUBLISH_ROOT/vendor"
 
 echo "Staged publish tree at $PUBLISH_ROOT"
