@@ -29,12 +29,15 @@ Establish upstream API contracts and implementation details by reading Frigate's
 own source at the revision the deployment is running, not from documentation, a
 newer release, or inference. Obtain that source if you do not already have it.
 
-The deployed system is read-only to agents. Reading from it is expected: port-forward
-to the running Frigate, go2rtc, and nginx and verify route behavior and contracts
-against what is actually serving. Mutating it is a human action. If the work would
-apply a manifest, edit configuration inside the pod, replace an image or its digest,
-or restart a workload, stop and ask; propose the change and let a human apply it. Do
-not proceed on judgment.
+The deployed system defaults to read-only for agents. Reading from it is expected:
+port-forward to the running Frigate, go2rtc, and nginx and verify route behavior and
+contracts against what is actually serving. Mutating it — applying a manifest, editing
+configuration inside the pod, replacing an image or its digest, or restarting a
+workload — requires stopping and proposing the change first. An agent may carry out
+the mutation itself only once a human has explicitly authorized that specific action
+in the conversation; absent that, let a human apply it. Do not proceed on judgment,
+and do not treat authorization for one action or session as standing permission for
+later ones.
 
 When a change uncovers a Frigate API incompatibility, ambiguous contract,
 surprising behavior, or upstream defect that should influence Corvette's own API,
