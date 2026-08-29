@@ -589,6 +589,21 @@ async fn handle_connection_with_timeout(
     }
 }
 
+/// The most header lines [`read_request_line_and_path`] will allocate room
+/// for. This server's own real client is nginx, not a bare hand-crafted
+/// request: it forwards every header the original browser sent (`Accept`,
+/// `Accept-Encoding`, `Referer`, `Origin`, `Sec-Fetch-*`, `Priority`, and
+/// more) plus its own (`X-Forwarded-For`, `X-Real-IP`, and the
+/// `auth_request`-resolved `X-Remote-User`/`X-Remote-Role` pair Frigate's own
+/// nginx config sets). A real such request routinely carries two to three
+/// times as many headers as this module's own tests or a bare `curl` ever
+/// exercise -- confirmed directly against the live deployment, where the
+/// previous limit of 16 was too low for real browser traffic (see this
+/// module's own doc, "Path convention", for the nginx hop this server's
+/// requests always arrive through). 64 leaves comfortable headroom above
+/// that.
+const MAX_REQUEST_HEADERS: usize = 64;
+
 /// Reads bytes off `stream` until `httparse` can parse a complete request
 /// header block, then returns the request's own path (query string
 /// stripped).
@@ -602,16 +617,35 @@ async fn handle_connection_with_timeout(
 /// `tokio-tungstenite` itself. This server needs nothing else HTTP/1.x
 /// offers (no header values, no body, no keep-alive), so nothing past the
 /// path is read or interpreted.
+///
+/// Distinguishes `httparse`'s own "incomplete, read more" result from a
+/// genuine parse error (of which `TooManyHeaders` is the one this server hit
+/// live, back when [`MAX_REQUEST_HEADERS`] was too small for a real,
+/// nginx-forwarded browser request): the two used to be conflated into one
+/// "not complete yet, keep reading" branch, which meant a request that could
+/// never parse -- more headers than fit, or any other malformed input --
+/// left this function reading for more bytes nginx had already finished
+/// sending and was never going to send again. Only [`CONNECTION_TIMEOUT`]'s
+/// own budget ever ended such a connection; a malformed request now fails
+/// immediately instead.
 async fn read_request_line_and_path(stream: &mut TcpStream) -> std::io::Result<String> {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 512];
     loop {
-        let mut headers = [httparse::EMPTY_HEADER; 16];
+        let mut headers = [httparse::EMPTY_HEADER; MAX_REQUEST_HEADERS];
         let mut request = httparse::Request::new(&mut headers);
-        if request.parse(&buffer).is_ok_and(|status| status.is_complete()) {
-            let path = request.path.unwrap_or("/");
-            let path = path.split('?').next().unwrap_or(path);
-            return Ok(path.to_string());
+        match request.parse(&buffer) {
+            Ok(status) if status.is_complete() => {
+                let path = request.path.unwrap_or("/");
+                let path = path.split('?').next().unwrap_or(path);
+                return Ok(path.to_string());
+            }
+            Ok(_) => {}
+            Err(err) => {
+                return Err(std::io::Error::other(format!(
+                    "malformed request header block: {err}"
+                )));
+            }
         }
         if buffer.len() >= MAX_REQUEST_HEADER_BYTES {
             return Err(std::io::Error::other(
@@ -1051,5 +1085,71 @@ mod tests {
         );
 
         drop(client);
+    }
+
+    /// The real defect a live deployment surfaced directly: a real
+    /// nginx-forwarded browser request routinely carries more than sixteen
+    /// headers (the original browser's own, plus nginx's `X-Forwarded-For`/
+    /// `X-Real-IP`/`X-Remote-User`/`X-Remote-Role`), which the previous
+    /// sixteen-header limit could never parse -- see [`MAX_REQUEST_HEADERS`]'s
+    /// own doc.
+    #[tokio::test]
+    async fn read_request_line_and_path_parses_a_request_carrying_more_than_sixteen_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (mut server_stream, _) = listener.accept().await.unwrap();
+
+        let mut request = String::from("GET /back/playlist.m3u8 HTTP/1.1\r\nHost: example\r\n");
+        for i in 0..20 {
+            let _ = write!(request, "X-Extra-{i}: value\r\n");
+        }
+        request.push_str("\r\n");
+        client.write_all(request.as_bytes()).await.unwrap();
+
+        let path = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            read_request_line_and_path(&mut server_stream),
+        )
+        .await
+        .expect("must not hang on a request that legitimately has more than sixteen headers")
+        .expect("a well-formed request with many headers must still parse");
+
+        assert_eq!(path, "/back/playlist.m3u8");
+    }
+
+    /// The other half of the same live defect: `httparse::Error::TooManyHeaders`
+    /// (or any other genuine parse error) used to be indistinguishable from
+    /// "incomplete, read more" -- see [`read_request_line_and_path`]'s own
+    /// doc -- so a request this server could never parse just sat reading
+    /// for bytes nginx had already finished sending, until
+    /// [`CONNECTION_TIMEOUT`] eventually ended it. A request with more
+    /// headers than even the new, larger [`MAX_REQUEST_HEADERS`] can hold
+    /// must instead fail immediately.
+    #[tokio::test]
+    async fn read_request_line_and_path_fails_fast_on_more_headers_than_it_can_hold() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (mut server_stream, _) = listener.accept().await.unwrap();
+
+        let mut request = String::from("GET /back/playlist.m3u8 HTTP/1.1\r\nHost: example\r\n");
+        for i in 0..=MAX_REQUEST_HEADERS {
+            let _ = write!(request, "X-Extra-{i}: value\r\n");
+        }
+        request.push_str("\r\n");
+        client.write_all(request.as_bytes()).await.unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            read_request_line_and_path(&mut server_stream),
+        )
+        .await
+        .expect(
+            "a request with more headers than this server can hold must fail immediately, not \
+             be mistaken for an incomplete one and wait for bytes that will never come",
+        );
+
+        assert!(result.is_err());
     }
 }
