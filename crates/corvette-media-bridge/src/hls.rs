@@ -123,6 +123,26 @@ const PLAYLIST_WINDOW_SEGMENT_COUNT: usize = 6;
 /// for one of three fixed path shapes) fits in a small fraction of this.
 const MAX_REQUEST_HEADER_BYTES: usize = 8192;
 
+/// Bounds the total time [`handle_connection`] will wait on one accepted
+/// connection, covering both reading a complete request and writing its
+/// response. Without this, a peer that opens a connection and then never
+/// finishes sending a request -- nginx's own reverse-proxy connection to this
+/// server, under real conditions, occasionally does exactly this -- leaves
+/// `read_request_line_and_path`'s read loop parked on `stream.read().await`
+/// forever: nothing in that loop, or anywhere else in this function, ever
+/// gives up on its own. Each such connection leaks one Tokio task and one
+/// file descriptor for the rest of this process's life, accumulating
+/// unboundedly under real, sustained traffic (confirmed directly against a
+/// live deployment: roughly seventy such connections stuck in `ESTABLISHED`,
+/// never freed, after less than an hour of ordinary use -- see
+/// `.agents/issue-12/evidence/V1-ui-bundle-staleness-incident.md`).
+/// Five seconds is generous for a LAN-local reverse-proxy hop -- nginx is
+/// this server's only real client, per this module's own top-level doc,
+/// "Path convention" -- since every real request this server serves resolves
+/// in microseconds once its bytes have arrived (`route`'s own work is a
+/// handful of in-memory `Mutex`-guarded lookups, no I/O).
+const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Groups a per-camera [`Fragment`] stream into CMAF media segments, cutting
 /// only on a keyframe once the in-progress segment has run at least
 /// [`TARGET_SEGMENT_DURATION_TICKS`] -- see this module's own top-level doc,
@@ -511,18 +531,61 @@ fn parse_path(path: &str) -> Option<(&str, &str)> {
 /// resolves and sends its response, then closes -- see this module's own
 /// top-level doc, "Named simplifications", for why this server does not keep
 /// a connection alive across more than one request.
-async fn handle_connection(mut stream: TcpStream, store: &MultiCameraHlsStore) {
-    let request = match read_request_line_and_path(&mut stream).await {
-        Ok(path) => path,
-        Err(err) => {
-            log_event("hls-listener", "request-read-error", err);
-            return;
-        }
-    };
+async fn handle_connection(stream: TcpStream, store: &MultiCameraHlsStore) {
+    handle_connection_with_timeout(stream, store, CONNECTION_TIMEOUT).await;
+}
 
-    let response = route(&request, store);
-    if let Err(err) = send_response(&mut stream, response).await {
-        log_event("hls-listener", "response-write-error", err);
+/// Which stage of one connection's lifecycle failed -- kept distinct so a
+/// timeout firing during the read half is still logged as a timeout, not
+/// folded into a generic "something went wrong" label that would lose the
+/// same read-vs-write distinction the two error branches below already give
+/// a real log reader.
+enum ConnectionOutcome {
+    Read(std::io::Error),
+    Write(std::io::Error),
+}
+
+/// [`handle_connection`]'s real body, taking its own timeout as a parameter
+/// so a test can exercise the give-up-on-a-stalled-peer path without waiting
+/// out this server's real, production-sized [`CONNECTION_TIMEOUT`].
+async fn handle_connection_with_timeout(
+    mut stream: TcpStream,
+    store: &MultiCameraHlsStore,
+    timeout: std::time::Duration,
+) {
+    let outcome = tokio::time::timeout(timeout, async {
+        let request = read_request_line_and_path(&mut stream)
+            .await
+            .map_err(ConnectionOutcome::Read)?;
+        let response = route(&request, store);
+        send_response(&mut stream, response)
+            .await
+            .map_err(ConnectionOutcome::Write)
+    })
+    .await;
+
+    match outcome {
+        Ok(Ok(())) => {}
+        Ok(Err(ConnectionOutcome::Read(err))) => {
+            log_event("hls-listener", "request-read-error", err);
+        }
+        Ok(Err(ConnectionOutcome::Write(err))) => {
+            log_event("hls-listener", "response-write-error", err);
+        }
+        Err(_elapsed) => {
+            // `stream` drops here (closing the socket) once this function
+            // returns -- see this function's own doc for why leaving it open
+            // any longer, waiting on a peer that has already missed its
+            // budget, is exactly the leak this timeout exists to prevent.
+            log_event(
+                "hls-listener",
+                "connection-timeout",
+                format!(
+                    "peer did not complete a request within {timeout:?} -- \
+                     dropped to avoid leaking this connection forever"
+                ),
+            );
+        }
     }
 }
 
@@ -947,5 +1010,46 @@ mod tests {
         })
         .await
         .expect("a playlist with at least one segment resolves before the test timeout")
+    }
+
+    /// The real defect a live deployment surfaced directly (see
+    /// [`CONNECTION_TIMEOUT`]'s own doc): a peer that opens a connection and
+    /// then never finishes sending a request left `handle_connection` parked
+    /// on `stream.read().await` forever, one leaked task and file descriptor
+    /// per occurrence, for as long as the process ran. Uses
+    /// `handle_connection_with_timeout` directly with a short timeout so
+    /// this test does not have to wait out the real, production-sized
+    /// [`CONNECTION_TIMEOUT`]; the outer timeout below is only a test-hang
+    /// guard in case a future change reintroduces the unbounded wait.
+    #[tokio::test]
+    async fn handle_connection_gives_up_on_a_peer_that_never_sends_a_complete_request() {
+        let store = MultiCameraHlsStore::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Kept alive (not dropped) until after the call below: a peer that
+        // has already disconnected would make `stream.read()` return a
+        // normal "connection closed" error immediately, which is a different
+        // code path (`ConnectionOutcome::Read`, already covered by every
+        // other test's happy-path request/response round trip) than the one
+        // this test means to exercise -- a peer that is still connected but
+        // silent.
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server_stream, _) = listener.accept().await.unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle_connection_with_timeout(
+                server_stream,
+                &store,
+                std::time::Duration::from_millis(50),
+            ),
+        )
+        .await
+        .expect(
+            "a peer that opens a connection and never sends a complete request must eventually \
+             be dropped, not leak this task and its socket forever",
+        );
+
+        drop(client);
     }
 }
