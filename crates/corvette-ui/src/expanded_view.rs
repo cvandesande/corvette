@@ -345,12 +345,15 @@ impl Drop for MoqMount {
     }
 }
 
-/// Everything belonging to one HLS fallback attempt.
+/// Everything belonging to one HLS fallback attempt. `hls_instance` is
+/// `JsValue::UNDEFINED` and `_on_fatal_error` is `None` for the native-HLS
+/// path (`try_native_hls_or_give_up`), which has no `hls.js` instance of its
+/// own to destroy or subscribe `"hlsError"` on.
 struct HlsMount {
     video: HtmlVideoElement,
     container: Element,
     hls_instance: JsValue,
-    _on_fatal_error: Closure<dyn FnMut(JsValue, JsValue)>,
+    _on_fatal_error: Option<Closure<dyn FnMut(JsValue, JsValue)>>,
     _on_video_error: Closure<dyn FnMut(Event)>,
 }
 
@@ -579,9 +582,44 @@ fn mount_hls_fallback(state: Rc<RefCell<SessionState>>) {
     });
 }
 
+/// Creates a `<video>`, applies the muted/autoplay/playsinline attributes
+/// every playback path below needs, and appends it to the session's own
+/// container. Shared by the `hls.js` and native-HLS paths in
+/// `create_hls_video`/`try_native_hls_or_give_up`.
+fn create_video_element(borrowed: &SessionState) -> Option<HtmlVideoElement> {
+    let window = web_sys::window()?;
+    let document = window.document()?;
+    let video: HtmlVideoElement = document.create_element("video").ok()?.dyn_into().ok()?;
+    video.set_muted(true);
+    video.set_autoplay(true);
+    let _ = video.set_attribute("playsinline", "");
+    borrowed.container.append_child(&video).ok()?;
+    Some(video)
+}
+
 /// Creates a `<video>` and a real `hls.js` player against N1's real HLS
 /// route, matching `g3_hls.spec.cjs`'s own established wiring exactly (same
-/// `"hlsError"` literal, same `loadSource`/`attachMedia`/`play()` sequence).
+/// `"hlsError"` literal, same `loadSource`/`attachMedia`/`play()` sequence)
+/// -- with one addition: `preferManagedMediaSource: true` in the `Hls`
+/// config. Confirmed by reading `public/vendor/hls.min.js` directly (the
+/// vendored version, 1.7.1, is the latest hls.js release as of this write):
+/// its own shipped `DefaultConfig` still has `preferManagedMediaSource:
+/// false` (upstream's `master`-branch docs describe a `true` default that
+/// has not shipped in any released version yet). With the shipped `false`
+/// default, `hls.js` picks the plain `MediaSource` global whenever it
+/// exists at all -- which it does on iOS/iPadOS Safari 17.1+, but as a
+/// non-functional stand-in inaccessible to third-party pages -- instead of
+/// the actually-working `ManagedMediaSource` global those same versions
+/// expose. That silent wrong-global choice, not an absence of MSE support,
+/// is what produced a black screen with no error on iOS: this file's own
+/// `"hlsError"`/`onerror` handlers never fired because nothing failed
+/// loudly, playback just never started. If `hls.js` still cannot play
+/// (a fatal `hlsError`, or the `<video>` element's own `error` event) --
+/// whether from a genuinely unsupported browser or from the separate,
+/// upstream-acknowledged unreliability of `Hls.isSupported()`'s own codec
+/// detection on iOS (`video-dev/hls.js` issue #6161), which is why this
+/// function does not gate on that check at all -- falls back to Safari's
+/// native HLS support (`try_native_hls_or_give_up`).
 fn create_hls_video(state: &Rc<RefCell<SessionState>>, camera_name: &str) {
     let mut borrowed = state.borrow_mut();
     if borrowed.stopped {
@@ -590,43 +628,39 @@ fn create_hls_video(state: &Rc<RefCell<SessionState>>, camera_name: &str) {
     let Some(window) = web_sys::window() else {
         return;
     };
-    let Some(document) = window.document() else {
-        return;
-    };
-    let Ok(video_element) = document.create_element("video") else {
-        return;
-    };
-    let Ok(video) = video_element.dyn_into::<HtmlVideoElement>() else {
-        return;
-    };
-    video.set_muted(true);
-    video.set_autoplay(true);
-    let _ = video.set_attribute("playsinline", "");
-    if borrowed.container.append_child(&video).is_err() {
-        return;
-    }
-
     let Ok(hls_ctor) = js_sys::Reflect::get(&window, &JsValue::from_str("Hls"))
         .and_then(wasm_bindgen::JsCast::dyn_into::<js_sys::Function>)
     else {
-        let _ = borrowed.container.remove_child(&video);
-        borrowed.set_path.set(LivePath::None);
+        drop(borrowed);
+        try_native_hls_or_give_up(state, camera_name);
         return;
     };
-    let Ok(hls_instance) = js_sys::Reflect::construct(&hls_ctor, &js_sys::Array::new()) else {
-        let _ = borrowed.container.remove_child(&video);
-        borrowed.set_path.set(LivePath::None);
+    let config = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &config,
+        &JsValue::from_str("preferManagedMediaSource"),
+        &JsValue::TRUE,
+    );
+    let Ok(hls_instance) = js_sys::Reflect::construct(&hls_ctor, &js_sys::Array::of1(&config))
+    else {
+        drop(borrowed);
+        try_native_hls_or_give_up(state, camera_name);
+        return;
+    };
+
+    let Some(video) = create_video_element(&borrowed) else {
         return;
     };
 
     let on_fatal_error = {
         let state = Rc::clone(state);
+        let camera_name = camera_name.to_string();
         Closure::<dyn FnMut(JsValue, JsValue)>::new(move |_event: JsValue, data: JsValue| {
             let fatal = js_sys::Reflect::get(&data, &JsValue::from_str("fatal"))
                 .ok()
                 .is_some_and(|value| value.is_truthy());
             if fatal {
-                mark_no_path_available(&state);
+                try_native_hls_or_give_up(&state, &camera_name);
             }
         })
     };
@@ -645,8 +679,9 @@ fn create_hls_video(state: &Rc<RefCell<SessionState>>, camera_name: &str) {
 
     let on_video_error = {
         let state = Rc::clone(state);
+        let camera_name = camera_name.to_string();
         Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
-            mark_no_path_available(&state);
+            try_native_hls_or_give_up(&state, &camera_name);
         })
     };
     video.set_onerror(Some(on_video_error.as_ref().unchecked_ref()));
@@ -672,7 +707,52 @@ fn create_hls_video(state: &Rc<RefCell<SessionState>>, camera_name: &str) {
         container: borrowed.container.clone(),
         video,
         hls_instance,
-        _on_fatal_error: on_fatal_error,
+        _on_fatal_error: Some(on_fatal_error),
+        _on_video_error: on_video_error,
+    });
+}
+
+/// `hls.js` is unavailable or has just failed fatally: tears down any
+/// existing HLS mount (dropping it removes its own `<video>` from the DOM
+/// and, if it had one, destroys its `hls.js` instance) and tries Safari's
+/// native HLS support (`<video src>`, no `MediaSource`/`ManagedMediaSource`/
+/// `hls.js` involved at all -- Safari has supported this directly for
+/// years) as a last resort before giving up and marking no path available,
+/// exactly like every other exhausted fallback in this file.
+fn try_native_hls_or_give_up(state: &Rc<RefCell<SessionState>>, camera_name: &str) {
+    let mut borrowed = state.borrow_mut();
+    if borrowed.stopped {
+        return;
+    }
+    borrowed.hls = None;
+    let Some(video) = create_video_element(&borrowed) else {
+        borrowed.set_path.set(LivePath::None);
+        return;
+    };
+    if video
+        .can_play_type("application/vnd.apple.mpegurl")
+        .is_empty()
+    {
+        let _ = borrowed.container.remove_child(&video);
+        borrowed.set_path.set(LivePath::None);
+        return;
+    }
+
+    let on_video_error = {
+        let state = Rc::clone(state);
+        Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+            mark_no_path_available(&state);
+        })
+    };
+    video.set_onerror(Some(on_video_error.as_ref().unchecked_ref()));
+    video.set_src(&hls_playlist_url(camera_name));
+    let _ = video.play();
+
+    borrowed.hls = Some(HlsMount {
+        container: borrowed.container.clone(),
+        video,
+        hls_instance: JsValue::UNDEFINED,
+        _on_fatal_error: None,
         _on_video_error: on_video_error,
     });
 }
