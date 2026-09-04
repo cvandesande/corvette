@@ -29,7 +29,16 @@ test("the grid tile renders no iframe, with or without a live media-bridge endpo
 }) => {
   await page.route("**/api/config", (route) =>
     route.fulfill({
-      json: { cameras: { front: { enabled: true, friendly_name: "Front", ui: { order: 0 } } } },
+      json: {
+        cameras: {
+          front: {
+            enabled: true,
+            friendly_name: "Front",
+            ui: { order: 0 },
+            detect: { width: 1920, height: 1080 },
+          },
+        },
+      },
     }),
   );
   await page.route("**/api/review?*", (route) => route.fulfill({ json: [] }));
@@ -69,7 +78,12 @@ test("the grid tile's video element reaches HAVE_CURRENT_DATA against G2's real 
     route.fulfill({
       json: {
         cameras: {
-          [cameraName]: { enabled: true, friendly_name: "Browser check", ui: { order: 0 } },
+          [cameraName]: {
+            enabled: true,
+            friendly_name: "Browser check",
+            ui: { order: 0 },
+            detect: { width: 1920, height: 1080 },
+          },
         },
       },
     }),
@@ -138,7 +152,12 @@ test("prefers ManagedMediaSource when present, disables remote playback, and sti
     route.fulfill({
       json: {
         cameras: {
-          [cameraName]: { enabled: true, friendly_name: "Browser check", ui: { order: 0 } },
+          [cameraName]: {
+            enabled: true,
+            friendly_name: "Browser check",
+            ui: { order: 0 },
+            detect: { width: 1920, height: 1080 },
+          },
         },
       },
     }),

@@ -169,7 +169,12 @@ test.describe("recording timeline", () => {
       route.fulfill({
         json: {
           cameras: {
-            front: { enabled: true, friendly_name: "Front", ui: { order: 0 } },
+            front: {
+              enabled: true,
+              friendly_name: "Front",
+              ui: { order: 0 },
+              detect: { width: 1920, height: 1080 },
+            },
           },
         },
       }),

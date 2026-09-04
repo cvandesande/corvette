@@ -57,7 +57,14 @@ const mockCameraConfig = (page) => {
     page.route("**/api/config", (route) =>
       route.fulfill({
         json: {
-          cameras: { [CAMERA_NAME]: { enabled: true, friendly_name: "Browser check", ui: { order: 0 } } },
+          cameras: {
+            [CAMERA_NAME]: {
+              enabled: true,
+              friendly_name: "Browser check",
+              ui: { order: 0 },
+              detect: { width: 1920, height: 1080 },
+            },
+          },
         },
       }),
     ),
