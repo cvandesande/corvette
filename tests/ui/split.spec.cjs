@@ -136,6 +136,10 @@ test("recording payload loads only after recordings navigation", async ({ page }
 
   await page.goto("/");
   await expect(page.getByRole("link", { name: "Recordings" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Monitor" })).toHaveAttribute(
+    "href",
+    "/monitor",
+  );
   expect(recordingPayloads).toEqual([]);
 
   await page.getByRole("link", { name: "Recordings" }).click();

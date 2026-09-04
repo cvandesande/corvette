@@ -2,11 +2,12 @@
 
 use leptos::prelude::*;
 
-pub(crate) const NAVIGATION: [(&str, &str); 4] = [
+pub(crate) const NAVIGATION: [(&str, &str); 5] = [
     ("Live", "/#live"),
     ("Events", "/events"),
     ("Recordings", "/recordings"),
     ("System", "/#system"),
+    ("Monitor", "/monitor"),
 ];
 
 #[component]
