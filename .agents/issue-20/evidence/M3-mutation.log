@@ -1,0 +1,64 @@
+Issue #20 item M3 -- required mutation cycle for the staggering claim in
+tests/ui/monitor.spec.cjs ("tiles' initial dial is staggered rather than
+simultaneous").
+
+Procedure: crates/corvette-ui/src/monitor.rs's `const STAGGER_MS: i32 = 200;`
+was temporarily changed to `0`, the UI bundle rebuilt, and
+tests/ui/monitor.spec.cjs run. STAGGER_MS was then restored to 200, rebuilt,
+and the suite run again.
+
+Commands (via `nix develop`):
+  NO_COLOR=false cargo leptos build --release --split
+  cp crates/corvette-ui/public/app.html target/site/index.html
+  playwright test tests/ui/monitor.spec.cjs
+
+=== BEFORE: STAGGER_MS = 0 (expected: timing assertion fails) ===
+
+Running 5 tests using 1 worker
+
+Skipping host requirements validation logic because `PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS` env variable is set.
+  ✓  1 tests/ui/monitor.spec.cjs:75:1 › visiting /monitor renders one placeholder tile per enabled camera (94ms)
+  ✓  2 tests/ui/monitor.spec.cjs:105:1 › visiting /monitor with no cameras configured shows the empty state, not a blank page (55ms)
+  ✓  3 tests/ui/monitor.spec.cjs:114:1 › visiting /monitor when the camera fetch errors shows the error state, not a blank page (54ms)
+  ✓  4 tests/ui/monitor.spec.cjs:130:1 › every tile independently reaches the HLS fallback with no cross-tile interference (118ms)
+  ✘  5 tests/ui/monitor.spec.cjs:164:1 › tiles' initial dial is staggered rather than simultaneous (112ms)
+
+  1) tests/ui/monitor.spec.cjs:164:1 › tiles' initial dial is staggered rather than simultaneous
+
+    Error: tile 1's dial should trail tile 0's by roughly STAGGER_MS, not fire simultaneously
+
+    expect(received).toBeGreaterThanOrEqual(expected)
+
+    Expected: >= 100
+    Received:    0
+
+      185 |   for (let index = 1; index < arrivalTimesMs.length; index += 1) {
+      186 |     const gapMs = arrivalTimesMs[index] - arrivalTimesMs[index - 1];
+    > 187 |     expect(gapMs, `tile ${index}'s dial should trail tile ${index - 1}'s by roughly STAGGER_MS, not fire simultaneously`).toBeGreaterThanOrEqual(
+          |                                                                                                                           ^
+      188 |       MINIMUM_EXPECTED_GAP_MS,
+      189 |     );
+      190 |   }
+        at /home/cvandesande/github/corvette/tests/ui/monitor.spec.cjs:187:123
+
+  1 failed
+    tests/ui/monitor.spec.cjs:164:1 › tiles' initial dial is staggered rather than simultaneous
+  4 passed (972ms)
+
+=== AFTER: STAGGER_MS restored to 200 (expected: all pass) ===
+
+Running 5 tests using 1 worker
+
+Skipping host requirements validation logic because `PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS` env variable is set.
+  ✓  1 tests/ui/monitor.spec.cjs:75:1 › visiting /monitor renders one placeholder tile per enabled camera (108ms)
+  ✓  2 tests/ui/monitor.spec.cjs:105:1 › visiting /monitor with no cameras configured shows the empty state, not a blank page (56ms)
+  ✓  3 tests/ui/monitor.spec.cjs:114:1 › visiting /monitor when the camera fetch errors shows the error state, not a blank page (57ms)
+  ✓  4 tests/ui/monitor.spec.cjs:130:1 › every tile independently reaches the HLS fallback with no cross-tile interference (477ms)
+  ✓  5 tests/ui/monitor.spec.cjs:164:1 › tiles' initial dial is staggered rather than simultaneous (458ms)
+
+  5 passed (1.7s)
+
+Conclusion: the timing assertion is a real oracle for the staggering claim --
+it fails when the stagger is disabled and passes when it is present at its
+chosen value (200ms), with a 100ms minimum-gap threshold comfortably between
+the two.

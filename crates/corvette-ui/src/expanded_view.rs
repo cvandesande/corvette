@@ -134,7 +134,7 @@ const MOQ_ATTEMPT_TIMEOUT_MS: i32 = 4_000;
 /// surfaced in the UI via a `data-live-path` attribute and a short label
 /// (Do step 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LivePath {
+pub(crate) enum LivePath {
     /// The `MoQ` attempt is still in flight and the HLS fallback has not
     /// started.
     Connecting,
@@ -147,7 +147,7 @@ enum LivePath {
 }
 
 impl LivePath {
-    const fn data_attr(self) -> &'static str {
+    pub(crate) const fn data_attr(self) -> &'static str {
         match self {
             Self::Connecting => "connecting",
             Self::Moq => "moq",
@@ -156,7 +156,7 @@ impl LivePath {
         }
     }
 
-    const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Connecting => "Connecting…",
             Self::Moq => "Live (MoQ)",
@@ -269,12 +269,16 @@ pub(crate) fn ExpandedView(
 
 /// Owns one expanded view's live connection attempt for as long as the
 /// modal stays mounted: `MoQ` first, HLS fallback on failure or timeout.
-struct ExpandedSession {
+pub(crate) struct ExpandedSession {
     state: Rc<RefCell<SessionState>>,
 }
 
 impl ExpandedSession {
-    fn start(camera_name: String, container: Element, set_path: WriteSignal<LivePath>) -> Self {
+    pub(crate) fn start(
+        camera_name: String,
+        container: Element,
+        set_path: WriteSignal<LivePath>,
+    ) -> Self {
         set_path.set(LivePath::Connecting);
         let state = Rc::new(RefCell::new(SessionState {
             camera_name,
@@ -290,7 +294,7 @@ impl ExpandedSession {
 
     /// Ends this session for good: both mounts (if any) are torn down via
     /// their own `Drop`.
-    fn stop(self) {
+    pub(crate) fn stop(self) {
         let mut state = self.state.borrow_mut();
         state.stopped = true;
         state.moq = None;
