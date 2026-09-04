@@ -1048,6 +1048,51 @@ main {
   overflow: hidden;
   border-radius: 0.4rem;
   background: #0b1011;
+  cursor: pointer;
+}
+
+.monitor-tile:focus-visible {
+  outline: 2px solid #69d1ba;
+  outline-offset: -2px;
+}
+
+/* Item M5: a fullscreened tile (`Element.requestFullscreen()` called on this
+   same element, `crates/corvette-ui/src/monitor.rs`) must fill the real
+   screen, overriding its own `left`/`top`/`width`/`height` inline style
+   (`tile_placement_style`, the wall's own packed placement) -- an inline
+   style otherwise always wins over any class selector in the same origin,
+   so these declarations need `!important` specifically to out-rank it, not
+   as a general override hammer. */
+.monitor-tile:fullscreen {
+  left: 0 !important;
+  top: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  border-radius: 0;
+}
+
+/* The one-time gesture-to-arm affordance (D-4,
+   `.agents/issue-20/DESIGN-monitor-mode.md`) -- covers the whole viewport,
+   independent of the wall's own safe-area padding, so it is unmissable and
+   the only thing a viewer can interact with before it is dismissed. */
+.monitor-fullscreen-prompt {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  text-align: center;
+  font-size: 1.5rem;
+  color: #e8eeee;
+  background: rgb(16 21 22 / 88%);
+  cursor: pointer;
+}
+
+.monitor-fullscreen-prompt:focus-visible {
+  outline: 2px solid #69d1ba;
+  outline-offset: -2px;
 }
 
 .monitor-tile h2 {

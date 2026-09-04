@@ -275,3 +275,160 @@ for (const cameraCount of [2, 4, 5]) {
     }
   });
 }
+
+// Issue #20 item M5's own Verify step: click/select-to-fullscreen per tile,
+// gated on the one-time gesture-to-arm prompt (D-1/D-4,
+// `.agents/issue-20/DESIGN-monitor-mode.md`).
+//
+// Real Fullscreen API activation is not exercised here: headless Chromium
+// has no real screen, and this project's own harness runs
+// `browserName: "chromium", headless: true` (`playwright.config.cjs`) with
+// no guarantee a synthetic Playwright click's transient activation carries
+// through to a real `requestFullscreen()` grant in that mode. Mocked at the
+// DOM level instead -- the same approach `expanded_view.spec.cjs`'s own
+// `patchWebTransportCertificateHashes` uses for a real browser API this
+// harness cannot exercise for real -- so these tests assert against
+// `monitor.rs`'s actual call into `Element.requestFullscreen()`, not a
+// screenshot or a real rendered fullscreen state. The mock also reproduces
+// the one piece of behavior `monitor.rs` deliberately leaves to the browser
+// itself: Escape exiting an active Fullscreen-API session. `monitor.rs`
+// never calls `exitFullscreen()` (that is a real, spec-guaranteed browser
+// default `monitor.rs` relies on rather than reimplements); this mock has
+// to model that default for the "Escape returns to the wall" test below to
+// mean anything in a harness with no real Fullscreen API session to exit.
+const installFullscreenMock = (page) => {
+  return page.addInitScript(() => {
+    window.__fullscreenRequests = [];
+    let fullscreenElement = null;
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => fullscreenElement,
+    });
+    Element.prototype.requestFullscreen = function mockRequestFullscreen() {
+      window.__fullscreenRequests.push(this);
+      fullscreenElement = this;
+      document.dispatchEvent(new Event("fullscreenchange"));
+      return Promise.resolve();
+    };
+    document.exitFullscreen = function mockExitFullscreen() {
+      fullscreenElement = null;
+      document.dispatchEvent(new Event("fullscreenchange"));
+      return Promise.resolve();
+    };
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && fullscreenElement) {
+        document.exitFullscreen();
+      }
+    });
+  });
+};
+
+const dismissFullscreenPrompt = (page) =>
+  page.getByRole("button", { name: "Press OK to enter fullscreen" }).click();
+
+// Marks a DOM node with a property no re-render could preserve -- a fresh
+// node from a re-mount would not carry this forward, unlike an in-place
+// attribute/state change on the same node. Used to confirm a tile's own
+// live-session player element is untouched by entering/exiting fullscreen.
+const markPlayerIdentity = (page) =>
+  page.evaluate(() => {
+    document.querySelector(".monitor-tile-player").__identityToken = "original-player-node";
+  });
+
+const playerIdentityPreserved = (page) =>
+  page.evaluate(
+    () => document.querySelector(".monitor-tile-player")?.__identityToken === "original-player-node",
+  );
+
+test.describe("item M5: click/select-to-fullscreen per tile", () => {
+  test("a tile click before the one-time prompt is dismissed does not attempt requestFullscreen", async ({ page }) => {
+    await installFullscreenMock(page);
+    await mockCameraConfig(page, nCameras(2));
+
+    await page.goto("/monitor");
+    // The prompt overlay (`position: fixed; inset: 0`) physically covers
+    // every tile until dismissed, so a real pointer click could never land
+    // on one -- `dispatchEvent` fires the `click` directly on the tile's
+    // own element instead (bypassing Playwright's coordinate-based hit
+    // test, which would otherwise land on the overlay on top of it), to
+    // confirm the underlying gate in `monitor.rs` itself, not just the
+    // overlay's own stacking, is what prevents this.
+    await page.locator(".monitor-tile").first().dispatchEvent("click");
+
+    expect(await page.evaluate(() => window.__fullscreenRequests.length)).toBe(0);
+  });
+
+  test("dismissing the prompt (Enter) then clicking a tile fullscreens that tile's own element, and only that one", async ({ page }) => {
+    await installFullscreenMock(page);
+    await mockCameraConfig(page, nCameras(3));
+
+    await page.goto("/monitor");
+    await page.getByRole("button", { name: "Press OK to enter fullscreen" }).focus();
+    await page.keyboard.press("Enter");
+
+    const tiles = page.locator(".monitor-tile");
+    await tiles.nth(1).click();
+
+    expect(await page.evaluate(() => window.__fullscreenRequests.length), "requestFullscreen invoked exactly once").toBe(
+      1,
+    );
+
+    const fullscreenedCorrectTile = await page.evaluate(
+      (tileIndex) => window.__fullscreenRequests[0] === document.querySelectorAll(".monitor-tile")[tileIndex],
+      1,
+    );
+    expect(
+      fullscreenedCorrectTile,
+      "requestFullscreen was called on tile 1's own element, not a different tile or the wall",
+    ).toBe(true);
+  });
+
+  test("entering fullscreen does not remount or reconnect the tile's live session", async ({ page }) => {
+    await installFullscreenMock(page);
+    await mockCameraConfig(page, nCameras(1));
+
+    await page.goto("/monitor");
+    await dismissFullscreenPrompt(page);
+    await markPlayerIdentity(page);
+
+    await page.locator(".monitor-tile").first().click();
+
+    expect(await page.evaluate(() => window.__fullscreenRequests.length)).toBe(1);
+    expect(
+      await playerIdentityPreserved(page),
+      "the tile's live-session player element was not replaced when it entered fullscreen",
+    ).toBe(true);
+  });
+
+  test("Escape exits fullscreen back to the wall, with the tile's own session still running", async ({ page }) => {
+    await installFullscreenMock(page);
+    await mockCameraConfig(page, nCameras(1));
+
+    await page.goto("/monitor");
+    await dismissFullscreenPrompt(page);
+    await markPlayerIdentity(page);
+
+    await page.locator(".monitor-tile").first().click();
+    expect(await page.evaluate(() => document.fullscreenElement !== null)).toBe(true);
+
+    await page.keyboard.press("Escape");
+
+    expect(await page.evaluate(() => document.fullscreenElement)).toBeNull();
+    expect(
+      await playerIdentityPreserved(page),
+      "the tile's live-session player element survived the fullscreen exit unchanged",
+    ).toBe(true);
+  });
+
+  test("the one-time prompt does not reappear once dismissed", async ({ page }) => {
+    await installFullscreenMock(page);
+    await mockCameraConfig(page, nCameras(1));
+
+    await page.goto("/monitor");
+    await dismissFullscreenPrompt(page);
+    await page.locator(".monitor-tile").first().click();
+    await page.keyboard.press("Escape");
+
+    await expect(page.getByRole("button", { name: "Press OK to enter fullscreen" })).toHaveCount(0);
+  });
+});

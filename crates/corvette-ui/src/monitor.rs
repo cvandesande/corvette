@@ -5,7 +5,19 @@
 //! exactly fill the viewport with no scrolling.
 //!
 //! Reached by direct bookmark at `/monitor`, not from primary navigation.
-//! Per-tile fullscreen (M5) builds on top of this scaffold.
+//! Selecting a tile fullscreens it in place via the standard Fullscreen API
+//! (item M5, D-1 in `.agents/issue-20/DESIGN-monitor-mode.md`) -- the same
+//! DOM element that already hosts the tile's live session, so entering or
+//! leaving fullscreen never re-mounts or reconnects it. A one-time prompt on
+//! first load supplies the single real user gesture Chromium's transient-
+//! activation model requires before any `requestFullscreen()` call can
+//! succeed (D-4); `RESEARCH-tvbro-fullscreen.md` found no gesture-free path
+//! on tv-bro/Android `WebView`. Exiting fullscreen (Escape, or the platform's
+//! own remote-control equivalent) is left to the browser's own default
+//! Fullscreen-API behavior -- nothing here calls `exitFullscreen()` -- since
+//! that default is a browser-spec guarantee, not something this crate needs
+//! to reimplement; whether tv-bro's own remote Back button honors it the
+//! same way is real-device-only and stays UNVERIFIED until item V1 checks.
 
 use corvette_api::Camera;
 use leptos::html;
@@ -28,6 +40,15 @@ use crate::shell::{Status, StatusGlyph};
 /// still starts its dial well inside `expanded_view`'s own multi-second
 /// per-tile timeout budget.
 const STAGGER_MS: i32 = 200;
+
+/// True for the two keys a `role="button"` element must treat as activation
+/// per the WAI-ARIA button pattern this wall's custom (non-`<button>`)
+/// clickable tiles and prompt follow -- `Enter` and `Space` (`" "` is the
+/// modern `KeyboardEvent.key` value; no browser this crate targets still
+/// reports the legacy `"Spacebar"`).
+fn is_activation_key(key: &str) -> bool {
+    key == "Enter" || key == " "
+}
 
 #[component]
 pub(crate) fn Monitor() -> impl IntoView {
@@ -64,6 +85,10 @@ fn MonitorGrid(cameras: Vec<Camera>) -> impl IntoView {
         .map(|camera| (camera.width, camera.height))
         .collect();
     let layout = RwSignal::new(Vec::<TileRect>::new());
+    // Starts unarmed on every fresh page load; the prompt below is the only
+    // way to set it, and once set it stays set for the rest of this page's
+    // own lifetime (D-4) -- there is no code path that clears it back.
+    let armed = RwSignal::new(false);
 
     Effect::new(move |_| {
         let Some(container) = grid_container.get() else {
@@ -79,8 +104,50 @@ fn MonitorGrid(cameras: Vec<Camera>) -> impl IntoView {
     view! {
         <div class="monitor-grid" node_ref=grid_container aria-label="Configured cameras">
             {cameras.into_iter().enumerate().map(|(index, camera)| view! {
-                <MonitorTile camera=camera index=index layout=layout/>
+                <MonitorTile camera=camera index=index layout=layout armed=armed/>
             }).collect_view()}
+            {move || (!armed.get()).then(|| view! { <FullscreenPrompt armed=armed/> })}
+        </div>
+    }
+}
+
+/// The one-time gesture-to-arm affordance D-4 accepted as the unavoidable
+/// cost of Chromium's transient-activation model on a browser
+/// (`RESEARCH-tvbro-fullscreen.md`) that offers no gesture-free path to the
+/// Fullscreen API. Covers the whole viewport so it is the only thing a
+/// viewer can interact with on first load, and auto-focuses itself so a TV
+/// remote's very first "OK" press -- with nothing else yet focused on the
+/// page -- actually reaches it. Dismissing it (click, or `Enter`/`Space`)
+/// sets `armed` and this component stops rendering; nothing sets `armed`
+/// back to `false`, so it does not reappear for the rest of this page load.
+#[component]
+fn FullscreenPrompt(armed: RwSignal<bool>) -> impl IntoView {
+    let prompt_ref = NodeRef::<html::Div>::new();
+
+    Effect::new(move |_| {
+        if let Some(element) = prompt_ref.get() {
+            _ = element.focus();
+        }
+    });
+
+    let dismiss = move || armed.set(true);
+
+    view! {
+        <div
+            class="monitor-fullscreen-prompt"
+            node_ref=prompt_ref
+            role="button"
+            tabindex="0"
+            aria-label="Press OK to enter fullscreen"
+            on:click=move |_| dismiss()
+            on:keydown=move |event| {
+                if is_activation_key(&event.key()) {
+                    event.prevent_default();
+                    dismiss();
+                }
+            }
+        >
+            <p>"Press OK to enter fullscreen"</p>
         </div>
     }
 }
@@ -100,13 +167,20 @@ fn tile_placement_style(rect: TileRect) -> String {
 /// `layout`'s entry for `index`, which `MonitorGrid` fills in once the
 /// wall's own packed layout is computed.
 #[component]
-fn MonitorTile(camera: Camera, index: usize, layout: RwSignal<Vec<TileRect>>) -> impl IntoView {
+fn MonitorTile(
+    camera: Camera,
+    index: usize,
+    layout: RwSignal<Vec<TileRect>>,
+    armed: RwSignal<bool>,
+) -> impl IntoView {
     let Camera {
         name: camera_name,
         display_name,
         ..
     } = camera;
     let tile_camera_name = camera_name.clone();
+    let tile_aria_label = format!("Fullscreen {display_name}");
+    let tile_container = NodeRef::<html::Div>::new();
     let player_container = NodeRef::<html::Div>::new();
     let path = RwSignal::new(LivePath::Connecting);
     // Non-`Send`/non-`Sync` browser objects live behind these; `on_cleanup`
@@ -161,12 +235,43 @@ fn MonitorTile(camera: Camera, index: usize, layout: RwSignal<Vec<TileRect>>) ->
         }
     });
 
+    // Fullscreens this tile's own outer element in place (D-1) -- the same
+    // element that already hosts `player_container`/`session` above, so
+    // this touches neither: no re-mount, no reconnect, just a standard
+    // `Element.requestFullscreen()` call. The outer element (rather than
+    // `player_container` alone) is deliberate: it keeps the camera-name
+    // heading below visible over the video while fullscreened, via the
+    // existing `.monitor-tile h2` overlay style, matching how the tile
+    // already looks on the wall. Gated on `armed` (D-4): before the
+    // one-time prompt is dismissed, a tile click/keydown is a no-op rather
+    // than an attempted `requestFullscreen()` call that would silently
+    // fail for lack of a qualifying gesture.
+    let enter_fullscreen = move || {
+        if !armed.get_untracked() {
+            return;
+        }
+        if let Some(element) = tile_container.get_untracked() {
+            _ = element.request_fullscreen();
+        }
+    };
+
     view! {
         <div
             class="monitor-tile"
+            node_ref=tile_container
             data-camera=tile_camera_name
+            tabindex="0"
+            role="button"
+            aria-label=tile_aria_label
             style=move || {
                 tile_placement_style(layout.get().get(index).copied().unwrap_or_default())
+            }
+            on:click=move |_| enter_fullscreen()
+            on:keydown=move |event| {
+                if is_activation_key(&event.key()) {
+                    event.prevent_default();
+                    enter_fullscreen();
+                }
             }
         >
             <h2>{display_name}</h2>
