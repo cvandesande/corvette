@@ -1009,3 +1009,74 @@ main {
     gap: 0.25rem;
   }
 }
+
+/* Monitor mode (issue #20): a full-viewport camera wall reached by direct
+   bookmark, not the app shell's own `main` (overridden below, by
+   selector specificity, rather than scoped with `:where()`). */
+
+.monitor-wall {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  overflow: hidden;
+  width: 100vw;
+  height: 100vh;
+  background: #101516;
+  /* A safe-area margin around the whole wall, not per tile, absorbing TV
+     overscan and bezel rounding (`.agents/issue-20/DESIGN-monitor-mode.md`
+     D-2's own TV-specific consideration). `env(safe-area-inset-*)` covers
+     a display that reports one; the fixed 2vw/2vh floor is the fallback
+     for the more common case, on a TV, of one reporting zero. */
+  padding-top: max(2vh, env(safe-area-inset-top, 0px));
+  padding-right: max(2vw, env(safe-area-inset-right, 0px));
+  padding-bottom: max(2vh, env(safe-area-inset-bottom, 0px));
+  padding-left: max(2vw, env(safe-area-inset-left, 0px));
+}
+
+.monitor-wall .empty-state {
+  margin: auto;
+}
+
+.monitor-grid {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.monitor-tile {
+  position: absolute;
+  overflow: hidden;
+  border-radius: 0.4rem;
+  background: #0b1011;
+}
+
+.monitor-tile h2 {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  margin: 0;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.85rem;
+  color: #e8eeee;
+  background: rgb(16 21 22 / 68%);
+  border-bottom-right-radius: 0.4rem;
+}
+
+.monitor-tile-player {
+  width: 100%;
+  height: 100%;
+}
+
+.monitor-tile-player moq-watch,
+.monitor-tile-player canvas,
+.monitor-tile-player video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* A tile's own placement rectangle (`monitor_layout::pack_tiles`) may not
+     exactly match its camera's native aspect ratio -- `contain` keeps the
+     rendered picture itself always true to that ratio, absorbing any
+     mismatch as letterboxing rather than stretching the image. */
+  object-fit: contain;
+}

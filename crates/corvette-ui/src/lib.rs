@@ -27,6 +27,7 @@ mod live_view;
 mod local_time;
 mod media;
 mod monitor;
+mod monitor_layout;
 mod recordings;
 mod shell;
 mod timeline;

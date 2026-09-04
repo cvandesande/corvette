@@ -35,6 +35,30 @@ const nCameras = (count) => {
   return cameras;
 };
 
+// A short, fixed cycle of aspect ratios (16:9, 4:3, portrait 9:16) so a
+// generated fixture actually exercises item M4's aspect-ratio-aware
+// packing (`monitor_layout::pack_tiles`) rather than every tile sharing one
+// shape, matching the resolution fields M1's contract carries.
+const MIXED_ASPECT_RATIOS = [
+  { width: 1920, height: 1080 },
+  { width: 1280, height: 960 },
+  { width: 1080, height: 1920 },
+];
+
+const nMixedAspectCameras = (count) => {
+  const cameras = {};
+  for (let index = 0; index < count; index += 1) {
+    const { width, height } = MIXED_ASPECT_RATIOS[index % MIXED_ASPECT_RATIOS.length];
+    cameras[`camera-${index}`] = {
+      enabled: true,
+      friendly_name: `Camera ${index}`,
+      ui: { order: index },
+      detect: { width, height },
+    };
+  }
+  return cameras;
+};
+
 // Installed before navigation so it is in place before any tile's reactive
 // `data-live-path` attribute is ever written. Records, once per tile, the
 // moment (`performance.now()`) its `.monitor-tile-player` first reaches the
@@ -189,3 +213,65 @@ test("tiles' initial dial is staggered rather than simultaneous", async ({ page 
     );
   }
 });
+
+// Issue #20 item M4's own Verify step. `monitor_layout::pack_tiles`
+// (`crates/corvette-ui/src/monitor_layout.rs`) is unit-tested directly
+// against its own bounds/overlap/proportional-width oracle; these exercise
+// the real `/monitor` route end to end, confirming `MonitorGrid` actually
+// applies the computed layout to the DOM and that a mixed-aspect-ratio
+// camera set fills the real browser viewport with no scrollbar, for every
+// camera count this item's own Verify step names (2, 4, 5).
+for (const cameraCount of [2, 4, 5]) {
+  test(`/monitor with ${cameraCount} mixed-aspect cameras fills the viewport with no scrollbar`, async ({ page }) => {
+    await mockCameraConfig(page, nMixedAspectCameras(cameraCount));
+
+    await page.goto("/monitor");
+
+    const tiles = page.locator(".monitor-tile");
+    await expect(tiles).toHaveCount(cameraCount);
+
+    // `MonitorGrid`'s layout effect sets every tile's placement the moment
+    // its container mounts, independent of any tile's own MoQ/HLS session
+    // (D-6) -- wait for that placement rather than for any player state.
+    await page.waitForFunction(
+      (expectedCount) =>
+        document.querySelectorAll(".monitor-tile").length === expectedCount &&
+        [...document.querySelectorAll(".monitor-tile")].every(
+          (tile) => tile.getBoundingClientRect().width > 0 && tile.getBoundingClientRect().height > 0,
+        ),
+      cameraCount,
+    );
+
+    const [scrollSize, viewportSize, tileBoxes] = await Promise.all([
+      page.evaluate(() => ({
+        width: document.documentElement.scrollWidth,
+        height: document.documentElement.scrollHeight,
+      })),
+      page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight })),
+      tiles.evaluateAll((elements) =>
+        elements.map((element) => {
+          const rect = element.getBoundingClientRect();
+          return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        }),
+      ),
+    ]);
+
+    // No scrollbar: the document's own scrollable extent never exceeds the
+    // viewport that's actually visible, regardless of camera count.
+    expect(scrollSize.width, "no horizontal scrollbar").toBeLessThanOrEqual(viewportSize.width);
+    expect(scrollSize.height, "no vertical scrollbar").toBeLessThanOrEqual(viewportSize.height);
+
+    for (const [index, box] of tileBoxes.entries()) {
+      expect(box.width, `tile ${index} has a non-zero width`).toBeGreaterThan(0);
+      expect(box.height, `tile ${index} has a non-zero height`).toBeGreaterThan(0);
+      expect(box.x, `tile ${index}'s left edge is within the viewport`).toBeGreaterThanOrEqual(0);
+      expect(box.y, `tile ${index}'s top edge is within the viewport`).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width, `tile ${index}'s right edge is within the viewport`).toBeLessThanOrEqual(
+        viewportSize.width + 1,
+      );
+      expect(box.y + box.height, `tile ${index}'s bottom edge is within the viewport`).toBeLessThanOrEqual(
+        viewportSize.height + 1,
+      );
+    }
+  });
+}

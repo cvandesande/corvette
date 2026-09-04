@@ -1,10 +1,11 @@
 //! The bookmarkable camera wall: one tile per enabled camera, each running
 //! its own MoQ-first/HLS-fallback live session (issue #20 item M3, reusing
-//! `expanded_view`'s own [`ExpandedSession`]/[`LivePath`] verbatim).
+//! `expanded_view`'s own [`ExpandedSession`]/[`LivePath`] verbatim) and
+//! placed by `monitor_layout`'s aspect-ratio-aware packing (item M4) to
+//! exactly fill the viewport with no scrolling.
 //!
 //! Reached by direct bookmark at `/monitor`, not from primary navigation.
-//! Aspect-ratio-aware layout (M4) and per-tile fullscreen (M5) build on top
-//! of this scaffold.
+//! Per-tile fullscreen (M5) builds on top of this scaffold.
 
 use corvette_api::Camera;
 use leptos::html;
@@ -13,6 +14,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
 use crate::expanded_view::{ExpandedSession, LivePath};
+use crate::monitor_layout::{TileRect, pack_tiles};
 use crate::shell::{Status, StatusGlyph};
 
 /// Delay applied to each tile's initial dial, scaled by the tile's position
@@ -37,23 +39,68 @@ pub(crate) fn Monitor() -> impl IntoView {
                 None => view! { <Status heading="Loading cameras" detail="Connecting to the Frigate API." glyph=StatusGlyph::Camera/> }.into_any(),
                 Some(Err(error)) => view! { <Status heading="Cameras unavailable" detail=error glyph=StatusGlyph::Camera/> }.into_any(),
                 Some(Ok(cameras)) if cameras.is_empty() => view! { <Status heading="No cameras configured" detail="Add or enable a camera in Frigate, then reload this page." glyph=StatusGlyph::Camera/> }.into_any(),
-                Some(Ok(cameras)) => view! {
-                    <div class="monitor-grid" aria-label="Configured cameras">
-                        {cameras.into_iter().enumerate().map(|(index, camera)| view! {
-                            <MonitorTile camera=camera index=index/>
-                        }).collect_view()}
-                    </div>
-                }.into_any(),
+                Some(Ok(cameras)) => view! { <MonitorGrid cameras=cameras/> }.into_any(),
             }}
         </main>
     }
 }
 
-/// One wall tile: names its camera and runs its own live session, staggered
-/// by `index * STAGGER_MS` on initial mount. Layout and fullscreen are
-/// added by later plan items on top of this element.
+/// Lays out and mounts one tile per camera inside `.monitor-grid`, sized by
+/// `monitor_layout::pack_tiles` to exactly tile the grid's own real pixel
+/// box the moment that box and every camera's resolution are both known.
+///
+/// This does not wait on any tile's own MoQ/HLS connection state (D-6,
+/// `.agents/issue-20/DESIGN-monitor-mode.md`): `Camera.width`/`height` are
+/// already known from the same fetch that produced `cameras`, so layout
+/// runs once, right after this element mounts, and is never recomputed on
+/// a later connection event. It is also not recomputed on a browser
+/// window resize -- the wall's real deployment target is a fixed-size TV
+/// display loaded once per bookmark open, not a resizable desktop window.
 #[component]
-fn MonitorTile(camera: Camera, index: usize) -> impl IntoView {
+fn MonitorGrid(cameras: Vec<Camera>) -> impl IntoView {
+    let grid_container = NodeRef::<html::Div>::new();
+    let camera_dims: Vec<(u32, u32)> = cameras
+        .iter()
+        .map(|camera| (camera.width, camera.height))
+        .collect();
+    let layout = RwSignal::new(Vec::<TileRect>::new());
+
+    Effect::new(move |_| {
+        let Some(container) = grid_container.get() else {
+            return;
+        };
+        let bounds = container.get_bounding_client_rect();
+        if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+            return;
+        }
+        layout.set(pack_tiles(&camera_dims, bounds.width(), bounds.height()));
+    });
+
+    view! {
+        <div class="monitor-grid" node_ref=grid_container aria-label="Configured cameras">
+            {cameras.into_iter().enumerate().map(|(index, camera)| view! {
+                <MonitorTile camera=camera index=index layout=layout/>
+            }).collect_view()}
+        </div>
+    }
+}
+
+/// Renders `rect`'s placement as an inline `style` value, in the same
+/// convention `timeline.rs`'s own `timeline_segment_style` uses for its
+/// reactive per-element positioning.
+fn tile_placement_style(rect: TileRect) -> String {
+    format!(
+        "left: {:.4}px; top: {:.4}px; width: {:.4}px; height: {:.4}px",
+        rect.x, rect.y, rect.width, rect.height
+    )
+}
+
+/// One wall tile: names its camera, runs its own live session (staggered by
+/// `index * STAGGER_MS` on initial mount), and positions itself at
+/// `layout`'s entry for `index`, which `MonitorGrid` fills in once the
+/// wall's own packed layout is computed.
+#[component]
+fn MonitorTile(camera: Camera, index: usize, layout: RwSignal<Vec<TileRect>>) -> impl IntoView {
     let Camera {
         name: camera_name,
         display_name,
@@ -115,7 +162,13 @@ fn MonitorTile(camera: Camera, index: usize) -> impl IntoView {
     });
 
     view! {
-        <div class="monitor-tile" data-camera=tile_camera_name>
+        <div
+            class="monitor-tile"
+            data-camera=tile_camera_name
+            style=move || {
+                tile_placement_style(layout.get().get(index).copied().unwrap_or_default())
+            }
+        >
             <h2>{display_name}</h2>
             <div
                 class="monitor-tile-player"
