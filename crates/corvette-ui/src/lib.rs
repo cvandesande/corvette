@@ -26,6 +26,7 @@ mod lazy_route;
 mod live_view;
 mod local_time;
 mod media;
+mod monitor;
 mod recordings;
 mod shell;
 mod timeline;
@@ -36,6 +37,7 @@ use leptos_router::path;
 
 use crate::dashboard::Dashboard;
 use crate::events::EventBrowser;
+use crate::monitor::Monitor;
 use crate::recordings::RecordingBrowser;
 
 #[cfg(feature = "split")]
@@ -56,6 +58,7 @@ fn App() -> impl IntoView {
                 <Route path=path!("") view=Dashboard/>
                 <Route path=path!("events") view=EventBrowser/>
                 <Route path=path!("recordings") view=RecordingBrowser/>
+                <Route path=path!("monitor") view=Monitor/>
             </Routes>
         </Router>
     }
@@ -73,6 +76,7 @@ fn App() -> impl IntoView {
                     path=path!("recordings")
                     view={leptos_router::Lazy::<RecordingsRoute>::new()}
                 />
+                <Route path=path!("monitor") view=Monitor/>
             </Routes>
         </Router>
     }
@@ -109,7 +113,7 @@ const RESERVED_NGINX_PREFIXES: &[&str] = &[
 // `<Route path=path!(...)>` list above whenever a route is added, renamed, or
 // removed, and re-confirm the two match at review time.
 #[cfg(test)]
-const CLIENT_ROUTES: &[&str] = &["", "events", "recordings"];
+const CLIENT_ROUTES: &[&str] = &["", "events", "recordings", "monitor"];
 
 // The one route KNOWN to collide with a reserved prefix, and only in its
 // trailing-slash form (verified against the deployed configuration):
