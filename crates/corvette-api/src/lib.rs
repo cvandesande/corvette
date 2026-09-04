@@ -21,6 +21,8 @@ impl FrigateConfig {
                 display_name: camera.friendly_name.unwrap_or_else(|| name.clone()),
                 name,
                 order: camera.ui.order,
+                width: camera.detect.width,
+                height: camera.detect.height,
             })
             .collect::<Vec<_>>();
         cameras.sort_by(|left, right| {
@@ -39,6 +41,10 @@ pub struct Camera {
     pub name: String,
     /// Human-readable label supplied by Frigate.
     pub display_name: String,
+    /// Width in pixels of the stream Frigate runs detection on, unscaled.
+    pub width: u32,
+    /// Height in pixels of the stream Frigate runs detection on, unscaled.
+    pub height: u32,
     order: i32,
 }
 
@@ -191,11 +197,24 @@ struct FrigateCamera {
     enabled: bool,
     friendly_name: Option<String>,
     ui: FrigateCameraUi,
+    detect: FrigateDetect,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 struct FrigateCameraUi {
     order: i32,
+}
+
+/// The subset of Frigate's `detect` sub-config needed for tile aspect ratio.
+///
+/// Frigate resolves both fields from the camera's stream before serving
+/// `/api/config` (`frigate/config/config.py`), so a running deployment's
+/// response always carries concrete values even though Frigate's own model
+/// allows either to be unset in raw user configuration.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+struct FrigateDetect {
+    width: u32,
+    height: u32,
 }
 
 #[cfg(test)]
@@ -212,17 +231,20 @@ mod tests {
                         "enabled": true,
                         "friendly_name": "Side door",
                         "ui": {"order": 20, "dashboard": true},
+                        "detect": {"width": 1920, "height": 1080, "fps": 5},
                         "ffmpeg": {"inputs": []}
                     },
                     "garage": {
                         "enabled": false,
                         "friendly_name": "Garage",
-                        "ui": {"order": 0, "dashboard": true}
+                        "ui": {"order": 0, "dashboard": true},
+                        "detect": {"width": 1280, "height": 720, "fps": 5}
                     },
                     "front_door": {
                         "enabled": true,
                         "friendly_name": null,
-                        "ui": {"order": 10, "dashboard": true}
+                        "ui": {"order": 10, "dashboard": true},
+                        "detect": {"width": 640, "height": 480, "fps": 5}
                     }
                 }
             }"#,
@@ -235,11 +257,15 @@ mod tests {
                 Camera {
                     name: "front_door".to_owned(),
                     display_name: "front_door".to_owned(),
+                    width: 640,
+                    height: 480,
                     order: 10,
                 },
                 Camera {
                     name: "side_door".to_owned(),
                     display_name: "Side door".to_owned(),
+                    width: 1920,
+                    height: 1080,
                     order: 20,
                 },
             ]
@@ -251,8 +277,18 @@ mod tests {
         let config: FrigateConfig = serde_json::from_str(
             r#"{
                 "cameras": {
-                    "west": {"enabled": true, "friendly_name": "West", "ui": {"order": 1}},
-                    "east": {"enabled": true, "friendly_name": "East", "ui": {"order": 1}}
+                    "west": {
+                        "enabled": true,
+                        "friendly_name": "West",
+                        "ui": {"order": 1},
+                        "detect": {"width": 1920, "height": 1080}
+                    },
+                    "east": {
+                        "enabled": true,
+                        "friendly_name": "East",
+                        "ui": {"order": 1},
+                        "detect": {"width": 1920, "height": 1080}
+                    }
                 }
             }"#,
         )

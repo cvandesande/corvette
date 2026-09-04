@@ -411,6 +411,25 @@ Frigate's own broader `/api/` location instead, since no more specific location 
 anymore. `/live/jsmpeg/` proxies to Frigate's own `jsmpeg` upstream, confirmed not go2rtc, and is
 unaffected by any of this.
 
+## The camera-list contract carries Frigate's own detect resolution, unscaled
+
+`corvette_api::Camera` (`crates/corvette-api/src/lib.rs`) carries `width`/`height` fields sourced
+from each camera's `detect.width`/`detect.height` in Frigate's own `/api/config` response, verbatim
+and unscaled. Frigate v0.17.2 (the tag this deployment pins, `frigate-vulkan/docker/Dockerfile.py313:18`)
+models these as `Optional[int]` on `DetectConfig` (`frigate/config/camera/detect.py`) — either can be
+absent from raw user configuration — but `frigate/config/config.py:530-552` resolves any unset value
+from the camera's own stream before the config is ever served, so a running deployment's
+`config_obj.model_dump(...)` (`frigate/api/app.py:115-116`) always serializes concrete integers for an
+enabled camera. Confirmed directly against the real deployed Frigate (namespace `icams`, tirnanog
+cluster): `/api/config` returns `detect.width`/`detect.height` as populated integers for both enabled
+cameras (`front`, `back`: 704x576), and this same response parses cleanly through
+`corvette_api::FrigateConfig`/`Camera`.
+
+Corvette's contract: `Camera.width`/`height` are Frigate's own `detect.width`/`detect.height`
+verbatim — no client-side derivation, scaling, or defaulting when the upstream value is present. A
+consumer needing a camera's aspect ratio computes it from these two fields directly rather than
+inferring it from stream probing, a hard-coded default, or any other source.
+
 ## No camera's audio track is published on any live-view transport yet
 
 The "RTSP camera frames carry Annex-B video, not a container format" contract above already
