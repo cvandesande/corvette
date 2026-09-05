@@ -72,6 +72,8 @@ pub struct Event {
 /// A review segment used to summarize activity on the recording calendar.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct ReviewSegment {
+    /// Camera that observed the segment.
+    pub camera: String,
     /// Segment start as Unix seconds.
     pub start_time: f64,
     /// Segment end as Unix seconds, or `None` while activity continues.
@@ -351,6 +353,7 @@ mod tests {
         )
         .expect("Frigate review segment should deserialize");
 
+        assert_eq!(review.camera, "front");
         assert_eq!(review.severity, ReviewSeverity::SignificantMotion);
         assert_eq!(
             review.severity.highest(ReviewSeverity::Detection),

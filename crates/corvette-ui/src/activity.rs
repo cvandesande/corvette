@@ -444,16 +444,19 @@ mod tests {
     fn day_uses_the_highest_overlapping_review_severity() {
         let reviews = [
             ReviewSegment {
+                camera: "front".to_owned(),
                 start_time: 90.0,
                 end_time: Some(110.0),
                 severity: ReviewSeverity::Detection,
             },
             ReviewSegment {
+                camera: "front".to_owned(),
                 start_time: 120.0,
                 end_time: Some(130.0),
                 severity: ReviewSeverity::Alert,
             },
             ReviewSegment {
+                camera: "front".to_owned(),
                 start_time: 140.0,
                 end_time: Some(210.0),
                 severity: ReviewSeverity::SignificantMotion,

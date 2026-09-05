@@ -454,3 +454,14 @@ fMP4/WebSocket grid tile, and HLS/LL-HLS — carries a configured camera's video
 its audio only once `corvette-rtsp-client` resolves an SDP audio section, a separate, unscoped
 future item. No component in this list needs to change shape when that fix lands: each already
 dispatches on a frame's own codec generically.
+
+## The review-segment contract carries Frigate's own camera attribution
+
+Frigate v0.17.2's `/api/review` handler selects `ReviewSegment.camera` alongside every other
+returned column (`frigate/api/review.py:120`), so every row in the response already names the
+camera it belongs to. `corvette_api::ReviewSegment` (`crates/corvette-api/src/lib.rs`) did not
+declare a `camera` field, so `serde` silently dropped the column on deserialization.
+
+Corvette's contract: `ReviewSegment.camera` is Frigate's own `camera` column verbatim, carried the
+same way `ReviewEvent.camera` and `PreviewClip.camera` already are, so a future consumer needing
+per-camera review attribution has the data without a wire-format change.
