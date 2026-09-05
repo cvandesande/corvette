@@ -126,6 +126,22 @@ test("visiting /monitor renders one placeholder tile per enabled camera", async 
   await expect(tiles.nth(1)).toHaveText("Back yard");
 });
 
+// Issue #21 item T3's own Verify step: D-1's decision ("Direct Navigation
+// Mode only") named the in-product communication step pointing users at
+// tv-bro's long-press menu and its Direct Navigation Mode toggle as its own
+// remaining cost, implemented as a second, visually secondary line in this
+// existing one-time prompt (`FullscreenPrompt`, `crates/corvette-ui/src/
+// monitor.rs`) -- not a separate control, so this only checks the rendered
+// text, following the same `toContainText` convention the empty/error-state
+// tests above already use.
+test("the one-time fullscreen prompt names tv-bro's Direct Navigation Mode", async ({ page }) => {
+  await mockCameraConfig(page, nCameras(1));
+
+  await page.goto("/monitor");
+
+  await expect(page.locator(".monitor-fullscreen-prompt")).toContainText("Direct Navigation Mode");
+});
+
 test("visiting /monitor with no cameras configured shows the empty state, not a blank page", async ({ page }) => {
   await mockCameraConfig(page, {});
 

@@ -152,6 +152,13 @@ fn FullscreenPrompt(armed: RwSignal<bool>) -> impl IntoView {
             }
         >
             <p>"Press OK to enter fullscreen"</p>
+            // D-1 in `.agents/issue-21/DESIGN-tv-remote-navigation.md`: the
+            // remaining cost of targeting tv-bro's Direct Navigation Mode is
+            // this in-product communication step, nothing more -- an FYI, not
+            // an instruction, since enabling it is a transient, tv-bro-side
+            // action outside this page's control (F-6: it reverts on every
+            // Back press and must be re-entered via the long-press menu).
+            <p class="monitor-fullscreen-prompt-hint">"tv-bro's long-press menu also has a Direct Navigation Mode toggle, for D-pad/keyboard navigation instead of its default touch-emulating cursor."</p>
         </div>
     }
 }
