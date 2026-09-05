@@ -442,15 +442,19 @@ test.describe("item M5: click/select-to-fullscreen per tile", () => {
 // above, `installFullscreenMock`'s fully synthetic `requestFullscreen`
 // cannot exercise it: that mock never touches the real Fullscreen API, so
 // the real `:fullscreen` pseudo-class this button's CSS depends on would
-// never actually match under it. These tests call `Element.requestFullscreen`
-// directly instead -- confirmed by hand against this project's own
-// `playwright.config.cjs` (`headless: true`) to actually succeed and set a
-// real `document.fullscreenElement`/`:fullscreen` match when invoked this
-// way, unlike a synthetic Playwright click routed through `monitor.rs`'s own
-// `enter_fullscreen` closure, which this project's own headless Chromium
-// does not carry sufficient transient activation for (also confirmed by
-// hand) -- consistent with the M5 tests' own documented reason for mocking
-// rather than using the real API for click-driven entry.
+// never actually match under it. These tests enter fullscreen for real
+// instead, via a real click on the tile (the same shipped interaction the
+// M5 tests exercise through `monitor.rs`'s own `enter_fullscreen` closure,
+// just left un-mocked here) -- confirmed directly against this project's
+// own `playwright.config.cjs` (`headless: true`, chromium) by running that
+// exact click-then-`:fullscreen` sequence 27 times (9 fresh runs, then a
+// `--repeat-each=3` pass) with no failures, so a real Playwright click does
+// carry enough transient user-activation here. The earlier attempt at this
+// (calling `Element.requestFullscreen()` directly from `page.evaluate`)
+// checked `:fullscreen` immediately after the call instead of awaiting the
+// async transition, which raced it; these tests wait for it properly with
+// `page.waitForFunction`, the same pattern the exit-button test below
+// already uses for the exit transition.
 test.describe("on-page fullscreen-exit control", () => {
   test("the exit control is a real DOM node but not visible or interactable before the tile is fullscreened", async ({ page }) => {
     await mockCameraConfig(page, nCameras(1));
@@ -485,17 +489,20 @@ test.describe("on-page fullscreen-exit control", () => {
         return original.apply(this, args);
       };
     });
-    await page.evaluate(() => document.querySelector(".monitor-tile").requestFullscreen());
+    // The actual shipped interaction: a real click on the tile, routed
+    // through `monitor.rs`'s own `enter_fullscreen` closure, not a direct
+    // `requestFullscreen()` call from the test.
+    await page.locator(".monitor-tile").first().click();
+    await page.waitForFunction(() => document.querySelector(".monitor-tile")?.matches(":fullscreen"));
     expect(await page.evaluate(() => document.querySelector(".monitor-tile").matches(":fullscreen"))).toBe(true);
 
     const exitButton = page.getByRole("button", { name: "Exit fullscreen" });
     await expect(exitButton, "visible and reachable the instant the tile is actually fullscreen").toBeVisible();
 
     await exitButton.click();
-    // `Document.exitFullscreen()` settles asynchronously (unlike the
-    // synchronous `requestFullscreen()` call above, awaited directly on its
-    // own promise) -- wait for the real `fullscreenchange` transition to
-    // actually complete rather than asserting immediately after the click.
+    // `Document.exitFullscreen()` settles asynchronously, same as entry
+    // above -- wait for the real `fullscreenchange` transition to actually
+    // complete rather than asserting immediately after the click.
     await page.waitForFunction(() => document.fullscreenElement === null);
 
     expect(await page.evaluate(() => document.fullscreenElement), "the exit control's click handler called exitFullscreen").toBeNull();
@@ -526,7 +533,10 @@ test.describe("on-page fullscreen-exit control", () => {
         return original.apply(this, args);
       };
     });
-    await page.evaluate(() => document.querySelector(".monitor-tile").requestFullscreen());
+    // The actual shipped interaction: a real click on the tile, routed
+    // through `monitor.rs`'s own `enter_fullscreen` closure.
+    await page.locator(".monitor-tile").first().click();
+    await page.waitForFunction(() => document.querySelector(".monitor-tile")?.matches(":fullscreen"));
 
     const exitButton = page.getByRole("button", { name: "Exit fullscreen" });
     await exitButton.focus();
