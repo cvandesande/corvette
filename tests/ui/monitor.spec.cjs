@@ -432,3 +432,111 @@ test.describe("item M5: click/select-to-fullscreen per tile", () => {
     await expect(page.getByRole("button", { name: "Press OK to enter fullscreen" })).toHaveCount(0);
   });
 });
+
+// A defensive on-page fullscreen-exit control (D-4,
+// `.agents/issue-20/DESIGN-monitor-mode.md`), independent of whatever a
+// given platform's remote/Back-button pathway does or does not forward as
+// an Escape keypress. `monitor.rs`'s own button is always mounted and gated
+// purely by `styles.css`'s `.monitor-tile:fullscreen` selector -- there is
+// no Rust-side `fullscreenchange` tracking to mock, so unlike the M5 tests
+// above, `installFullscreenMock`'s fully synthetic `requestFullscreen`
+// cannot exercise it: that mock never touches the real Fullscreen API, so
+// the real `:fullscreen` pseudo-class this button's CSS depends on would
+// never actually match under it. These tests call `Element.requestFullscreen`
+// directly instead -- confirmed by hand against this project's own
+// `playwright.config.cjs` (`headless: true`) to actually succeed and set a
+// real `document.fullscreenElement`/`:fullscreen` match when invoked this
+// way, unlike a synthetic Playwright click routed through `monitor.rs`'s own
+// `enter_fullscreen` closure, which this project's own headless Chromium
+// does not carry sufficient transient activation for (also confirmed by
+// hand) -- consistent with the M5 tests' own documented reason for mocking
+// rather than using the real API for click-driven entry.
+test.describe("on-page fullscreen-exit control", () => {
+  test("the exit control is a real DOM node but not visible or interactable before the tile is fullscreened", async ({ page }) => {
+    await mockCameraConfig(page, nCameras(1));
+
+    await page.goto("/monitor");
+    await dismissFullscreenPrompt(page);
+
+    const exitButton = page.locator(".monitor-tile-exit-fullscreen");
+    await expect(exitButton, "the button is mounted unconditionally, not added only once fullscreen").toHaveCount(1);
+    await expect(exitButton, "hidden (and thus non-interactive) while the tile is not fullscreen").toBeHidden();
+  });
+
+  test("the exit control becomes visible once the tile is actually fullscreen, and clicking it exits fullscreen without re-entering it", async ({ page }) => {
+    await mockCameraConfig(page, nCameras(1));
+
+    await page.goto("/monitor");
+    await dismissFullscreenPrompt(page);
+    await markPlayerIdentity(page);
+
+    const wallPlacement = await page.locator(".monitor-tile").first().boundingBox();
+
+    // Spies on the real `requestFullscreen`, still calling through to it, so
+    // a click on the exit control re-triggering the tile's own
+    // `enter_fullscreen` (a real defect: `on:click`'s `stop_propagation`
+    // would not be doing its job) shows up as a second call, not just a
+    // silent no-op.
+    await page.evaluate(() => {
+      const original = Element.prototype.requestFullscreen;
+      window.__realRequestFullscreenCalls = 0;
+      Element.prototype.requestFullscreen = function spy(...args) {
+        window.__realRequestFullscreenCalls += 1;
+        return original.apply(this, args);
+      };
+    });
+    await page.evaluate(() => document.querySelector(".monitor-tile").requestFullscreen());
+    expect(await page.evaluate(() => document.querySelector(".monitor-tile").matches(":fullscreen"))).toBe(true);
+
+    const exitButton = page.getByRole("button", { name: "Exit fullscreen" });
+    await expect(exitButton, "visible and reachable the instant the tile is actually fullscreen").toBeVisible();
+
+    await exitButton.click();
+    // `Document.exitFullscreen()` settles asynchronously (unlike the
+    // synchronous `requestFullscreen()` call above, awaited directly on its
+    // own promise) -- wait for the real `fullscreenchange` transition to
+    // actually complete rather than asserting immediately after the click.
+    await page.waitForFunction(() => document.fullscreenElement === null);
+
+    expect(await page.evaluate(() => document.fullscreenElement), "the exit control's click handler called exitFullscreen").toBeNull();
+    expect(
+      await page.evaluate(() => window.__realRequestFullscreenCalls),
+      "the click did not also bubble into the tile's own on:click and re-enter fullscreen",
+    ).toBe(1);
+    expect(
+      await playerIdentityPreserved(page),
+      "the tile's live-session player element survived the fullscreen exit unchanged",
+    ).toBe(true);
+
+    const restoredPlacement = await page.locator(".monitor-tile").first().boundingBox();
+    expect(restoredPlacement, "the tile returned to its own packed wall placement, not still full-viewport").toEqual(wallPlacement);
+  });
+
+  test("pressing Enter on the focused exit control also exits fullscreen, without re-entering it", async ({ page }) => {
+    await mockCameraConfig(page, nCameras(1));
+
+    await page.goto("/monitor");
+    await dismissFullscreenPrompt(page);
+
+    await page.evaluate(() => {
+      const original = Element.prototype.requestFullscreen;
+      window.__realRequestFullscreenCalls = 0;
+      Element.prototype.requestFullscreen = function spy(...args) {
+        window.__realRequestFullscreenCalls += 1;
+        return original.apply(this, args);
+      };
+    });
+    await page.evaluate(() => document.querySelector(".monitor-tile").requestFullscreen());
+
+    const exitButton = page.getByRole("button", { name: "Exit fullscreen" });
+    await exitButton.focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.fullscreenElement === null);
+
+    expect(await page.evaluate(() => document.fullscreenElement), "Enter on the exit control called exitFullscreen").toBeNull();
+    expect(
+      await page.evaluate(() => window.__realRequestFullscreenCalls),
+      "Enter's keydown did not also bubble into the tile's own on:keydown and re-enter fullscreen",
+    ).toBe(1);
+  });
+});

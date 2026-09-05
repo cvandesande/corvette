@@ -1104,6 +1104,47 @@ main {
   border-radius: 0;
 }
 
+/* A defensive on-page fullscreen-exit control (D-4,
+   `.agents/issue-20/DESIGN-monitor-mode.md`), independent of whatever a
+   given platform's remote/Back-button pathway does or does not forward as
+   an Escape keypress. Always mounted (`crates/corvette-ui/src/monitor.rs`),
+   gated by `:fullscreen` alone rather than any Rust-side state, so there is
+   no listener to race: `display` both fully removes it from hit-testing and
+   the tab order while the tile is not fullscreen, and restores full native
+   `<button>` interactivity the instant `:fullscreen` starts matching. */
+.monitor-tile-exit-fullscreen {
+  display: none;
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 1;
+  margin: 0;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.85rem;
+  color: #e8eeee;
+  background: rgb(16 21 22 / 68%);
+  border: 0;
+  border-bottom-left-radius: 0.4rem;
+  cursor: pointer;
+}
+
+/* The button's own accessible name is its `aria-label`; this glyph is
+   generated content, not real text content, so it never shows up in
+   `.monitor-tile`'s own aggregate text (`.monitor-tile h2` remains the
+   tile's only real text node). */
+.monitor-tile-exit-fullscreen::before {
+  content: "\2715";
+}
+
+.monitor-tile:fullscreen .monitor-tile-exit-fullscreen {
+  display: block;
+}
+
+.monitor-tile-exit-fullscreen:focus-visible {
+  outline: 2px solid #69d1ba;
+  outline-offset: -2px;
+}
+
 /* The one-time gesture-to-arm affordance (D-4,
    `.agents/issue-20/DESIGN-monitor-mode.md`) -- covers the whole viewport,
    independent of the wall's own safe-area padding, so it is unmissable and

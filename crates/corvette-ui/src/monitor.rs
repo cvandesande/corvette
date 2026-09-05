@@ -12,12 +12,16 @@
 //! first load supplies the single real user gesture Chromium's transient-
 //! activation model requires before any `requestFullscreen()` call can
 //! succeed (D-4); `RESEARCH-tvbro-fullscreen.md` found no gesture-free path
-//! on tv-bro/Android `WebView`. Exiting fullscreen (Escape, or the platform's
-//! own remote-control equivalent) is left to the browser's own default
-//! Fullscreen-API behavior -- nothing here calls `exitFullscreen()` -- since
-//! that default is a browser-spec guarantee, not something this crate needs
-//! to reimplement; whether tv-bro's own remote Back button honors it the
-//! same way is real-device-only and stays UNVERIFIED until item V1 checks.
+//! on tv-bro/Android `WebView`. Exiting fullscreen relies primarily on the
+//! browser's own default Fullscreen-API behavior (Escape, or the platform's
+//! own remote-control equivalent) -- whether tv-bro's own remote Back button
+//! honors that default the same way is real-device-only and stays
+//! UNVERIFIED until item V1 checks -- plus a real on-page button on the
+//! fullscreened tile itself that calls `exitFullscreen()` directly, as a
+//! defensive fallback independent of that unverified pathway. The button's
+//! visibility is gated purely by CSS's own `:fullscreen` pseudo-class
+//! (`styles.css`'s `.monitor-tile:fullscreen`), not any Rust-side
+//! `fullscreenchange` tracking.
 
 use corvette_api::Camera;
 use leptos::html;
@@ -255,6 +259,16 @@ fn MonitorTile(
         }
     };
 
+    // The defensive on-page exit affordance this module's top doc describes
+    // (D-4). Unlike `request_fullscreen()`, `web_sys`'s `exit_fullscreen()`
+    // returns `()`, not a `Result` -- nothing to ignore, so this just calls
+    // it directly.
+    let exit_fullscreen = move || {
+        if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+            document.exit_fullscreen();
+        }
+    };
+
     view! {
         <div
             class="monitor-tile"
@@ -275,6 +289,27 @@ fn MonitorTile(
             }
         >
             <h2>{display_name}</h2>
+            // A real `<button>`, always mounted (never conditionally
+            // rendered), so there is no Rust-side `fullscreenchange` state to
+            // race -- `.monitor-tile-exit-fullscreen` in `styles.css` is what
+            // hides it outside `:fullscreen` and draws its glyph (kept out of
+            // this element's own text content, via `::before`, so it does
+            // not show up in `.monitor-tile`'s own aggregate text -- the
+            // camera name `<h2>` above is the tile's only real text).
+            // `stop_propagation` on both handlers keeps a click/Enter/Space
+            // aimed at this button from also bubbling into the tile's own
+            // `on:click`/`on:keydown` above and re-triggering
+            // `enter_fullscreen` (verified in `monitor.spec.cjs`).
+            <button
+                type="button"
+                class="monitor-tile-exit-fullscreen"
+                aria-label="Exit fullscreen"
+                on:click=move |event| {
+                    event.stop_propagation();
+                    exit_fullscreen();
+                }
+                on:keydown=|event| event.stop_propagation()
+            ></button>
             <div
                 class="monitor-tile-player"
                 data-live-path=move || path.get().data_attr()
