@@ -187,8 +187,8 @@ test.describe("recording timeline", () => {
     await page.route("**/api/review?*", (route) =>
       route.fulfill({
         json: [
-          { start_time: now - 1800, end_time: now - 1800, severity: "detection" },
-          { start_time: now - 200, end_time: now - 190, severity: "alert" },
+          { start_time: now - 1800, end_time: now - 1800, severity: "detection", camera: "front" },
+          { start_time: now - 200, end_time: now - 190, severity: "alert", camera: "front" },
         ],
       }),
     );
@@ -221,6 +221,11 @@ test.describe("recording timeline", () => {
     );
 
     await page.goto("/recordings");
+    // "All cameras" is the page's own default (issue #22 D-5); every test in
+    // this block exercises the single-camera path, so it must explicitly
+    // pick the one mocked camera rather than relying on a former
+    // default-to-first-camera behavior that no longer exists.
+    await page.getByLabel("Camera").selectOption("front");
     await page.getByRole("button", { name: "Last hour" }).click();
     await expect(page.getByRole("region", { name: "Recording timeline" })).toBeVisible();
   });

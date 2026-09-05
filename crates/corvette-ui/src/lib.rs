@@ -16,6 +16,7 @@
 #![allow(unreachable_pub)]
 
 mod activity;
+mod all_cameras;
 mod api;
 mod calendar;
 mod dashboard;

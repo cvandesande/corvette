@@ -4,6 +4,7 @@ use corvette_api::{Camera, Event, PreviewClip, ReviewSegment};
 use leptos::prelude::*;
 
 use crate::activity::{day_severity, severity_class};
+use crate::all_cameras::AllCamerasPlayback;
 use crate::calendar::{
     ActivityLegend, CalendarRecordingStatus, calendar_day_label, recording_day_available,
 };
@@ -15,6 +16,11 @@ use crate::media::{RECORDING_PRESETS, RecordingMedia, RecordingRange, recording_
 use crate::shell::{PageShell, Status, StatusGlyph};
 use crate::timeline::RecordingTimeline;
 
+/// The camera-select value meaning "every camera at once" (D-5 in
+/// `.agents/issue-22/DESIGN-all-cameras-scrubber.md`), never a real Frigate
+/// camera name.
+const ALL_CAMERAS: &str = "all";
+
 /// Renders the recording browser behind the route-level lazy boundary.
 #[component]
 pub(crate) fn RecordingBrowser() -> impl IntoView {
@@ -25,7 +31,7 @@ pub(crate) fn RecordingBrowser() -> impl IntoView {
     let calendar_selection = RwSignal::new(None::<CalendarSelection>);
     let playback_failed = RwSignal::new(false);
     let selection_error = RwSignal::new(None::<String>);
-    let recording_camera = RwSignal::new(String::new());
+    let recording_camera = RwSignal::new(ALL_CAMERAS.to_owned());
     let calendar_days = recent_calendar_days(21);
     let calendar_after = calendar_days.first().map_or(0.0, |day| day.start_time);
     let timezone = browser_timezone();
@@ -50,7 +56,11 @@ pub(crate) fn RecordingBrowser() -> impl IntoView {
     let recording_clips = LocalResource::new(move || {
         let range = recording_range.get();
         async move {
-            let Some(range) = range else {
+            // "All" mode has no real `all` camera for `/{camera}/recordings`
+            // to answer (F-12 in `.agents/issue-22/RESEARCH-all-cameras-scrubber.md`)
+            // -- filtered out here rather than requested and failed, mirroring
+            // the no-range-loaded-yet early return below.
+            let Some(range) = range.filter(|range| range.camera != ALL_CAMERAS) else {
                 return Ok(RecordingMedia {
                     clips: Vec::new(),
                     motion_ranges: Vec::new(),
@@ -68,15 +78,6 @@ pub(crate) fn RecordingBrowser() -> impl IntoView {
                 return Ok(Vec::new());
             };
             crate::api::fetch_preview_clips(&range.camera, range.start_time, range.end_time).await
-        }
-    });
-
-    Effect::new(move |_| {
-        if recording_camera.get().is_empty()
-            && let Some(Ok(cameras)) = cameras.get()
-            && let Some(camera) = cameras.first()
-        {
-            recording_camera.set(camera.name.clone());
         }
     });
 
@@ -206,10 +207,13 @@ fn CameraAndTimeControls() -> impl IntoView {
                 context.recording_range.set(None);
                 context.calendar_selection.set(None);
             }
-        >{move || camera_context.cameras.get().and_then(Result::ok).unwrap_or_default()
-            .into_iter().map(|camera| view! {
-                <option value=camera.name>{camera.display_name}</option>
-            }).collect_view()}</select></label>
+        >
+            <option value=ALL_CAMERAS>"All cameras"</option>
+            {move || camera_context.cameras.get().and_then(Result::ok).unwrap_or_default()
+                .into_iter().map(|camera| view! {
+                    <option value=camera.name>{camera.display_name}</option>
+                }).collect_view()}
+        </select></label>
         <div class="recording-times">
             <label><span>"From"</span><input type="time"
                 prop:value=move || context.start_clock.get()
@@ -294,7 +298,17 @@ fn RecordingPlayback() -> impl IntoView {
         if let Some(event) = context.selected_event.get() {
             view! { <EventPlayback event/> }.into_any()
         } else if let Some(range) = context.recording_range.get() {
-            view! { <RangePlayback range/> }.into_any()
+            if context.recording_camera.get() == ALL_CAMERAS {
+                view! {
+                    <AllCamerasPlayback
+                        start_time=range.start_time
+                        end_time=range.end_time
+                        cameras=context.cameras
+                    />
+                }.into_any()
+            } else {
+                view! { <RangePlayback range/> }.into_any()
+            }
         } else {
             view! { <Status
                 heading="Choose a time range"

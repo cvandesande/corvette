@@ -1216,3 +1216,38 @@ main {
      mismatch as letterboxing rather than stretching the image. */
   object-fit: contain;
 }
+
+/* Issue #22 item R2: the "All cameras" grid on `/recordings`. Unlike
+   `.monitor-wall`, this page is ordinary in-flow content, not a fixed
+   kiosk viewport, so the grid needs its own explicit box size for
+   `all_cameras.rs`'s `ResizeObserver` to react to; `vh` keeps that box
+   responsive to the viewport the same way every other element on this
+   page already is (D-2(b)). */
+.all-cameras-grid {
+  position: relative;
+  width: 100%;
+  height: 60vh;
+  min-height: 320px;
+  overflow: hidden;
+  background: #101516;
+  border-radius: 0.4rem;
+}
+
+.all-cameras-tile {
+  position: absolute;
+  overflow: hidden;
+  border-radius: 0.4rem;
+  background: #0b1011;
+}
+
+.all-cameras-tile h2 {
+  position: absolute;
+  top: 0;
+  left: 0;
+  margin: 0;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.85rem;
+  color: #e8eeee;
+  background: rgb(16 21 22 / 68%);
+  border-bottom-right-radius: 0.4rem;
+}
