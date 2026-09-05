@@ -88,11 +88,15 @@ nav a {
 }
 
 nav a:hover,
-nav a:focus-visible,
 nav a.active {
   color: #f3f8f7;
   background: #1b2425;
   outline: none;
+}
+
+nav a:focus-visible {
+  outline: 2px solid #69d1ba;
+  outline-offset: -2px;
 }
 
 nav a.active {
@@ -431,16 +435,21 @@ main {
 
 .recording-times input:focus-visible {
   border-color: #69d1ba;
-  outline: 1px solid #69d1ba;
+  outline: 2px solid #69d1ba;
+  outline-offset: -2px;
 }
 
 .recording-presets button:hover,
-.recording-presets button:focus-visible,
-.calendar-heading button:hover,
-.calendar-heading button:focus-visible {
+.calendar-heading button:hover {
   color: #f3f8f7;
   background: #243031;
   outline: none;
+}
+
+.recording-presets button:focus-visible,
+.calendar-heading button:focus-visible {
+  outline: 2px solid #69d1ba;
+  outline-offset: -2px;
 }
 
 .recording-calendar {
@@ -475,7 +484,8 @@ main {
 
 .recording-calendar select:focus-visible {
   border-color: #69d1ba;
-  outline: 1px solid #69d1ba;
+  outline: 2px solid #69d1ba;
+  outline-offset: -2px;
 }
 
 .calendar-heading {
@@ -516,10 +526,14 @@ main {
   cursor: pointer;
 }
 
-.calendar-grid button:hover,
-.calendar-grid button:focus-visible {
+.calendar-grid button:hover {
   border-color: #69d1ba;
   outline: none;
+}
+
+.calendar-grid button:focus-visible {
+  outline: 2px solid #69d1ba;
+  outline-offset: -2px;
 }
 
 .calendar-grid button:disabled {
@@ -635,10 +649,14 @@ main {
   cursor: pointer;
 }
 
-.recording-heading button:hover,
-.recording-heading button:focus-visible {
+.recording-heading button:hover {
   border-color: #69d1ba;
   outline: none;
+}
+
+.recording-heading button:focus-visible {
+  outline: 2px solid #69d1ba;
+  outline-offset: -2px;
 }
 
 .recording-player {
@@ -705,10 +723,12 @@ main {
   cursor: pointer;
 }
 
-.timeline-availability:hover,
-.timeline-availability:focus-visible {
+.timeline-availability:hover {
   background: #4e9d8b;
-  outline: 2px solid #dce7e5;
+}
+
+.timeline-availability:focus-visible {
+  outline: 2px solid #69d1ba;
   outline-offset: -2px;
 }
 
@@ -729,11 +749,13 @@ main {
   min-width: 0.3rem;
 }
 
-.timeline-activity:hover,
-.timeline-activity:focus-visible {
+.timeline-activity:hover {
   height: 1rem;
-  outline: 1px solid #f3f8f7;
-  outline-offset: -1px;
+}
+
+.timeline-activity:focus-visible {
+  outline: 2px solid #69d1ba;
+  outline-offset: -2px;
 }
 
 .timeline-track input {
@@ -792,10 +814,13 @@ main {
   cursor: pointer;
 }
 
-.timeline-player-controls button:hover,
-.timeline-player-controls button:focus-visible {
+.timeline-player-controls button:hover {
   background: #8de2cf;
-  outline: none;
+}
+
+.timeline-player-controls button:focus-visible {
+  outline: 2px solid #69d1ba;
+  outline-offset: -2px;
 }
 
 .event-severity {
@@ -870,12 +895,16 @@ main {
 }
 
 .activity-filters button:hover,
-.activity-filters button:focus-visible,
 .activity-filters button.active {
   color: #0d1715;
   border-color: #69d1ba;
   background: #69d1ba;
   outline: none;
+}
+
+.activity-filters button:focus-visible {
+  outline: 2px solid #69d1ba;
+  outline-offset: -2px;
 }
 
 .recording-empty {
@@ -952,10 +981,14 @@ main {
     cursor: pointer;
   }
 
-  .event-toggle:hover,
-  .event-toggle:focus-visible {
+  .event-toggle:hover {
     border-color: #69d1ba;
     outline: none;
+  }
+
+  .event-toggle:focus-visible {
+    outline: 2px solid #69d1ba;
+    outline-offset: -2px;
   }
 
   .playback-modal {
