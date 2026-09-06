@@ -179,6 +179,14 @@ fn AllCamerasGrid(
     // `monitor.rs`'s own `session` field for the identical rationale.
     let resize_watcher = StoredValue::new_local(None::<GridResizeWatcher>);
 
+    // Not read yet -- issue #25's S3 renders this through the shared
+    // `RecordingScrubber`. Renaming the parameter itself to silence the
+    // "unused" warning would force every call site off its current
+    // `review_activity` shorthand (see `AllCamerasPlayback`'s own
+    // `<AllCamerasGrid .. review_activity />`), so this is a plain
+    // acknowledgment instead.
+    let _ = &review_activity;
+
     // One `LocalResource` per camera, in the same order as `cameras`,
     // moved here verbatim from `AllCameraTile`'s own former `LocalResource`
     // (D-3(a)). `AllCameraTile` now takes its own resource as an incoming
@@ -216,7 +224,8 @@ fn AllCamerasGrid(
     // is read unconditionally on each run (never short-circuited) so this
     // memo keeps tracking every one of them as a reactive dependency, even
     // while some are still `None`.
-    let merged_media: Memo<Option<RecordingMedia>> = {
+    // Not read yet -- issue #25's S3 wires this into `RecordingScrubber`.
+    let _merged_media: Memo<Option<RecordingMedia>> = {
         let resources = recording_media_resources.clone();
         Memo::new(move |_| {
             let statuses = resources.iter().map(LocalResource::get).collect::<Vec<_>>();
