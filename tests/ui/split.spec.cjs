@@ -286,6 +286,108 @@ test.describe("recording timeline", () => {
     );
   });
 
+  // Issue #22 item R3: exercises `TimelinePlayer`'s own seek/settle state
+  // machine (`pending_seek`/`on:seeked`/`tracks_playback`, `timeline.rs`)
+  // directly on the existing, unmodified single-camera player -- nothing
+  // else in this suite drives `seeking`/`seeked`/`currentTime` at all.
+  test("suppresses playhead progress mid-seek until the video reports it landed, then resumes", async ({
+    page,
+  }) => {
+    const video = page.locator(".timeline-player");
+    const playhead = page.getByRole("slider", { name: "Recording playhead" });
+    const scrubTo = (time) =>
+      playhead.evaluate((input, value) => {
+        input.value = value;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }, String(time));
+
+    // A real `<video>` never actually loads media under this suite's mocked,
+    // empty-body clip/preview routes, so `readyState`/`seeking`/`currentTime`
+    // are stubbed on this one element to drive the state machine directly,
+    // the same way this suite already dispatches synthetic `ended` events
+    // rather than waiting for real playback.
+    await video.evaluate((el) => {
+      el._time = 0;
+      el._seeking = false;
+      Object.defineProperty(el, "currentTime", {
+        configurable: true,
+        get: () => el._time,
+        set: (value) => {
+          el._requestedTime = value;
+        },
+      });
+      Object.defineProperty(el, "seeking", {
+        configurable: true,
+        get: () => el._seeking,
+      });
+      Object.defineProperty(el, "readyState", {
+        configurable: true,
+        get: () => 4,
+      });
+    });
+
+    // Baseline: this player's initial source is the full-hour preview
+    // (`start_time = now - 3600`); its initial playhead lands on
+    // `now - 510` (the earlier retained clip, confirmed by the "advances
+    // through each later activity" test above), an offset of
+    // `3600 - 510 = 3090` into that preview. Reporting the video already
+    // sitting there settles the player, exactly as a real `loadedmetadata`
+    // would when a freshly loaded source already sits close enough.
+    await video.evaluate((el) => {
+      el._time = 3090;
+    });
+    await video.dispatchEvent("loadedmetadata");
+
+    // A first scrub, not yet mid-seek: issues a real seek and reports
+    // unsettled (the "not already seeking" branch of `timeline.rs`'s own
+    // reconciliation, which calls `video.set_current_time` directly).
+    await scrubTo(now - 500);
+    await expect.poll(() => playhead.inputValue().then(Number)).toBeCloseTo(now - 500, 0);
+
+    // A second scrub while the (simulated) first seek is still in flight --
+    // the one branch that actually populates `pending_seek`, a path nothing
+    // in this suite exercised before this test.
+    await video.evaluate((el) => {
+      el._seeking = true;
+    });
+    await scrubTo(now - 200);
+    await expect.poll(() => playhead.inputValue().then(Number)).toBeCloseTo(now - 200, 0);
+
+    // Suppressed: a `timeupdate` while unsettled must not move the playhead,
+    // even though the video reports a plausible-looking later time.
+    await video.evaluate((el) => {
+      el._time = 3450;
+    });
+    await video.dispatchEvent("timeupdate");
+    await expect.poll(() => playhead.inputValue().then(Number)).toBeCloseTo(now - 200, 0);
+
+    // A landing outside `SETTLED_SEEK_TOLERANCE_SECONDS` (0.5s) re-issues
+    // the seek instead of accepting it, so playhead progress stays
+    // suppressed afterward too.
+    await video.evaluate((el) => {
+      el._time = 3405;
+      el._seeking = false;
+    });
+    await video.dispatchEvent("seeked");
+    await video.evaluate((el) => {
+      el._time = 3460;
+    });
+    await video.dispatchEvent("timeupdate");
+    await expect.poll(() => playhead.inputValue().then(Number)).toBeCloseTo(now - 200, 0);
+
+    // A landing within tolerance accepts it and resumes `timeupdate`-driven
+    // progress.
+    await video.evaluate((el) => {
+      el._time = 3400;
+    });
+    await video.dispatchEvent("seeked");
+    await video.evaluate((el) => {
+      el._time = 3415;
+    });
+    await video.dispatchEvent("timeupdate");
+    await expect.poll(() => playhead.inputValue().then(Number)).toBeCloseTo(now - 185, 0);
+  });
+
   // The playhead's own bounds are the window the track is showing, so their
   // span is what zooming changes.
   const visibleSeconds = async (page) => {

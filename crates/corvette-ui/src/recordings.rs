@@ -304,6 +304,7 @@ fn RecordingPlayback() -> impl IntoView {
                         start_time=range.start_time
                         end_time=range.end_time
                         cameras=context.cameras
+                        preview_clips=context.preview_clips
                     />
                 }
                 .into_any()

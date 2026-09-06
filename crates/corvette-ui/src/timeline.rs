@@ -506,14 +506,192 @@ const CLIP_END_MARGIN_SECONDS: f64 = 1.0;
 /// Keeps a final reported time inside its source without moving it visibly.
 const SOURCE_END_EPSILON_SECONDS: f64 = 0.001;
 
+/// Owns the signals `TimelinePlayer`'s seek/settle state machine reads and
+/// writes, so its own event handlers stay one call each. Moving toward a
+/// newly selected time either swaps the active source, issues a seek on the
+/// existing `<video>`, or queues one behind a seek already in flight
+/// (`pending_seek`); `on_loaded_metadata`/`on_seeked` react to the video's
+/// own confirmation that a seek landed.
+#[derive(Clone, Copy)]
+struct SeekReconciler {
+    video: NodeRef<leptos::html::Video>,
+    sources: StoredValue<(Vec<RecordingClip>, Vec<PreviewClip>)>,
+    active_source: RwSignal<Option<PlaybackSource>>,
+    pending_seek: RwSignal<Option<f64>>,
+    tracks_playback: RwSignal<bool>,
+    /// Mirrors `tracks_playback` for a caller with a per-tile "not yet
+    /// settled" indicator; absent for the single-camera call site.
+    settled: Option<RwSignal<bool>>,
+}
+
+impl SeekReconciler {
+    fn set_tracks_playback(self, value: bool) {
+        self.tracks_playback.set(value);
+        if let Some(settled) = self.settled {
+            settled.set(value);
+        }
+    }
+
+    /// Reacts to a change in `selected_time`/`uses_preview`.
+    fn reconcile(self, selected_time: f64, uses_preview: bool) {
+        let next_source = self.sources.with_value(|(clips, previews)| {
+            playback_source(clips, previews, selected_time, uses_preview)
+        });
+        let source_changed = self.active_source.with_untracked(|active| {
+            active.as_ref().map(|source| &source.url)
+                != next_source.as_ref().map(|source| &source.url)
+        });
+        if source_changed {
+            self.set_tracks_playback(false);
+            self.active_source.set(next_source);
+            return;
+        }
+
+        let Some(video) = self.video.get() else {
+            return;
+        };
+        if video.ready_state() == 0 {
+            return;
+        }
+        self.active_source.with_untracked(|source| {
+            let Some(source) = source else {
+                return;
+            };
+            let requested_offset = selected_time - source.start_time;
+            if (video.current_time() - requested_offset).abs() < SEEK_TOLERANCE_SECONDS {
+                return;
+            }
+            if video.seeking() {
+                self.pending_seek.set(Some(requested_offset));
+            } else {
+                self.set_tracks_playback(false);
+                video.set_current_time(requested_offset);
+            }
+        });
+    }
+
+    /// Reacts to the video's own `loadedmetadata` event.
+    fn on_loaded_metadata(self, video: &web_sys::HtmlVideoElement, selected_time: f64) {
+        self.active_source.with_untracked(|source| {
+            if let Some(source) = source {
+                let requested_offset = (selected_time - source.start_time).max(0.0);
+                if (video.current_time() - requested_offset).abs() >= SEEK_TOLERANCE_SECONDS {
+                    self.set_tracks_playback(false);
+                    video.set_current_time(requested_offset);
+                } else {
+                    self.set_tracks_playback(true);
+                }
+            }
+        });
+    }
+
+    /// Reacts to the video's own `seeked` event.
+    fn on_seeked(self, video: &web_sys::HtmlVideoElement) {
+        let Some(requested_offset) = self.pending_seek.get_untracked() else {
+            return;
+        };
+        if (video.current_time() - requested_offset).abs() >= SETTLED_SEEK_TOLERANCE_SECONDS {
+            video.set_current_time(requested_offset);
+        } else {
+            self.pending_seek.set(None);
+            self.set_tracks_playback(true);
+        }
+    }
+}
+
+/// Owns the signals the play/pause button and the video's own `play`/
+/// `timeupdate` events react to: switching from a muted preview to the
+/// full-resolution clip on the first real play, and following the playhead
+/// once `tracks_playback` says this player has settled.
+#[derive(Clone, Copy)]
+struct PlaybackControl {
+    video: NodeRef<leptos::html::Video>,
+    uses_preview: RwSignal<bool>,
+    starts_after_load: RwSignal<bool>,
+    is_playing: RwSignal<bool>,
+    playback_error: RwSignal<Option<String>>,
+    active_source: RwSignal<Option<PlaybackSource>>,
+    tracks_playback: RwSignal<bool>,
+    selected_time: RwSignal<f64>,
+    activity_playback: ActivityPlaybackState,
+}
+
+impl PlaybackControl {
+    /// Reacts to the play/pause button. Starting from a muted preview
+    /// switches the source to the full-resolution clip instead of playing
+    /// it directly; `on_play` starts real playback once that source loads.
+    fn toggle(self) {
+        let Some(video) = self.video.get() else {
+            return;
+        };
+        self.playback_error.set(None);
+        if video.paused() {
+            if self.uses_preview.get_untracked() {
+                self.starts_after_load.set(true);
+                self.uses_preview.set(false);
+                return;
+            }
+            if let Err(error) = video.play() {
+                self.playback_error
+                    .set(Some(format!("The recording could not start: {error:?}")));
+            }
+        } else if let Err(error) = video.pause() {
+            self.playback_error
+                .set(Some(format!("The recording could not pause: {error:?}")));
+        }
+    }
+
+    /// Reacts to the video's own `play` event: a muted preview immediately
+    /// pauses itself and switches to the full-resolution clip instead.
+    fn on_play(self) {
+        if self.uses_preview.get_untracked() {
+            if let Some(video) = self.video.get()
+                && let Err(error) = video.pause()
+            {
+                self.playback_error
+                    .set(Some(format!("The preview could not pause: {error:?}")));
+                return;
+            }
+            self.starts_after_load.set(true);
+            self.uses_preview.set(false);
+            return;
+        }
+        self.is_playing.set(true);
+    }
+
+    /// Reacts to the video's own `timeupdate` event: follows the playhead
+    /// while settled, ceding to `ActivityPlaybackState::advance` when a
+    /// clicked activity is playing through to its end.
+    fn on_timeupdate(self, video: &web_sys::HtmlVideoElement) {
+        if !self.tracks_playback.get_untracked() {
+            return;
+        }
+        if self.activity_playback.advance(video, false) {
+            return;
+        }
+        self.active_source.with_untracked(|source| {
+            if let Some(source) = source {
+                let playback_time = source.start_time + video.current_time();
+                self.selected_time
+                    .set(playback_time.min(source.end_time - CLIP_END_MARGIN_SECONDS));
+            }
+        });
+    }
+}
+
 #[component]
-fn TimelinePlayer(
+pub(crate) fn TimelinePlayer(
     clips: Vec<RecordingClip>,
     previews: Vec<PreviewClip>,
     activities: Vec<TimelineActivity>,
     active_activity: RwSignal<Option<TimelineActivity>>,
     selected_time: RwSignal<f64>,
     uses_preview: RwSignal<bool>,
+    /// Mirrors `tracks_playback` for a caller's own "not yet settled"
+    /// indicator; absent for the single-camera call site, which is
+    /// unaffected.
+    #[prop(optional)]
+    settled: Option<RwSignal<bool>>,
 ) -> impl IntoView {
     let video = NodeRef::<leptos::html::Video>::new();
     let initial_source = playback_source(&clips, &previews, selected_time.get_untracked(), true);
@@ -525,6 +703,14 @@ fn TimelinePlayer(
     let playback_error = RwSignal::new(None::<String>);
     let starts_after_load = RwSignal::new(false);
     let tracks_playback = RwSignal::new(false);
+    let seek = SeekReconciler {
+        video,
+        sources,
+        active_source,
+        pending_seek,
+        tracks_playback,
+        settled,
+    };
     let activity_playback = ActivityPlaybackState {
         sources,
         activities,
@@ -535,70 +721,26 @@ fn TimelinePlayer(
         tracks_playback,
         playback_error,
     };
+    let control = PlaybackControl {
+        video,
+        uses_preview,
+        starts_after_load,
+        is_playing,
+        playback_error,
+        active_source,
+        tracks_playback,
+        selected_time,
+        activity_playback,
+    };
 
     Effect::new(move |_| {
-        let selected_time = selected_time.get();
-        let uses_preview = uses_preview.get();
-        let next_source = sources.with_value(|(clips, previews)| {
-            playback_source(clips, previews, selected_time, uses_preview)
-        });
-        let source_changed = active_source.with_untracked(|active| {
-            active.as_ref().map(|source| &source.url)
-                != next_source.as_ref().map(|source| &source.url)
-        });
-        if source_changed {
-            tracks_playback.set(false);
-            active_source.set(next_source);
-            return;
-        }
-
-        let Some(video) = video.get() else {
-            return;
-        };
-        if video.ready_state() == 0 {
-            return;
-        }
-        active_source.with_untracked(|source| {
-            let Some(source) = source else {
-                return;
-            };
-            let requested_offset = selected_time - source.start_time;
-            if (video.current_time() - requested_offset).abs() < SEEK_TOLERANCE_SECONDS {
-                return;
-            }
-            if video.seeking() {
-                pending_seek.set(Some(requested_offset));
-            } else {
-                tracks_playback.set(false);
-                video.set_current_time(requested_offset);
-            }
-        });
+        seek.reconcile(selected_time.get(), uses_preview.get());
     });
 
     view! {
         <div class="timeline-player-controls">
-            <button type="button" on:click=move |_| {
-                let Some(video) = video.get() else {
-                    return;
-                };
-                playback_error.set(None);
-                if video.paused() {
-                    if uses_preview.get_untracked() {
-                        starts_after_load.set(true);
-                        uses_preview.set(false);
-                        return;
-                    }
-                    if let Err(error) = video.play() {
-                        playback_error.set(Some(format!(
-                            "The recording could not start: {error:?}",
-                        )));
-                    }
-                } else if let Err(error) = video.pause() {
-                    playback_error.set(Some(format!(
-                        "The recording could not pause: {error:?}",
-                    )));
-                }
-            }>{move || if is_playing.get() { "Pause" } else { "Play" }}</button>
+            <button type="button" on:click=move |_| control.toggle()
+            >{move || if is_playing.get() { "Pause" } else { "Play" }}</button>
         </div>
         <video
             node_ref=video
@@ -609,22 +751,7 @@ fn TimelinePlayer(
             muted
             controls
             playsinline
-            on:play=move |_| {
-                if uses_preview.get_untracked() {
-                    if let Some(video) = video.get()
-                        && let Err(error) = video.pause()
-                    {
-                        playback_error.set(Some(format!(
-                            "The preview could not pause: {error:?}",
-                        )));
-                        return;
-                    }
-                    starts_after_load.set(true);
-                    uses_preview.set(false);
-                    return;
-                }
-                is_playing.set(true);
-            }
+            on:play=move |_| control.on_play()
             on:pause=move |_| is_playing.set(false)
             on:ended=move |_| {
                 if let Some(video) = video.get() {
@@ -635,18 +762,7 @@ fn TimelinePlayer(
             let Some(video) = video.get() else {
                 return;
             };
-            active_source.with_untracked(|source| {
-                if let Some(source) = source {
-                    let requested_offset =
-                        (selected_time.get_untracked() - source.start_time).max(0.0);
-                    if (video.current_time() - requested_offset).abs() >= SEEK_TOLERANCE_SECONDS {
-                        tracks_playback.set(false);
-                        video.set_current_time(requested_offset);
-                    } else {
-                        tracks_playback.set(true);
-                    }
-                }
-            });
+            seek.on_loaded_metadata(&video, selected_time.get_untracked());
             if starts_after_load.get_untracked() {
                 starts_after_load.set(false);
                 if let Err(error) = video.play() {
@@ -660,33 +776,13 @@ fn TimelinePlayer(
             let Some(video) = video.get() else {
                 return;
             };
-            let Some(requested_offset) = pending_seek.get_untracked() else {
-                return;
-            };
-            if (video.current_time() - requested_offset).abs() >= SETTLED_SEEK_TOLERANCE_SECONDS {
-                video.set_current_time(requested_offset);
-            } else {
-                pending_seek.set(None);
-                tracks_playback.set(true);
-            }
+            seek.on_seeked(&video);
             }
             on:timeupdate=move |_| {
-            if !tracks_playback.get_untracked() {
-                return;
-            }
             let Some(video) = video.get() else {
                 return;
             };
-            if activity_playback.advance(&video, false) {
-                return;
-            }
-            active_source.with_untracked(|source| {
-                if let Some(source) = source {
-                    let playback_time = source.start_time + video.current_time();
-                    selected_time
-                        .set(playback_time.min(source.end_time - CLIP_END_MARGIN_SECONDS));
-                }
-            });
+            control.on_timeupdate(&video);
             }
         >"This browser cannot play the selected recording."</video>
         {move || playback_error.get().map(|error| view! {
@@ -752,14 +848,14 @@ impl ActivityPlaybackState {
 }
 
 #[derive(Clone)]
-struct PlaybackSource {
+pub(crate) struct PlaybackSource {
     url: String,
     poster: Option<String>,
     start_time: f64,
     end_time: f64,
 }
 
-fn playback_source(
+pub(crate) fn playback_source(
     clips: &[RecordingClip],
     previews: &[PreviewClip],
     time: f64,
@@ -786,14 +882,14 @@ fn playback_source(
     })
 }
 
-fn clip_at_time(clips: &[RecordingClip], time: f64) -> Option<RecordingClip> {
+pub(crate) fn clip_at_time(clips: &[RecordingClip], time: f64) -> Option<RecordingClip> {
     clips
         .iter()
         .find(|clip| clip.range.start_time <= time && time < clip.range.end_time)
         .cloned()
 }
 
-fn playable_time(clips: &[RecordingClip], requested_time: f64) -> f64 {
+pub(crate) fn playable_time(clips: &[RecordingClip], requested_time: f64) -> f64 {
     if clip_at_time(clips, requested_time).is_some() {
         return requested_time;
     }
@@ -885,7 +981,7 @@ fn next_timeline_activity(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct TimelineActivity {
+pub(crate) struct TimelineActivity {
     start_time: f64,
     end_time: f64,
 }

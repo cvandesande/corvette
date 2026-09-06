@@ -3,15 +3,24 @@ const { expect, test } = require(process.env.PLAYWRIGHT_TEST_PATH);
 // Issue #22 item R2's own Verify step: "All cameras" is now `/recordings`'
 // default camera selection (D-5), and choosing a preset in that mode packs
 // one placeholder tile per camera into `.all-cameras-grid` via
-// `monitor_layout::pack_tiles`, re-packing on resize (D-2(b)). Per-tile
-// video, the shared scrub position, and the no-footage placeholder are later
-// items (R3/R4) -- this file only exercises the grid shell R2 adds.
+// `monitor_layout::pack_tiles`, re-packing on resize (D-2(b)).
+//
+// Item R3 replaces those placeholders with real per-tile playback: one
+// shared scrub position drives N independent `TimelinePlayer` instances
+// (D-1(c)), each with its own "not yet settled" indicator and no cross-tile
+// barrier (D-1's rejected option (b)). The no-footage placeholder is a later
+// item (R4).
 
 const mockCameraConfig = (page, cameras) => {
   return Promise.all([
     page.route("**/api/config", (route) => route.fulfill({ json: { cameras } })),
     page.route("**/api/review?*", (route) => route.fulfill({ json: [] })),
     page.route("**/api/recordings/summary?*", (route) => route.fulfill({ json: {} })),
+    // "All" mode's own combined preview fetch (`camera == "all"`, F-13):
+    // every test below that loads a range triggers this regardless of
+    // whether it cares about previews, since R3's `AllCamerasPlayback` now
+    // gates its whole grid on this resolving alongside `cameras`.
+    page.route("**/api/preview/all/start/*/end/*", (route) => route.fulfill({ json: [] })),
   ]);
 };
 
@@ -126,7 +135,11 @@ for (const cameraCount of [2, 4, 5]) {
     const tiles = page.locator(".all-cameras-tile");
     await expect(tiles).toHaveCount(cameraCount);
     for (let index = 0; index < cameraCount; index += 1) {
-      await expect(tiles.nth(index)).toHaveText(`Camera ${index}`);
+      // `toContainText`, not an exact match: since R3, each tile also
+      // renders its own `TimelinePlayer` (a play/pause button and a
+      // `<video>` fallback-text node) alongside the camera name heading this
+      // assertion cares about.
+      await expect(tiles.nth(index)).toContainText(`Camera ${index}`);
     }
 
     await page.waitForFunction(
@@ -173,7 +186,9 @@ test("resizing the viewport after tiles render re-packs them to the new grid box
   assertTilesPackWithinGrid(await tileBoxes(page), gridBoxAfterResize);
 });
 
-test("All mode never requests a per-camera recordings endpoint", async ({ page }) => {
+test("All mode fetches each real camera's own recordings and never a synthetic \"all\" camera", async ({
+  page,
+}) => {
   const recordingsRequests = [];
   page.on("request", (request) => {
     const { pathname } = new URL(request.url());
@@ -183,14 +198,112 @@ test("All mode never requests a per-camera recordings endpoint", async ({ page }
   });
 
   await mockCameraConfig(page, nCameras(3));
+  await page.route("**/api/camera-*/recordings?*", (route) => route.fulfill({ json: [] }));
   await page.goto("/recordings");
   await page.getByRole("button", { name: "Last hour" }).click();
   await expect(page.locator(".all-cameras-tile")).toHaveCount(3);
 
-  // R2 renders placeholder tiles only -- no per-tile fetch exists yet (R3),
-  // so this is stricter than invariant 5 requires today: zero requests, not
-  // merely none naming a nonexistent "all" camera. The `/api/all/recordings`
-  // guard this item's own Do-3 step adds (`recordings.rs`) is what a
-  // regression here would actually be catching.
-  expect(recordingsRequests).toEqual([]);
+  // Since R3, each tile owns its own `fetch_recording_segments` call against
+  // its own real camera name (invariant 5) -- this is the item that first
+  // makes this request happen at all; R2 only ever asserted its absence.
+  await expect.poll(() => recordingsRequests.length).toBeGreaterThanOrEqual(3);
+  expect(recordingsRequests).not.toContain("/api/all/recordings");
+  expect(new Set(recordingsRequests)).toEqual(
+    new Set(["/api/camera-0/recordings", "/api/camera-1/recordings", "/api/camera-2/recordings"]),
+  );
+});
+
+test("moving the shared scrub updates each tile independently of the others' clip boundaries", async ({
+  page,
+}) => {
+  const now = Date.now() / 1000;
+  await mockCameraConfig(page, nCameras(2));
+  // camera-0 has a real gap between two retained clips at `now - 1800`..
+  // `now - 1700`; camera-1's own single clip spans the whole loaded range
+  // with no boundary to cross.
+  await page.route("**/api/camera-0/recordings?*", (route) =>
+    route.fulfill({
+      json: [
+        { start_time: now - 3500, end_time: now - 1800, motion: null },
+        { start_time: now - 1700, end_time: now - 100, motion: null },
+      ],
+    }),
+  );
+  await page.route("**/api/camera-1/recordings?*", (route) =>
+    route.fulfill({ json: [{ start_time: now - 3500, end_time: now - 100, motion: null }] }),
+  );
+
+  await page.goto("/recordings");
+  await page.getByRole("button", { name: "Last hour" }).click();
+  await expect(page.locator(".all-cameras-tile video")).toHaveCount(2);
+
+  const tileVideo = (camera) =>
+    page.locator(`.all-cameras-tile[data-camera="${camera}"] .timeline-player`);
+  const scrubTo = (time) =>
+    page.getByRole("slider", { name: "All-cameras playhead" }).evaluate((input, value) => {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, String(time));
+
+  await scrubTo(now - 3000);
+  await expect(tileVideo("camera-0")).toHaveAttribute(
+    "src",
+    `/api/camera-0/start/${now - 3500}/end/${now - 1800}/clip.mp4`,
+  );
+  await expect(tileVideo("camera-1")).toHaveAttribute(
+    "src",
+    `/api/camera-1/start/${now - 3500}/end/${now - 100}/clip.mp4`,
+  );
+
+  await scrubTo(now - 1600);
+  await expect(tileVideo("camera-0")).toHaveAttribute(
+    "src",
+    `/api/camera-0/start/${now - 1700}/end/${now - 100}/clip.mp4`,
+  );
+  // camera-1's own single continuous clip never had a boundary to cross, so
+  // its source stays exactly what it was -- proving the shared scrub drives
+  // each tile independently rather than through one shared player.
+  await expect(tileVideo("camera-1")).toHaveAttribute(
+    "src",
+    `/api/camera-1/start/${now - 3500}/end/${now - 100}/clip.mp4`,
+  );
+});
+
+test("the \"not yet settled\" indicator is independent per tile", async ({ page }) => {
+  await mockCameraConfig(page, nCameras(2));
+  // A segment clamped to the whole loaded range on both cameras, so each
+  // tile's initial source starts exactly at the shared scrub position (the
+  // loaded range's own start) -- its `requested_offset` is exactly `0`,
+  // which is also a real, un-stubbed `<video>`'s own default `currentTime`
+  // before any media loads.
+  await page.route("**/api/camera-0/recordings?*", (route) =>
+    route.fulfill({ json: [{ start_time: 0, end_time: 9_999_999_999, motion: null }] }),
+  );
+  await page.route("**/api/camera-1/recordings?*", (route) =>
+    route.fulfill({ json: [{ start_time: 0, end_time: 9_999_999_999, motion: null }] }),
+  );
+
+  await page.goto("/recordings");
+  await page.getByRole("button", { name: "Last hour" }).click();
+  await expect(page.locator(".all-cameras-tile video")).toHaveCount(2);
+
+  const unsettledIndicator = (camera) =>
+    page.locator(`.all-cameras-tile[data-camera="${camera}"] .all-cameras-tile-unsettled`);
+
+  // Neither tile's own <video> ever actually loads real media under this
+  // mock, so both tiles start -- and, absent any confirmation, stay -- "not
+  // yet settled" (D-1(c)'s own honest-signal requirement).
+  await expect(unsettledIndicator("camera-0")).toBeVisible();
+  await expect(unsettledIndicator("camera-1")).toBeVisible();
+
+  // Confirms only camera-0's own landing, exactly as a real `seeked`/
+  // `loadedmetadata` event would once this tile's source finishes loading.
+  await page
+    .locator('.all-cameras-tile[data-camera="camera-0"] video')
+    .dispatchEvent("loadedmetadata");
+
+  await expect(unsettledIndicator("camera-0")).toHaveCount(0);
+  // camera-1's own tile never received a confirming event and is still
+  // reporting unsettled -- no cross-tile barrier (D-1's rejected option (b)).
+  await expect(unsettledIndicator("camera-1")).toBeVisible();
 });

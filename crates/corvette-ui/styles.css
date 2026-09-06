@@ -1244,10 +1244,87 @@ main {
   position: absolute;
   top: 0;
   left: 0;
+  z-index: 1;
   margin: 0;
   padding: 0.3rem 0.6rem;
   font-size: 0.85rem;
   color: #e8eeee;
   background: rgb(16 21 22 / 68%);
   border-bottom-right-radius: 0.4rem;
+}
+
+/* Issue #22 item R3: each tile's own `TimelinePlayer` (`timeline.rs`, reused
+   unmodified) fills the tile rather than keeping its single-camera-page
+   sizing, whose fixed aspect ratio and viewport-relative max-height only
+   make sense as this whole page's own player, not one of N small tiles. */
+.all-cameras-tile .timeline-player-controls {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: 0;
+  margin: 0;
+  padding: 0.3rem;
+}
+
+.all-cameras-tile .timeline-player {
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto;
+  max-height: none;
+  object-fit: contain;
+}
+
+.all-cameras-tile-error {
+  position: absolute;
+  inset: auto 0.5rem 0.5rem;
+  z-index: 1;
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.75rem;
+  color: #f0c6bd;
+  background: rgb(40 28 26 / 85%);
+  border-radius: 0.4rem;
+}
+
+/* The shared scrub `AllCamerasPlayback` owns (D-1(c)): a plain range input,
+   deliberately simpler than `.timeline-track`'s own zoomable, span-annotated
+   track -- there is no per-camera availability/motion/review data to show in
+   aggregate here (this plan's own "Implementation-level choices" #2). */
+.all-cameras-scrub {
+  margin: 0 0 1rem;
+}
+
+.all-cameras-scrub input {
+  width: 100%;
+}
+
+/* A tile's own "not yet settled" indicator: shown while its `TimelinePlayer`
+   has not yet confirmed landing on the shared scrub position (D-1(c)'s own
+   honest-signal requirement). Independent per tile -- no cross-tile
+   barrier, D-1's rejected option (b). */
+.all-cameras-tile-unsettled {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: rgb(16 21 22 / 45%);
+}
+
+.all-cameras-tile-unsettled::before {
+  content: "";
+  width: 1.4rem;
+  height: 1.4rem;
+  border: 0.2rem solid rgb(232 238 238 / 35%);
+  border-top-color: #69d1ba;
+  border-radius: 50%;
+  animation: all-cameras-tile-unsettled-spin 0.8s linear infinite;
+}
+
+@keyframes all-cameras-tile-unsettled-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
