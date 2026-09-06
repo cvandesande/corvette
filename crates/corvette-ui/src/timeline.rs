@@ -65,8 +65,52 @@ pub(crate) fn RecordingTimeline(
     previews: Vec<PreviewClip>,
     reviews: Vec<ReviewSegment>,
 ) -> impl IntoView {
-    let selectable_clips = clips.clone();
     let playback_activities = timeline_activities(&motion_ranges, &reviews, range_start, range_end);
+    let active_activity = RwSignal::new(None::<TimelineActivity>);
+    let selected_time = RwSignal::new(playable_time(&clips, range_start));
+    let uses_preview = RwSignal::new(true);
+
+    view! {
+        <section class="recording-timeline" aria-label="Recording timeline">
+            <RecordingScrubber
+                range_start
+                range_end
+                clips=clips.clone()
+                motion_ranges
+                reviews
+                active_activity
+                selected_time
+                uses_preview
+                playhead_aria_label="Recording playhead".to_string()
+            />
+            <TimelinePlayer
+                clips
+                previews
+                activities=playback_activities
+                active_activity
+                selected_time
+                uses_preview
+            />
+        </section>
+    }
+}
+
+/// The track UI: the heading, the availability/motion/review spans, the
+/// playhead, and the zoomable scale beneath it. Owns its own pan/zoom `view`
+/// window internally -- nothing outside this component ever reads it.
+#[component]
+pub(crate) fn RecordingScrubber(
+    range_start: f64,
+    range_end: f64,
+    clips: Vec<RecordingClip>,
+    motion_ranges: Vec<RecordingRange>,
+    reviews: Vec<ReviewSegment>,
+    active_activity: RwSignal<Option<TimelineActivity>>,
+    selected_time: RwSignal<f64>,
+    uses_preview: RwSignal<bool>,
+    playhead_aria_label: String,
+) -> impl IntoView {
+    let selectable_clips = clips.clone();
     let bounds = TimelineView {
         start_time: range_start,
         end_time: range_end,
@@ -74,11 +118,10 @@ pub(crate) fn RecordingTimeline(
     let controls = TimelineControls {
         bounds,
         view: RwSignal::new(bounds),
-        active_activity: RwSignal::new(None::<TimelineActivity>),
-        selected_time: RwSignal::new(playable_time(&clips, range_start)),
-        uses_preview: RwSignal::new(true),
+        active_activity,
+        selected_time,
+        uses_preview,
     };
-    let selected_time = controls.selected_time;
     let view_window = controls.view;
     let track = NodeRef::<leptos::html::Div>::new();
     let gestures = TimelineGestures {
@@ -89,51 +132,41 @@ pub(crate) fn RecordingTimeline(
     };
 
     view! {
-        <section class="recording-timeline" aria-label="Recording timeline">
-            <div class="timeline-heading">
-                <h3>"Timeline"</h3>
-                <output>{move || format_event_time(selected_time.get())}</output>
-            </div>
-            <div
-                class="timeline-track"
-                node_ref=track
-                on:wheel=move |event| gestures.wheel(&event)
-                on:pointerdown=move |event| gestures.finger_down(&event)
-                on:pointermove=move |event| gestures.finger_moved(&event)
-                on:pointerup=move |event| gestures.finger_lifted(&event)
-                on:pointercancel=move |event| gestures.finger_lifted(&event)
-            >
-                <AvailabilitySpans clips=clips.clone() controls/>
-                <MotionSpans motion_ranges clips=clips.clone() controls/>
-                <ReviewMarkers reviews clips=clips.clone() controls/>
-                <input
-                    type="range"
-                    min=move || view_window.get().start_time
-                    max=move || view_window.get().end_time
-                    step="1"
-                    prop:value=move || selected_time.get()
-                    aria-label="Recording playhead"
-                    on:input=move |event| {
-                        let requested_time = event_target_value(&event)
-                            .parse::<f64>()
-                            .unwrap_or(range_start);
-                        controls.select(
-                            None,
-                            playable_time(&selectable_clips, requested_time),
-                        );
-                    }
-                />
-            </div>
-            <TimelineScale view=view_window/>
-            <TimelinePlayer
-                clips
-                previews
-                activities=playback_activities
-                active_activity=controls.active_activity
-                selected_time
-                uses_preview=controls.uses_preview
+        <div class="timeline-heading">
+            <h3>"Timeline"</h3>
+            <output>{move || format_event_time(selected_time.get())}</output>
+        </div>
+        <div
+            class="timeline-track"
+            node_ref=track
+            on:wheel=move |event| gestures.wheel(&event)
+            on:pointerdown=move |event| gestures.finger_down(&event)
+            on:pointermove=move |event| gestures.finger_moved(&event)
+            on:pointerup=move |event| gestures.finger_lifted(&event)
+            on:pointercancel=move |event| gestures.finger_lifted(&event)
+        >
+            <AvailabilitySpans clips=clips.clone() controls/>
+            <MotionSpans motion_ranges clips=clips.clone() controls/>
+            <ReviewMarkers reviews clips controls/>
+            <input
+                type="range"
+                min=move || view_window.get().start_time
+                max=move || view_window.get().end_time
+                step="1"
+                prop:value=move || selected_time.get()
+                aria-label=playhead_aria_label
+                on:input=move |event| {
+                    let requested_time = event_target_value(&event)
+                        .parse::<f64>()
+                        .unwrap_or(range_start);
+                    controls.select(
+                        None,
+                        snap_or_raw(&selectable_clips, requested_time),
+                    );
+                }
             />
-        </section>
+        </div>
+        <TimelineScale view=view_window/>
     }
 }
 
@@ -334,7 +367,7 @@ fn ReviewMarkers(
                 aria-label=label
                 on:click=move |_| controls.select(
                     Some(activity),
-                    playable_time(&click_clips, start_time),
+                    snap_or_raw(&click_clips, start_time),
                 )
             ></button> })
         })
@@ -909,6 +942,20 @@ pub(crate) fn playable_time(clips: &[RecordingClip], requested_time: f64) -> f64
         .expect("recording timeline requires at least one clip")
 }
 
+/// Snaps `requested_time` to `playable_time`'s own nearest-playable answer, or
+/// returns it unchanged when `clips` has nothing to snap to.
+///
+/// `playable_time` panics on an empty slice, which a merged "All cameras"
+/// clips list can legitimately be; every call into it from the track UI goes
+/// through this guard instead.
+pub(crate) fn snap_or_raw(clips: &[RecordingClip], requested_time: f64) -> f64 {
+    if clips.is_empty() {
+        requested_time
+    } else {
+        playable_time(clips, requested_time)
+    }
+}
+
 /// Positions the span `span_start..span_end` within the window
 /// `range_start..range_end` as CSS percentages.
 fn timeline_segment_style(
@@ -1013,6 +1060,38 @@ mod tests {
         assert!((playable_time(&clips, 140.0) - 150.0).abs() < f64::EPSILON);
         assert!((playable_time(&clips, 125.0) - 119.0).abs() < f64::EPSILON);
         assert!((playable_time(&clips, 180.0) - 179.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn snap_or_raw_returns_the_requested_time_unchanged_for_empty_clips() {
+        assert!((snap_or_raw(&[], 125.0) - 125.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn snap_or_raw_matches_playable_time_for_non_empty_clips() {
+        let clips = vec![
+            RecordingClip {
+                range: RecordingRange {
+                    camera: "front".to_owned(),
+                    start_time: 100.0,
+                    end_time: 120.0,
+                },
+            },
+            RecordingClip {
+                range: RecordingRange {
+                    camera: "front".to_owned(),
+                    start_time: 150.0,
+                    end_time: 180.0,
+                },
+            },
+        ];
+
+        for requested_time in [110.0, 140.0, 125.0, 180.0] {
+            assert!(
+                (snap_or_raw(&clips, requested_time) - playable_time(&clips, requested_time)).abs()
+                    < f64::EPSILON
+            );
+        }
     }
 
     #[test]
