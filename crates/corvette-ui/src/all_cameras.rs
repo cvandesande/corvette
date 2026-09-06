@@ -6,12 +6,20 @@
 //! viewport, so its own container's size can change after mount and the
 //! layout has to follow it.
 //!
-//! Issue #22 item R3 adds real playback: one shared `selected_time`/
+//! Issue #22 item R3 added real playback: one shared `selected_time`/
 //! `uses_preview` pair drives every tile's own, unmodified
 //! `crate::timeline::TimelinePlayer` (D-1(c)) -- N independent per-camera
 //! state machines, never a single shared player, and never a cross-tile
 //! barrier (D-1's rejected option (b)). Each tile owns its own recording
 //! segments fetch and its own "not yet settled" signal.
+//!
+//! Item R4 adds the per-tile no-footage representation D-3(d) chose: a
+//! camera with no retained recordings anywhere in the loaded range gets an
+//! explicit placeholder, and a camera with a real gap at the shared scrub
+//! position (but clips elsewhere in range) gets a dimmed still frame at its
+//! own nearest playable time, labeled with its signed offset from the shared
+//! scrub position. Both are recomputed reactively as `selected_time` moves,
+//! never by snapping the shared signal itself (D-3's rejected option (c)).
 
 use corvette_api::{Camera, PreviewClip};
 use leptos::html;
@@ -21,10 +29,10 @@ use wasm_bindgen::closure::Closure;
 use web_sys::{Element, ResizeObserver, ResizeObserverEntry};
 
 use crate::local_time::format_event_time;
-use crate::media::{RecordingRange, recording_media};
+use crate::media::{RecordingMedia, RecordingRange, recording_media};
 use crate::monitor_layout::{TileRect, pack_tiles};
 use crate::shell::{Status, StatusGlyph};
-use crate::timeline::TimelinePlayer;
+use crate::timeline::{TimelinePlayer, clip_at_time, playable_time};
 
 /// Renders every configured camera for the loaded range
 /// (`start_time`/`end_time`; the range's own `camera` field is always `"all"`
@@ -225,13 +233,14 @@ fn tile_placement_style(rect: TileRect) -> String {
 /// (Implementation-level choice 2), so nothing here needs it shared across
 /// tiles.
 ///
-/// This tile's own `settled` signal is independent of every other tile's --
-/// no cross-tile barrier, D-1's rejected option (b) -- and drives a CSS
-/// overlay shown while this tile's own `TimelinePlayer` has not yet
-/// confirmed landing on the shared scrub position. A camera with no
-/// recordings at all in the loaded range, or a real gap at the current scrub
-/// position, still renders `TimelinePlayer` as-is here; the dedicated
-/// no-footage placeholder is a later item (R4).
+/// A camera with no retained recordings anywhere in the loaded range, or a
+/// real gap at the shared scrub position, gets R4's own placeholder
+/// (`AllCameraTileContent`) instead of `TimelinePlayer` -- see that
+/// component's own doc comment for the three-way branch and D-3(d)'s
+/// no-footage representation. The "not yet settled" overlay (D-1(c)) only
+/// applies once a `TimelinePlayer` actually renders, so its own signal is
+/// created fresh inside `AllCameraTileContent`'s live branch rather than
+/// here.
 #[component]
 fn AllCameraTile(
     camera: Camera,
@@ -266,7 +275,7 @@ fn AllCameraTile(
             }
         }
     });
-    let settled = RwSignal::new(false);
+    let content_camera_name = camera_name.clone();
 
     view! {
         <div
@@ -277,26 +286,116 @@ fn AllCameraTile(
             }
         >
             <h2>{display_name}</h2>
-            {move || match recording_clips.get() {
-                None => ().into_any(),
-                Some(Err(error)) => view! {
-                    <p class="all-cameras-tile-error" role="alert">{error}</p>
-                }.into_any(),
-                Some(Ok(media)) => view! {
-                    <TimelinePlayer
-                        clips=media.clips
-                        previews=previews.clone()
-                        activities=Vec::new()
-                        active_activity=RwSignal::new(None)
-                        selected_time
-                        uses_preview
-                        settled=settled
-                    />
-                }.into_any(),
-            }}
-            {move || (!settled.get()).then(|| view! {
-                <div class="all-cameras-tile-unsettled" aria-hidden="true"></div>
-            })}
+            {
+                let camera_name = content_camera_name;
+                move || match recording_clips.get() {
+                    None => ().into_any(),
+                    Some(Err(error)) => view! {
+                        <p class="all-cameras-tile-error" role="alert">{error}</p>
+                    }.into_any(),
+                    Some(Ok(media)) => view! {
+                        <AllCameraTileContent
+                            media
+                            previews=previews.clone()
+                            camera_name=camera_name.clone()
+                            selected_time
+                            uses_preview
+                        />
+                    }.into_any(),
+                }
+            }
         </div>
     }
+}
+
+/// Branches on this camera's own retained clips against the shared scrub
+/// position, per D-3(d):
+///
+/// - `clips` empty (no retained recordings anywhere in the loaded range):
+///   an explicit "no recordings" placeholder, unconditionally -- a camera
+///   with `previews` but no `clips` still gets this placeholder rather than
+///   a preview-only render. Whether that combination should instead play
+///   the preview is an open product question, not decided here.
+/// - a real gap at the shared scrub position (`clip_at_time` finds nothing,
+///   but `clips` is non-empty so `playable_time` cannot panic): a dimmed
+///   still frame at the nearest playable time (`RecordingRange::poster_url`),
+///   labeled with its signed offset from the shared scrub position.
+/// - otherwise: `TimelinePlayer`, unmodified, exactly as R3 built it, with
+///   its own fresh "not yet settled" signal and overlay.
+///
+/// The gap/live branch is a `Memo` over `clip_at_time`'s own boolean result,
+/// not a plain reactive closure, so `TimelinePlayer` is mounted once per
+/// live span and is not torn down and rebuilt on every scrub tick that stays
+/// inside the same span -- only `Memo`'s change-detected transitions between
+/// "gap" and "live" remount it. The offset label's own text still updates on
+/// every tick while a gap is showing, since it reads `selected_time`
+/// directly.
+#[component]
+fn AllCameraTileContent(
+    media: RecordingMedia,
+    previews: Vec<PreviewClip>,
+    camera_name: String,
+    selected_time: RwSignal<f64>,
+    uses_preview: RwSignal<bool>,
+) -> impl IntoView {
+    if media.clips.is_empty() {
+        return view! {
+            <div class="all-cameras-tile-no-recordings" role="status">
+                <p>"No recordings for this camera in this range."</p>
+            </div>
+        }
+        .into_any();
+    }
+
+    let clips = media.clips;
+    let is_gap = Memo::new({
+        let clips = clips.clone();
+        move |_| clip_at_time(&clips, selected_time.get()).is_none()
+    });
+
+    view! {
+        {move || if is_gap.get() {
+            let nearest_time = playable_time(&clips, selected_time.get());
+            let offset_seconds = nearest_time - selected_time.get();
+            let poster = RecordingRange {
+                camera: camera_name.clone(),
+                start_time: nearest_time,
+                end_time: nearest_time,
+            }.poster_url();
+            view! {
+                <div class="all-cameras-tile-gap">
+                    <img class="all-cameras-tile-gap-preview" src=poster alt="" />
+                    <p class="all-cameras-tile-gap-offset">
+                        "No recording at this exact time (nearest "
+                        {format_gap_offset(offset_seconds)}
+                        ")"
+                    </p>
+                </div>
+            }.into_any()
+        } else {
+            let settled = RwSignal::new(false);
+            view! {
+                <TimelinePlayer
+                    clips=clips.clone()
+                    previews=previews.clone()
+                    activities=Vec::new()
+                    active_activity=RwSignal::new(None)
+                    selected_time
+                    uses_preview
+                    settled=settled
+                />
+                {move || (!settled.get()).then(|| view! {
+                    <div class="all-cameras-tile-unsettled" aria-hidden="true"></div>
+                })}
+            }.into_any()
+        }}
+    }
+    .into_any()
+}
+
+/// Renders a signed, whole-second offset from the shared scrub position to a
+/// gapped tile's own nearest playable frame, e.g. `"+12s"` when the nearest
+/// footage is later than the scrub position, `"-8s"` when it is earlier.
+fn format_gap_offset(offset_seconds: f64) -> String {
+    format!("{offset_seconds:+.0}s")
 }

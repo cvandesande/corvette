@@ -8,8 +8,14 @@ const { expect, test } = require(process.env.PLAYWRIGHT_TEST_PATH);
 // Item R3 replaces those placeholders with real per-tile playback: one
 // shared scrub position drives N independent `TimelinePlayer` instances
 // (D-1(c)), each with its own "not yet settled" indicator and no cross-tile
-// barrier (D-1's rejected option (b)). The no-footage placeholder is a later
-// item (R4).
+// barrier (D-1's rejected option (b)).
+//
+// Item R4 adds D-3(d)'s no-footage representation: a camera with zero
+// retained recordings anywhere in the loaded range gets an explicit
+// placeholder, and a camera with a real gap at the shared scrub position
+// (but clips elsewhere in range) gets a dimmed still frame at its own
+// nearest playable time, labeled with its signed offset from the scrub
+// position.
 
 const mockCameraConfig = (page, cameras) => {
   return Promise.all([
@@ -206,11 +212,16 @@ test("All mode fetches each real camera's own recordings and never a synthetic \
   // Since R3, each tile owns its own `fetch_recording_segments` call against
   // its own real camera name (invariant 5) -- this is the item that first
   // makes this request happen at all; R2 only ever asserted its absence.
-  await expect.poll(() => recordingsRequests.length).toBeGreaterThanOrEqual(3);
+  await expect.poll(() => recordingsRequests.length).toBe(3);
   expect(recordingsRequests).not.toContain("/api/all/recordings");
-  expect(new Set(recordingsRequests)).toEqual(
-    new Set(["/api/camera-0/recordings", "/api/camera-1/recordings", "/api/camera-2/recordings"]),
-  );
+  // A sorted-array comparison, not `Set` equality: invariant 5 requires each
+  // real camera fetched *exactly* once, and a `Set` would silently collapse
+  // a duplicate fetch for the same camera into the same membership result.
+  expect(recordingsRequests.slice().sort()).toEqual([
+    "/api/camera-0/recordings",
+    "/api/camera-1/recordings",
+    "/api/camera-2/recordings",
+  ]);
 });
 
 test("moving the shared scrub updates each tile independently of the others' clip boundaries", async ({
@@ -220,7 +231,11 @@ test("moving the shared scrub updates each tile independently of the others' cli
   await mockCameraConfig(page, nCameras(2));
   // camera-0 has a real gap between two retained clips at `now - 1800`..
   // `now - 1700`; camera-1's own single clip spans the whole loaded range
-  // with no boundary to cross.
+  // with no boundary to cross. Both cameras' own first clip starts 100
+  // seconds into the loaded range (`now - 3600`, "Last hour"), so both
+  // tiles start in R4's own gap state (D-3(d)) before the first scrub below
+  // -- neither camera has retained footage in that first sliver of the
+  // range.
   await page.route("**/api/camera-0/recordings?*", (route) =>
     route.fulfill({
       json: [
@@ -235,7 +250,6 @@ test("moving the shared scrub updates each tile independently of the others' cli
 
   await page.goto("/recordings");
   await page.getByRole("button", { name: "Last hour" }).click();
-  await expect(page.locator(".all-cameras-tile video")).toHaveCount(2);
 
   const tileVideo = (camera) =>
     page.locator(`.all-cameras-tile[data-camera="${camera}"] .timeline-player`);
@@ -245,7 +259,11 @@ test("moving the shared scrub updates each tile independently of the others' cli
       input.dispatchEvent(new Event("input", { bubbles: true }));
     }, String(time));
 
+  // Scrubs into both cameras' first clip, past R4's own initial gap state --
+  // the first point in this test both tiles are guaranteed to render a
+  // `TimelinePlayer` at all.
   await scrubTo(now - 3000);
+  await expect(page.locator(".all-cameras-tile video")).toHaveCount(2);
   await expect(tileVideo("camera-0")).toHaveAttribute(
     "src",
     `/api/camera-0/start/${now - 3500}/end/${now - 1800}/clip.mp4`,
@@ -306,4 +324,92 @@ test("the \"not yet settled\" indicator is independent per tile", async ({ page 
   // camera-1's own tile never received a confirming event and is still
   // reporting unsettled -- no cross-tile barrier (D-1's rejected option (b)).
   await expect(unsettledIndicator("camera-1")).toBeVisible();
+});
+
+test("a camera with no recordings anywhere in range shows the no-recordings placeholder", async ({
+  page,
+}) => {
+  await mockCameraConfig(page, nCameras(2));
+  // camera-0 has zero retained segments anywhere in the loaded range;
+  // camera-1 has full coverage, as a per-tile control.
+  await page.route("**/api/camera-0/recordings?*", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/camera-1/recordings?*", (route) =>
+    route.fulfill({ json: [{ start_time: 0, end_time: 9_999_999_999, motion: null }] }),
+  );
+
+  await page.goto("/recordings");
+  await page.getByRole("button", { name: "Last hour" }).click();
+
+  const tile = (camera) => page.locator(`.all-cameras-tile[data-camera="${camera}"]`);
+
+  await expect(tile("camera-0").locator(".all-cameras-tile-no-recordings")).toContainText(
+    "No recordings for this camera in this range.",
+  );
+  // Never falls through to a dimmed nearest-frame preview or a live player --
+  // `playable_time` is never even called on an empty `clips` list, which
+  // would otherwise panic (this item's own named premise).
+  await expect(tile("camera-0").locator(".all-cameras-tile-gap")).toHaveCount(0);
+  await expect(tile("camera-0").locator("video")).toHaveCount(0);
+
+  // camera-1's own full coverage is unaffected by camera-0's empty clips
+  // list -- the placeholder is per-tile, not page-wide.
+  await expect(tile("camera-1").locator("video")).toHaveCount(1);
+});
+
+test("a real gap at the scrubbed time shows a dimmed nearest-frame preview with a signed offset label", async ({
+  page,
+}) => {
+  const now = Date.now() / 1000;
+  await mockCameraConfig(page, nCameras(1));
+  // camera-0 has a real gap between two retained clips at `now - 1800`..
+  // `now - 1700`. The loaded range's own start (`now - 3600`, "Last hour")
+  // falls before either clip, so the tile starts in the gap state too.
+  await page.route("**/api/camera-0/recordings?*", (route) =>
+    route.fulfill({
+      json: [
+        { start_time: now - 3500, end_time: now - 1800, motion: null },
+        { start_time: now - 1700, end_time: now - 100, motion: null },
+      ],
+    }),
+  );
+
+  await page.goto("/recordings");
+  await page.getByRole("button", { name: "Last hour" }).click();
+
+  const tile = page.locator('.all-cameras-tile[data-camera="camera-0"]');
+  await expect(tile.locator(".all-cameras-tile-gap")).toBeVisible();
+
+  const scrubTo = (time) =>
+    page.getByRole("slider", { name: "All-cameras playhead" }).evaluate((input, value) => {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, String(time));
+
+  // Nearer to camera-0's second clip (starts `now - 1700`): the nearest
+  // footage is *later* than the scrub position, a positive offset.
+  await scrubTo(now - 1750);
+  await expect(tile.locator(".all-cameras-tile-gap-preview")).toHaveAttribute(
+    "src",
+    `/api/camera-0/recordings/${now - 1700}/snapshot.jpg?height=720`,
+  );
+  await expect(tile.locator(".all-cameras-tile-gap-offset")).toContainText("+50s");
+
+  // Nearer to camera-0's first clip's own end margin (`now - 1801`, one
+  // second inside the clip's own `now - 1800` end): the offset flips sign --
+  // the nearest footage is now *earlier* than the scrub position.
+  await scrubTo(now - 1795);
+  await expect(tile.locator(".all-cameras-tile-gap-preview")).toHaveAttribute(
+    "src",
+    `/api/camera-0/recordings/${now - 1801}/snapshot.jpg?height=720`,
+  );
+  await expect(tile.locator(".all-cameras-tile-gap-offset")).toContainText("-6s");
+
+  // Scrubbing back into real coverage removes the gap placeholder and
+  // renders the tile's own `TimelinePlayer` again -- the shared scrub
+  // position itself never snapped to camera-0's own nearest time while it
+  // was gapped (D-3's rejected option (c)); only this tile's own rendering
+  // reacted.
+  await scrubTo(now - 3000);
+  await expect(tile.locator(".all-cameras-tile-gap")).toHaveCount(0);
+  await expect(tile.locator("video")).toHaveCount(1);
 });

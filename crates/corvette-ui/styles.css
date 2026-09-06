@@ -1328,3 +1328,53 @@ main {
     transform: rotate(360deg);
   }
 }
+
+/* Issue #22 item R4, D-3(d): a camera with zero retained recordings anywhere
+   in the loaded range. Distinct from `.all-cameras-tile-gap` below (that
+   camera has footage nearby; this one has none in range at all) and from
+   `.all-cameras-tile-unsettled` above (a gap is a real absence, not a
+   still-loading state). */
+.all-cameras-tile-no-recordings {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.6rem;
+  text-align: center;
+  color: #a9b4b4;
+  background: #0b1011;
+}
+
+.all-cameras-tile-no-recordings p {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+/* A real gap at the shared scrub position, with footage elsewhere in range:
+   the nearest available frame, dimmed so it reads as "not this instant"
+   rather than as live video, plus its signed offset from the scrub
+   position (D-3(d)). */
+.all-cameras-tile-gap {
+  position: absolute;
+  inset: 0;
+}
+
+.all-cameras-tile-gap-preview {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0.45;
+  filter: grayscale(35%);
+}
+
+.all-cameras-tile-gap-offset {
+  position: absolute;
+  inset: auto 0.5rem 0.5rem;
+  margin: 0;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.75rem;
+  color: #e8eeee;
+  background: rgb(16 21 22 / 75%);
+  border-radius: 0.4rem;
+}
