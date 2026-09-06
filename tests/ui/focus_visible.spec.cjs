@@ -200,8 +200,8 @@ test.describe("recording timeline", () => {
     await page.route("**/api/review?*", (route) =>
       route.fulfill({
         json: [
-          { start_time: now - 1800, end_time: now - 1800, severity: "detection" },
-          { start_time: now - 200, end_time: now - 190, severity: "alert" },
+          { camera: "front", start_time: now - 1800, end_time: now - 1800, severity: "detection" },
+          { camera: "front", start_time: now - 200, end_time: now - 190, severity: "alert" },
         ],
       }),
     );
@@ -232,6 +232,10 @@ test.describe("recording timeline", () => {
 
     await page.goto("/recordings");
     await expect(page.locator(".calendar-grid button").first()).toBeEnabled();
+    // Recordings default to the all-cameras view (issue #22, D-5); select the
+    // single camera these tests target so "Last hour" lands on the
+    // single-camera RecordingTimeline rather than AllCamerasPlayback.
+    await page.getByRole("combobox", { name: "Camera" }).selectOption("front");
     await page.getByRole("button", { name: "Last hour" }).click();
     await expect(page.getByRole("region", { name: "Recording timeline" })).toBeVisible();
   });
