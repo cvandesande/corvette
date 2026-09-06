@@ -32,8 +32,19 @@
 //! anomaly. See `AllCameraTileContent`'s own doc comment for the full branch
 //! and `nearest_preview`, this module's previews-only mirror of
 //! `crate::timeline::playable_time`.
+//!
+//! Issue #25 item S2 hoists each tile's own `recording_clips` fetch
+//! (`fetch_recording_segments` reduced through `recording_media`) up into
+//! `AllCamerasGrid`, which now owns one `LocalResource` per camera and passes
+//! each tile its own resource by index -- `AllCameraTile` no longer creates
+//! its own. Once every camera's own resource has resolved, `AllCamerasGrid`
+//! folds every `Ok(media)` through `merge_recording_media` (D-4(a)'s true
+//! interval union for `clips`, D-6(a)'s plain concatenation for
+//! `motion_ranges`) into one shared union track. S3 renders that union
+//! through `crate::timeline::RecordingScrubber` as a sibling of this grid's
+//! own tiles; this item only builds the hoisted fetch and the merge itself.
 
-use corvette_api::{Camera, PreviewClip};
+use corvette_api::{Camera, PreviewClip, ReviewSegment};
 use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
@@ -41,10 +52,20 @@ use wasm_bindgen::closure::Closure;
 use web_sys::{Element, ResizeObserver, ResizeObserverEntry};
 
 use crate::local_time::format_event_time;
-use crate::media::{RecordingMedia, RecordingRange, recording_media};
+use crate::media::{RecordingMedia, RecordingRange, merge_recording_media, recording_media};
 use crate::monitor_layout::{TileRect, pack_tiles};
 use crate::shell::{Status, StatusGlyph};
 use crate::timeline::{TimelinePlayer, clip_at_time, playable_time};
+
+/// Placeholder camera name for merged availability spans that cannot
+/// honestly name one real camera (D-4(a)'s own named cost, D-5(b)'s "discard
+/// it" resolution) -- the same sentinel `recordings.rs`'s own private
+/// `ALL_CAMERAS` constant uses for "every camera at once" (`recordings.rs`).
+/// Not imported from there: that constant is private to `recordings.rs`, and
+/// G-12 confirms no consumer of a merged clip (`AvailabilitySpans`,
+/// `MotionSpans`, `ReviewMarkers`) ever reads it back, so it is not worth a
+/// visibility change to share one literal.
+const MERGED_CAMERA_PLACEHOLDER: &str = "all";
 
 /// Renders every configured camera for the loaded range
 /// (`start_time`/`end_time`; the range's own `camera` field is always `"all"`
@@ -62,6 +83,12 @@ pub(crate) fn AllCamerasPlayback(
     end_time: f64,
     cameras: LocalResource<Result<Vec<Camera>, String>>,
     preview_clips: LocalResource<Result<Vec<PreviewClip>, String>>,
+    /// `RecordingBrowser`'s already-fetched, already-combined "All" mode
+    /// reviews resource (`recordings.rs`'s `RecordingContext.review_activity`,
+    /// G-6) -- forwarded straight through with no transformation (D-6(a)),
+    /// never re-fetched or merged here. Nothing renders it yet (that is
+    /// issue #25's own S3); this item only threads it through.
+    review_activity: LocalResource<Result<Vec<ReviewSegment>, String>>,
 ) -> impl IntoView {
     let detail = format!(
         "{} – {}",
@@ -108,6 +135,7 @@ pub(crate) fn AllCamerasPlayback(
                     end_time
                     selected_time
                     uses_preview
+                    review_activity
                 />
             }.into_any(),
         }}
@@ -118,6 +146,15 @@ pub(crate) fn AllCamerasPlayback(
 /// on mount and again whenever that box resizes (D-2(b)) -- the resize-aware
 /// counterpart to `monitor.rs`'s `MonitorGrid`, which deliberately does not
 /// recompute on resize (that wall targets a fixed-size display loaded once).
+///
+/// Also owns every camera's own `recording_clips` fetch (hoisted here from
+/// `AllCameraTile`, D-3(a)) and folds them, once every one has resolved,
+/// through `merge_recording_media` into the shared union track issue #25's
+/// own `RecordingScrubber` renders (S3) -- no per-camera resource ever
+/// publishes its own resolved result back up through anything other than
+/// this component's own `merged_media` memo, keeping D-3(a)'s own named
+/// virtue (no child-to-parent publish of an async-resolved result) intact
+/// for both the fetches and their merge.
 #[component]
 fn AllCamerasGrid(
     cameras: Vec<Camera>,
@@ -126,6 +163,10 @@ fn AllCamerasGrid(
     end_time: f64,
     selected_time: RwSignal<f64>,
     uses_preview: RwSignal<bool>,
+    /// Forwarded straight through from `AllCamerasPlayback`, unread by
+    /// anything in this item -- issue #25's S3 renders it through the shared
+    /// `RecordingScrubber`.
+    review_activity: LocalResource<Result<Vec<ReviewSegment>, String>>,
 ) -> impl IntoView {
     let grid_container = NodeRef::<html::Div>::new();
     let camera_dims: Vec<(u32, u32)> = cameras
@@ -137,6 +178,58 @@ fn AllCamerasGrid(
     // still requires a `Send + Sync` closure regardless of target -- see
     // `monitor.rs`'s own `session` field for the identical rationale.
     let resize_watcher = StoredValue::new_local(None::<GridResizeWatcher>);
+
+    // One `LocalResource` per camera, in the same order as `cameras`,
+    // moved here verbatim from `AllCameraTile`'s own former `LocalResource`
+    // (D-3(a)). `AllCameraTile` now takes its own resource as an incoming
+    // prop instead of creating it.
+    let recording_media_resources: Vec<LocalResource<Result<RecordingMedia, String>>> = cameras
+        .iter()
+        .map(|camera| {
+            let camera_name = camera.name.clone();
+            LocalResource::new(move || {
+                let camera_name = camera_name.clone();
+                async move {
+                    crate::api::fetch_recording_segments(&camera_name, start_time, end_time)
+                        .await
+                        .map(|segments| {
+                            let range = RecordingRange {
+                                camera: camera_name,
+                                start_time,
+                                end_time,
+                            };
+                            recording_media(&range, segments)
+                        })
+                }
+            })
+        })
+        .collect();
+
+    // Waits for every camera's own resource to report `Some(_)` (`Ok` or
+    // `Err` -- an errored camera contributes nothing to the merge, the same
+    // tolerance `AllCameraTileContent`'s own per-tile error branch already
+    // shows) before folding them into one union track, rather than merging
+    // incrementally as each one resolves -- a plain-`Vec` prop change on
+    // `RecordingScrubber` would otherwise re-run its whole component
+    // function and reset its own pinch/zoom state on every straggling
+    // camera's resolution during initial load. Every resource's own `.get()`
+    // is read unconditionally on each run (never short-circuited) so this
+    // memo keeps tracking every one of them as a reactive dependency, even
+    // while some are still `None`.
+    let merged_media: Memo<Option<RecordingMedia>> = {
+        let resources = recording_media_resources.clone();
+        Memo::new(move |_| {
+            let statuses = resources.iter().map(LocalResource::get).collect::<Vec<_>>();
+            if statuses.iter().any(Option::is_none) {
+                return None;
+            }
+            let resolved = statuses
+                .into_iter()
+                .filter_map(|status| status.and_then(Result::ok))
+                .collect();
+            Some(merge_recording_media(MERGED_CAMERA_PLACEHOLDER, resolved))
+        })
+    };
 
     Effect::new(move |_| {
         let Some(container) = grid_container.get() else {
@@ -167,13 +260,13 @@ fn AllCamerasGrid(
                     .filter(|preview| preview.camera == camera.name)
                     .cloned()
                     .collect::<Vec<_>>();
+                let media = recording_media_resources[index];
                 view! {
                     <AllCameraTile
                         camera=camera
                         index=index
                         layout=layout
-                        start_time
-                        end_time
+                        media
                         previews=camera_previews
                         selected_time
                         uses_preview
@@ -233,17 +326,19 @@ fn tile_placement_style(rect: TileRect) -> String {
     )
 }
 
-/// One live tile: fetches this camera's own retained segments for the loaded
-/// range (`/{camera}/recordings` has no bulk form, F-12, so each tile owns
-/// its own `LocalResource`, matching this crate's existing
-/// one-resource-per-component idiom) and renders the existing single-camera
-/// `TimelinePlayer` (`crate::timeline`, unmodified) against them, following
-/// the shared `selected_time`/`uses_preview` signals `AllCamerasPlayback`
-/// owns -- the "one scrub position driving N tiles" mechanism D-1(c)
-/// describes. `active_activity` is this tile's own, permanently-`None`
-/// signal: "All" mode never plays a clicked activity through to its end
-/// (Implementation-level choice 2), so nothing here needs it shared across
-/// tiles.
+/// One live tile: renders the existing single-camera `TimelinePlayer`
+/// (`crate::timeline`, unmodified) against `media`, following the shared
+/// `selected_time`/`uses_preview` signals `AllCamerasPlayback` owns -- the
+/// "one scrub position driving N tiles" mechanism D-1(c) describes.
+/// `active_activity` is this tile's own, permanently-`None` signal: "All"
+/// mode never plays a clicked activity through to its end (Implementation-level
+/// choice 2), so nothing here needs it shared across tiles.
+///
+/// `media` is this camera's own `recording_clips` resource, hoisted up into
+/// (and created by) `AllCamerasGrid` (issue #25 S2, D-3(a)) rather than
+/// fetched here -- `/{camera}/recordings` has no bulk form (F-12), so
+/// `AllCamerasGrid` still creates one `LocalResource` per camera, just no
+/// longer inside this component.
 ///
 /// A camera with nothing at all retained in the loaded range, a camera with
 /// previews but no clips, or a real gap at the shared scrub position, gets
@@ -258,8 +353,7 @@ fn AllCameraTile(
     camera: Camera,
     index: usize,
     layout: RwSignal<Vec<TileRect>>,
-    start_time: f64,
-    end_time: f64,
+    media: LocalResource<Result<RecordingMedia, String>>,
     previews: Vec<PreviewClip>,
     selected_time: RwSignal<f64>,
     uses_preview: RwSignal<bool>,
@@ -269,24 +363,7 @@ fn AllCameraTile(
         display_name,
         ..
     } = camera;
-    let recording_clips = LocalResource::new({
-        let camera_name = camera_name.clone();
-        move || {
-            let camera_name = camera_name.clone();
-            async move {
-                crate::api::fetch_recording_segments(&camera_name, start_time, end_time)
-                    .await
-                    .map(|segments| {
-                        let range = RecordingRange {
-                            camera: camera_name,
-                            start_time,
-                            end_time,
-                        };
-                        recording_media(&range, segments)
-                    })
-            }
-        }
-    });
+    let recording_clips = media;
     let content_camera_name = camera_name.clone();
 
     view! {

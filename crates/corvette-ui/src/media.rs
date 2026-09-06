@@ -38,12 +38,16 @@ impl RecordingRange {
     }
 }
 
+/// Maximum gap, in seconds, between two otherwise-adjacent segments (or
+/// per-camera merged spans, see `merge_recording_media`) that
+/// `push_contiguous_range` still folds into one contiguous span rather than
+/// starting a new one.
+const MAX_SEGMENT_GAP_SECONDS: f64 = 1.0;
+
 pub(crate) fn recording_media(
     selection: &RecordingRange,
     mut segments: Vec<RecordingSegment>,
 ) -> RecordingMedia {
-    const MAX_SEGMENT_GAP_SECONDS: f64 = 1.0;
-
     segments.sort_by(|left, right| left.start_time.total_cmp(&right.start_time));
     let mut clip_ranges = Vec::<RecordingRange>::new();
     let mut motion_ranges = Vec::<RecordingRange>::new();
@@ -58,7 +62,7 @@ pub(crate) fn recording_media(
         if has_motion {
             push_contiguous_range(
                 &mut motion_ranges,
-                selection,
+                &selection.camera,
                 start_time,
                 end_time,
                 MAX_SEGMENT_GAP_SECONDS,
@@ -66,7 +70,7 @@ pub(crate) fn recording_media(
         }
         push_contiguous_range(
             &mut clip_ranges,
-            selection,
+            &selection.camera,
             start_time,
             end_time,
             MAX_SEGMENT_GAP_SECONDS,
@@ -83,9 +87,61 @@ pub(crate) fn recording_media(
     }
 }
 
+/// Merges every camera's own `RecordingMedia` (as `AllCamerasGrid`'s hoisted
+/// per-camera fetches resolve them) into one union track for the shared
+/// scrubber (D-4(a), D-6(a)). `clips`: concatenate every camera's own clips
+/// (each individually newest-first, per `recording_media`'s own
+/// `clips.reverse()` above -- no camera's own list arrives pre-sorted
+/// ascending, at any camera count), sort ascending by `range.start_time`,
+/// fold through the same `push_contiguous_range` `recording_media` itself
+/// uses, then reverse back to the newest-first convention every existing
+/// caller expects. `motion_ranges`: plain concatenation, no sort, no fold --
+/// order does not matter to `MotionSpans`' own independent-per-range
+/// rendering (D-6(a)).
+///
+/// `camera` is the merged spans' own placeholder `RecordingRange.camera`
+/// value: a union interval cannot honestly name one camera
+/// (`RecordingClip`/`RecordingRange` gain no attribution field, D-5(b)), and
+/// `AvailabilitySpans`/`MotionSpans`/`ReviewMarkers` never read a merged
+/// clip's own `camera` field (G-12), so any placeholder is structurally
+/// unread by anything this merge feeds.
+pub(crate) fn merge_recording_media(
+    camera: &str,
+    per_camera: Vec<RecordingMedia>,
+) -> RecordingMedia {
+    let mut clip_ranges = Vec::<RecordingRange>::new();
+    let mut motion_ranges = Vec::<RecordingRange>::new();
+    for media in per_camera {
+        clip_ranges.extend(media.clips.into_iter().map(|clip| clip.range));
+        motion_ranges.extend(media.motion_ranges);
+    }
+    clip_ranges.sort_by(|left, right| left.start_time.total_cmp(&right.start_time));
+
+    let mut merged_ranges = Vec::<RecordingRange>::new();
+    for range in clip_ranges {
+        push_contiguous_range(
+            &mut merged_ranges,
+            camera,
+            range.start_time,
+            range.end_time,
+            MAX_SEGMENT_GAP_SECONDS,
+        );
+    }
+    let mut clips = merged_ranges
+        .into_iter()
+        .map(|range| RecordingClip { range })
+        .collect::<Vec<_>>();
+    clips.reverse();
+
+    RecordingMedia {
+        clips,
+        motion_ranges,
+    }
+}
+
 fn push_contiguous_range(
     ranges: &mut Vec<RecordingRange>,
-    selection: &RecordingRange,
+    camera: &str,
     start_time: f64,
     end_time: f64,
     maximum_gap: f64,
@@ -97,7 +153,7 @@ fn push_contiguous_range(
         return;
     }
     ranges.push(RecordingRange {
-        camera: selection.camera.clone(),
+        camera: camera.to_owned(),
         start_time,
         end_time,
     });
@@ -213,6 +269,123 @@ mod tests {
                         end_time: 170.0,
                     },
                 ],
+            }
+        );
+    }
+
+    #[test]
+    fn merge_recording_media_unions_overlapping_availability_across_cameras() {
+        let camera_a = RecordingMedia {
+            clips: vec![RecordingClip {
+                range: RecordingRange {
+                    camera: "camera-a".to_owned(),
+                    start_time: 100.0,
+                    end_time: 160.0,
+                },
+            }],
+            motion_ranges: vec![RecordingRange {
+                camera: "camera-a".to_owned(),
+                start_time: 100.0,
+                end_time: 110.0,
+            }],
+        };
+        let camera_b = RecordingMedia {
+            clips: vec![RecordingClip {
+                range: RecordingRange {
+                    camera: "camera-b".to_owned(),
+                    start_time: 150.0,
+                    end_time: 200.0,
+                },
+            }],
+            motion_ranges: vec![RecordingRange {
+                camera: "camera-b".to_owned(),
+                start_time: 180.0,
+                end_time: 190.0,
+            }],
+        };
+
+        assert_eq!(
+            merge_recording_media("all", vec![camera_a, camera_b]),
+            RecordingMedia {
+                clips: vec![RecordingClip {
+                    range: RecordingRange {
+                        camera: "all".to_owned(),
+                        start_time: 100.0,
+                        end_time: 200.0,
+                    },
+                }],
+                // Plain concatenation (D-6(a)): each entry keeps its own
+                // camera and neither sort nor fold touches motion_ranges.
+                motion_ranges: vec![
+                    RecordingRange {
+                        camera: "camera-a".to_owned(),
+                        start_time: 100.0,
+                        end_time: 110.0,
+                    },
+                    RecordingRange {
+                        camera: "camera-b".to_owned(),
+                        start_time: 180.0,
+                        end_time: 190.0,
+                    },
+                ],
+            }
+        );
+    }
+
+    /// Regression test for D-4(a)'s own named risk: `recording_media` always
+    /// returns `clips` newest-first (never pre-sorted ascending), so a merge
+    /// across cameras must re-sort ascending before folding, not just
+    /// concatenate each camera's own newest-first list as-is. Here
+    /// `camera-a`'s own two clips are unrelated (a >100s gap apart) and
+    /// `camera-b`'s single clip bridges both of them; only sorting ascending
+    /// before the fold produces the one fully-merged span this test expects.
+    #[test]
+    fn merge_recording_media_sorts_ascending_before_folding_newest_first_per_camera_lists() {
+        let camera_a = RecordingMedia {
+            // Newest-first, exactly as `recording_media` itself returns:
+            // chronologically this camera's own clips are 100-150 then
+            // 260-300, listed here in reverse.
+            clips: vec![
+                RecordingClip {
+                    range: RecordingRange {
+                        camera: "camera-a".to_owned(),
+                        start_time: 260.0,
+                        end_time: 300.0,
+                    },
+                },
+                RecordingClip {
+                    range: RecordingRange {
+                        camera: "camera-a".to_owned(),
+                        start_time: 100.0,
+                        end_time: 150.0,
+                    },
+                },
+            ],
+            motion_ranges: Vec::new(),
+        };
+        let camera_b = RecordingMedia {
+            // Bridges the gap between camera-a's two spans.
+            clips: vec![RecordingClip {
+                range: RecordingRange {
+                    camera: "camera-b".to_owned(),
+                    start_time: 149.0,
+                    end_time: 261.0,
+                },
+            }],
+            motion_ranges: Vec::new(),
+        };
+
+        assert_eq!(
+            merge_recording_media("all", vec![camera_a, camera_b]),
+            RecordingMedia {
+                clips: vec![RecordingClip {
+                    range: RecordingRange {
+                        camera: "all".to_owned(),
+                        start_time: 100.0,
+                        end_time: 300.0,
+                    },
+                }],
+                motion_ranges: Vec::new(),
             }
         );
     }

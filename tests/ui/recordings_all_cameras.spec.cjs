@@ -228,6 +228,35 @@ test("All mode fetches each real camera's own recordings and never a synthetic \
   ]);
 });
 
+// Issue #25 item S2 (D-6(a), invariant 6): `RecordingContext.review_activity`
+// (`recordings.rs`) is one already-combined "All" mode resource, forwarded
+// straight through `AllCamerasPlayback`/`AllCamerasGrid` with no
+// transformation and never refetched or merged per camera -- this is the
+// first test that exercises "All" mode's own `/api/review` request count at
+// all, since `review_activity` was never forwarded to "All" mode before this
+// item.
+for (const cameraCount of [1, 3]) {
+  test(`All mode requests /api/review exactly once regardless of camera count (${cameraCount} cameras)`, async ({
+    page,
+  }) => {
+    const reviewRequests = [];
+    page.on("request", (request) => {
+      const { pathname } = new URL(request.url());
+      if (pathname === "/api/review") {
+        reviewRequests.push(request.url());
+      }
+    });
+
+    await mockCameraConfig(page, nCameras(cameraCount));
+    await page.route("**/api/camera-*/recordings?*", (route) => route.fulfill({ json: [] }));
+    await page.goto("/recordings");
+    await page.getByRole("button", { name: "Last hour" }).click();
+    await expect(page.locator(".all-cameras-tile")).toHaveCount(cameraCount);
+
+    await expect.poll(() => reviewRequests.length).toBe(1);
+  });
+}
+
 test("moving the shared scrub updates each tile independently of the others' clip boundaries", async ({
   page,
 }) => {
