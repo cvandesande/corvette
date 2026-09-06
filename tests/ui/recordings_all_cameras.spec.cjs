@@ -15,7 +15,11 @@ const { expect, test } = require(process.env.PLAYWRIGHT_TEST_PATH);
 // placeholder, and a camera with a real gap at the shared scrub position
 // (but clips elsewhere in range) gets a dimmed still frame at its own
 // nearest playable time, labeled with its signed offset from the scrub
-// position.
+// position. Resolved 2026-09-06 (a targeted fix after independent review):
+// a camera with previews but no clips at all gets the SAME gap treatment,
+// sourced from its nearest preview instead -- Frigate prunes recording
+// clips and preview intervals independently per `retain.mode`, so a
+// surviving preview with no surviving clip is routine, not an anomaly.
 
 const mockCameraConfig = (page, cameras) => {
   return Promise.all([
@@ -330,8 +334,13 @@ test("a camera with no recordings anywhere in range shows the no-recordings plac
   page,
 }) => {
   await mockCameraConfig(page, nCameras(2));
-  // camera-0 has zero retained segments anywhere in the loaded range;
-  // camera-1 has full coverage, as a per-tile control.
+  // camera-0 has zero retained segments anywhere in the loaded range, and
+  // (via `mockCameraConfig`'s own empty-json "All" preview route) zero
+  // previews either -- the plain no-recordings placeholder is reserved for
+  // this genuinely-nothing-here combination (R4's targeted fix, resolved
+  // 2026-09-06: clips-empty-but-previews-non-empty gets the gap treatment
+  // instead, see the dedicated test below). camera-1 has full coverage, as
+  // a per-tile control.
   await page.route("**/api/camera-0/recordings?*", (route) => route.fulfill({ json: [] }));
   await page.route("**/api/camera-1/recordings?*", (route) =>
     route.fulfill({ json: [{ start_time: 0, end_time: 9_999_999_999, motion: null }] }),
@@ -412,4 +421,73 @@ test("a real gap at the scrubbed time shows a dimmed nearest-frame preview with 
   await scrubTo(now - 3000);
   await expect(tile.locator(".all-cameras-tile-gap")).toHaveCount(0);
   await expect(tile.locator("video")).toHaveCount(1);
+});
+
+test("a camera with previews but no clips gets the gap treatment, not the no-recordings placeholder", async ({
+  page,
+}) => {
+  const now = Date.now() / 1000;
+  await mockCameraConfig(page, nCameras(1));
+  // camera-0 has zero retained recording clips anywhere in the loaded
+  // range, but Frigate still retained a low-res preview covering part of
+  // it -- Frigate prunes recording segments and preview intervals
+  // independently per `retain.mode` (`frigate/record/cleanup.py:150-260`
+  // at v0.17.2), so a preview outliving its camera's last recording clip
+  // is a routine, expected outcome of a non-`all` retain mode, not an
+  // anomaly (R4's targeted fix, resolved 2026-09-06 STOP-AND-ASK gate).
+  await page.route("**/api/camera-0/recordings?*", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/preview/all/start/*/end/*", (route) =>
+    route.fulfill({
+      json: [
+        {
+          camera: "camera-0",
+          src: "/clips/previews/camera-0/hour.mp4",
+          type: "video/mp4",
+          start: now - 1800,
+          end: now - 1700,
+        },
+      ],
+    }),
+  );
+
+  await page.goto("/recordings");
+  await page.getByRole("button", { name: "Last hour" }).click();
+
+  const tile = page.locator('.all-cameras-tile[data-camera="camera-0"]');
+  // Never the plain no-recordings placeholder -- there genuinely is a
+  // usable preview frame, per the resolved decision.
+  await expect(tile.locator(".all-cameras-tile-no-recordings")).toHaveCount(0);
+  // Never a live `TimelinePlayer` either -- there is no full-resolution
+  // clip for this camera to play at all.
+  await expect(tile.locator(".timeline-player")).toHaveCount(0);
+  await expect(tile.locator(".all-cameras-tile-gap")).toBeVisible();
+
+  const scrubTo = (time) =>
+    page.getByRole("slider", { name: "All-cameras playhead" }).evaluate((input, value) => {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, String(time));
+
+  // Before the preview's own span: the nearest playable instant is the
+  // preview's own start, later than the scrub position -- a positive
+  // offset, and the preview video's own `#t=` fragment points at its
+  // first frame (offset `0` within the preview).
+  await scrubTo(now - 2000);
+  await expect(tile.locator(".all-cameras-tile-gap-preview")).toHaveAttribute(
+    "src",
+    "/clips/previews/camera-0/hour.mp4#t=0.000",
+  );
+  await expect(tile.locator(".all-cameras-tile-gap-offset")).toContainText("+200s");
+
+  // After the preview's own span: the nearest playable instant stops one
+  // second short of its exclusive end (mirroring `playable_time`'s own
+  // `CLIP_END_MARGIN_SECONDS` margin), earlier than the scrub position --
+  // the offset flips sign, and the `#t=` fragment moves to 99s into the
+  // 100-second preview.
+  await scrubTo(now - 1600);
+  await expect(tile.locator(".all-cameras-tile-gap-preview")).toHaveAttribute(
+    "src",
+    "/clips/previews/camera-0/hour.mp4#t=99.000",
+  );
+  await expect(tile.locator(".all-cameras-tile-gap-offset")).toContainText("-101s");
 });

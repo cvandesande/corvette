@@ -20,6 +20,18 @@
 //! own nearest playable time, labeled with its signed offset from the shared
 //! scrub position. Both are recomputed reactively as `selected_time` moves,
 //! never by snapping the shared signal itself (D-3's rejected option (c)).
+//!
+//! Resolved 2026-09-06 (`.agents/issue-22/PLAN-all-cameras-scrubber.md`'s
+//! STOP-AND-ASK gates, `REVIEW-R4.md`): a camera whose `clips` list is empty
+//! but whose `previews` list is not gets the SAME gap treatment as above --
+//! a dimmed nearest-frame preview and offset label -- rather than the plain
+//! no-recordings placeholder, since Frigate prunes recording segments and
+//! preview intervals independently per `retain.mode`
+//! (`frigate/record/cleanup.py:150-260` at `v0.17.2`) and a preview
+//! outliving its camera's last recording clip is a routine outcome, not an
+//! anomaly. See `AllCameraTileContent`'s own doc comment for the full branch
+//! and `nearest_preview`, this module's previews-only mirror of
+//! `crate::timeline::playable_time`.
 
 use corvette_api::{Camera, PreviewClip};
 use leptos::html;
@@ -233,10 +245,10 @@ fn tile_placement_style(rect: TileRect) -> String {
 /// (Implementation-level choice 2), so nothing here needs it shared across
 /// tiles.
 ///
-/// A camera with no retained recordings anywhere in the loaded range, or a
-/// real gap at the shared scrub position, gets R4's own placeholder
-/// (`AllCameraTileContent`) instead of `TimelinePlayer` -- see that
-/// component's own doc comment for the three-way branch and D-3(d)'s
+/// A camera with nothing at all retained in the loaded range, a camera with
+/// previews but no clips, or a real gap at the shared scrub position, gets
+/// R4's own placeholder (`AllCameraTileContent`) instead of `TimelinePlayer`
+/// -- see that component's own doc comment for the full branch and D-3(d)'s
 /// no-footage representation. The "not yet settled" overlay (D-1(c)) only
 /// applies once a `TimelinePlayer` actually renders, so its own signal is
 /// created fresh inside `AllCameraTileContent`'s live branch rather than
@@ -308,28 +320,45 @@ fn AllCameraTile(
     }
 }
 
-/// Branches on this camera's own retained clips against the shared scrub
+/// Branches on this camera's own retained clips (and, since 2026-09-06's
+/// resolved STOP-AND-ASK gate, its previews) against the shared scrub
 /// position, per D-3(d):
 ///
-/// - `clips` empty (no retained recordings anywhere in the loaded range):
-///   an explicit "no recordings" placeholder, unconditionally -- a camera
-///   with `previews` but no `clips` still gets this placeholder rather than
-///   a preview-only render. Whether that combination should instead play
-///   the preview is an open product question, not decided here.
-/// - a real gap at the shared scrub position (`clip_at_time` finds nothing,
-///   but `clips` is non-empty so `playable_time` cannot panic): a dimmed
-///   still frame at the nearest playable time (`RecordingRange::poster_url`),
-///   labeled with its signed offset from the shared scrub position.
+/// - `clips` and `previews` both empty (nothing retained for this camera
+///   anywhere in the loaded range): an explicit "no recordings" placeholder.
+/// - `clips` empty but `previews` non-empty: the SAME dimmed-preview +
+///   signed-offset-label treatment as the ordinary gap case below, sourced
+///   from `nearest_preview` (this module's own previews-only mirror of
+///   `playable_time`) instead, since `playable_time` panics via
+///   `.expect(...)` on an empty `clips` slice
+///   (`crate::timeline::playable_time`, unmodified, per this item's Scope
+///   guard). Resolved 2026-09-06
+///   (`.agents/issue-22/PLAN-all-cameras-scrubber.md`'s STOP-AND-ASK gates,
+///   `REVIEW-R4.md`): Frigate prunes recording segments and preview
+///   intervals independently per `retain.mode`
+///   (`frigate/record/cleanup.py:150-260` at `v0.17.2`), so a preview
+///   outliving its camera's last recording clip is a routine outcome of a
+///   non-`all` retain mode, not an anomaly -- there genuinely is a usable
+///   preview frame here, so it is shown rather than hidden behind the plain
+///   no-recordings placeholder.
+/// - `clips` non-empty but a real gap at the shared scrub position
+///   (`clip_at_time` finds nothing, but `clips` is non-empty so
+///   `playable_time` cannot panic): a dimmed still frame at the nearest
+///   playable time (`RecordingRange::poster_url`), labeled with its signed
+///   offset from the shared scrub position.
 /// - otherwise: `TimelinePlayer`, unmodified, exactly as R3 built it, with
 ///   its own fresh "not yet settled" signal and overlay.
 ///
-/// The gap/live branch is a `Memo` over `clip_at_time`'s own boolean result,
-/// not a plain reactive closure, so `TimelinePlayer` is mounted once per
-/// live span and is not torn down and rebuilt on every scrub tick that stays
-/// inside the same span -- only `Memo`'s change-detected transitions between
-/// "gap" and "live" remount it. The offset label's own text still updates on
-/// every tick while a gap is showing, since it reads `selected_time`
-/// directly.
+/// The clips-based gap/live branch is a `Memo` over `clip_at_time`'s own
+/// boolean result, not a plain reactive closure, so `TimelinePlayer` is
+/// mounted once per live span and is not torn down and rebuilt on every
+/// scrub tick that stays inside the same span -- only `Memo`'s
+/// change-detected transitions between "gap" and "live" remount it. The
+/// previews-only branch has no such transition to guard (it is the only
+/// view this camera ever renders, for its own lifetime, once `clips` is
+/// known empty), so it is a plain reactive closure. Both gap-style
+/// branches' offset labels still update on every tick while showing, since
+/// they read `selected_time` directly.
 #[component]
 fn AllCameraTileContent(
     media: RecordingMedia,
@@ -339,10 +368,56 @@ fn AllCameraTileContent(
     uses_preview: RwSignal<bool>,
 ) -> impl IntoView {
     if media.clips.is_empty() {
+        if previews.is_empty() {
+            return view! {
+                <div class="all-cameras-tile-no-recordings" role="status">
+                    <p>"No recordings for this camera in this range."</p>
+                </div>
+            }
+            .into_any();
+        }
+
         return view! {
-            <div class="all-cameras-tile-no-recordings" role="status">
-                <p>"No recordings for this camera in this range."</p>
-            </div>
+            {move || {
+                let Some((preview, nearest_time)) =
+                    nearest_preview(&previews, selected_time.get())
+                else {
+                    // Structurally unreachable: this branch only renders
+                    // when `previews` is confirmed non-empty above.
+                    return ().into_any();
+                };
+                let offset_seconds = nearest_time - selected_time.get();
+                // Requests the actual low-res preview video Frigate already
+                // retained, paused at the nearest playable instant via the
+                // standard Media Fragments URI temporal dimension
+                // (https://www.w3.org/TR/media-frags/#naming-time) -- the
+                // same "encode the moment in the URL" idiom
+                // `RecordingRange::poster_url`/`clip_url` already use, with
+                // no new JS seek wiring. Frigate's own recordings-snapshot
+                // endpoint (`GET /{camera}/recordings/{frame_time}/
+                // snapshot.{format}`, v0.17.2) cannot be reused here: it
+                // looks up its frame in the `Recordings` table and 404s
+                // when this camera has no retained recording clip at all.
+                let offset_in_preview = (nearest_time - preview.start).max(0.0);
+                let video_src = format!("{}#t={offset_in_preview:.3}", preview.src);
+                view! {
+                    <div class="all-cameras-tile-gap">
+                        <video
+                            class="all-cameras-tile-gap-preview"
+                            src=video_src
+                            muted
+                            playsinline
+                            preload="auto"
+                        ></video>
+                        <p class="all-cameras-tile-gap-offset">
+                            "No recording at this exact time (nearest "
+                            {format_gap_offset(offset_seconds)}
+                            ")"
+                        </p>
+                    </div>
+                }
+                .into_any()
+            }}
         }
         .into_any();
     }
@@ -398,4 +473,99 @@ fn AllCameraTileContent(
 /// footage is later than the scrub position, `"-8s"` when it is earlier.
 fn format_gap_offset(offset_seconds: f64) -> String {
     format!("{offset_seconds:+.0}s")
+}
+
+/// A preview's own `end` is exclusive (mirrors `playback_source`'s own
+/// preview match, `crate::timeline`'s `preview.start <= time && time <
+/// preview.end`), so the nearest-preview computation below stays this far
+/// short of it -- the previews-only counterpart of `crate::timeline`'s own
+/// `CLIP_END_MARGIN_SECONDS`. Not reused directly: that constant is private
+/// to `timeline.rs`, and this item's Scope guard forbids editing that module.
+const PREVIEW_END_MARGIN_SECONDS: f64 = 1.0;
+
+/// Mirrors `crate::timeline::playable_time`'s own logic and shape
+/// (unmodified, per this item's Scope guard), but reasons over
+/// `&[PreviewClip]` instead of `&[RecordingClip]` -- there is no
+/// previews-vs-clips adapter in `timeline.rs`, and `playable_time` itself
+/// panics via `.expect(...)` on an empty `clips` slice, so it cannot be
+/// called for a camera whose `clips` list is empty. Callers only invoke this
+/// once `previews` is confirmed non-empty (`AllCameraTileContent`'s own
+/// guard); `None` here would only mean `previews` was itself empty.
+///
+/// Returns the nearest preview that covers, or is closest to, `requested_time`,
+/// paired with the playable instant within it -- the exact `requested_time`
+/// itself when some preview already covers it, otherwise the closest instant
+/// clamped inside a preview's own `start..end - PREVIEW_END_MARGIN_SECONDS`
+/// span, same tie-breaking as `playable_time` (`total_cmp` on absolute
+/// distance).
+fn nearest_preview(previews: &[PreviewClip], requested_time: f64) -> Option<(PreviewClip, f64)> {
+    if let Some(preview) = previews
+        .iter()
+        .find(|preview| preview.start <= requested_time && requested_time < preview.end)
+    {
+        return Some((preview.clone(), requested_time));
+    }
+
+    previews
+        .iter()
+        .map(|preview| {
+            let last_playable_time = (preview.end - PREVIEW_END_MARGIN_SECONDS).max(preview.start);
+            (
+                preview.clone(),
+                requested_time.clamp(preview.start, last_playable_time),
+            )
+        })
+        .min_by(|(_, left), (_, right)| {
+            (left - requested_time)
+                .abs()
+                .total_cmp(&(right - requested_time).abs())
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn preview(camera: &str, start: f64, end: f64) -> PreviewClip {
+        PreviewClip {
+            camera: camera.to_owned(),
+            src: format!("/clips/previews/{camera}/{start}-{end}.mp4"),
+            media_type: "video/mp4".to_owned(),
+            start,
+            end,
+        }
+    }
+
+    #[test]
+    fn nearest_preview_returns_the_requested_time_when_already_covered() {
+        let previews = vec![preview("front", 100.0, 200.0)];
+        let (found, nearest_time) = nearest_preview(&previews, 150.0).unwrap();
+        assert_eq!(found.src, previews[0].src);
+        assert!((nearest_time - 150.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn nearest_preview_snaps_to_the_nearest_covering_preview_on_a_gap() {
+        let previews = vec![
+            preview("front", 100.0, 120.0),
+            preview("front", 150.0, 180.0),
+        ];
+
+        let (found, nearest_time) = nearest_preview(&previews, 140.0).unwrap();
+        assert_eq!(found.src, previews[1].src);
+        assert!((nearest_time - 150.0).abs() < f64::EPSILON);
+
+        let (found, nearest_time) = nearest_preview(&previews, 125.0).unwrap();
+        assert_eq!(found.src, previews[0].src);
+        assert!((nearest_time - 119.0).abs() < f64::EPSILON);
+
+        let (found, nearest_time) = nearest_preview(&previews, 180.5).unwrap();
+        assert_eq!(found.src, previews[1].src);
+        assert!((nearest_time - 179.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn nearest_preview_returns_none_for_no_previews() {
+        assert!(nearest_preview(&[], 100.0).is_none());
+    }
 }
