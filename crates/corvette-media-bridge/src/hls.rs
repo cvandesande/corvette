@@ -97,7 +97,7 @@
 //! simply opens a new connection each time, at the cost of one extra TCP
 //! handshake per request this minimal server does not attempt to avoid.
 
-use crate::fmp4::{Fragment, InitSegmentTracker, Fragmenter};
+use crate::fmp4::{Fragment, Fragmenter, InitSegmentTracker};
 use crate::rtp_clock::VIDEO_CLOCK_RATE_HZ;
 use crate::supervise::log_event;
 use bytes::{Bytes, BytesMut};
@@ -243,7 +243,10 @@ struct CameraHls {
 
 impl CameraHls {
     fn set_init(&self, segment: Bytes) {
-        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).init = Some(segment);
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .init = Some(segment);
     }
 
     /// Assigns `finished` the next sequence number this camera has ever
@@ -688,9 +691,7 @@ fn route(path: &str, store: &MultiCameraHlsStore) -> Response {
         return Response::not_found("no such camera is configured");
     };
     let Some(resource) = parse_resource(resource) else {
-        return Response::not_found(
-            "expected playlist.m3u8, init.mp4, or segment-<sequence>.m4s",
-        );
+        return Response::not_found("expected playlist.m3u8, init.mp4, or segment-<sequence>.m4s");
     };
 
     match resource {
@@ -711,7 +712,11 @@ fn route(path: &str, store: &MultiCameraHlsStore) -> Response {
             },
         ),
         Resource::Segment(sequence) => camera.segment_bytes(sequence).map_or_else(
-            || Response::not_found("no such segment (already rolled out of the live window, or never produced)"),
+            || {
+                Response::not_found(
+                    "no such segment (already rolled out of the live window, or never produced)",
+                )
+            },
             |segment| Response {
                 status: "200 OK",
                 content_type: "video/mp4",

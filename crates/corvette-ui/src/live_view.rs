@@ -27,8 +27,8 @@ use std::rc::Rc;
 
 use leptos::html;
 use leptos::prelude::*;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::{
     BinaryType, CloseEvent, Event, HtmlVideoElement, MediaSource, MessageEvent, SourceBuffer,
     SourceBufferAppendMode, Url, WebSocket,
@@ -228,9 +228,11 @@ impl Drop for SourceBufferState {
 /// property under this exact condition for its own equivalent fallback.
 fn create_media_source(video: &HtmlVideoElement) -> Option<MediaSource> {
     let window = web_sys::window()?;
-    if let Ok(managed_ctor) =
-        js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("ManagedMediaSource"))
-            .and_then(wasm_bindgen::JsCast::dyn_into::<js_sys::Function>)
+    if let Ok(managed_ctor) = js_sys::Reflect::get(
+        &window,
+        &wasm_bindgen::JsValue::from_str("ManagedMediaSource"),
+    )
+    .and_then(wasm_bindgen::JsCast::dyn_into::<js_sys::Function>)
         && let Ok(instance) = js_sys::Reflect::construct(&managed_ctor, &js_sys::Array::new())
     {
         // `web_sys` has no typed binding for `disableRemotePlayback` in this
@@ -380,10 +382,8 @@ fn schedule_reconnect(state: Rc<RefCell<SessionState>>) {
         return;
     };
     let callback = Closure::once_into_js(move || connect_once(Rc::clone(&state)));
-    let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-        callback.unchecked_ref(),
-        delay_ms,
-    );
+    let _ = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(callback.unchecked_ref(), delay_ms);
 }
 
 /// Handles one WebSocket binary message: the first one on a connection is
@@ -456,7 +456,9 @@ fn drain_pending(source_buffer_slot: &Rc<RefCell<Option<SourceBufferState>>>) {
     let Some(mut bytes) = source_buffer_state.pending.pop_front() else {
         return;
     };
-    let _ = source_buffer_state.buffer.append_buffer_with_u8_array(&mut bytes);
+    let _ = source_buffer_state
+        .buffer
+        .append_buffer_with_u8_array(&mut bytes);
 }
 
 /// Builds this camera's WebSocket URL: [`WS_ORIGIN_OVERRIDE_PROPERTY`] when
@@ -567,7 +569,23 @@ fn find_box(data: &[u8], fourcc: [u8; 4]) -> Option<&[u8]> {
 fn hevc_codec_string(hvcc: &[u8]) -> Option<String> {
     use std::fmt::Write as _;
 
-    let &[_config_version, byte1, c0, c1, c2, c3, k0, k1, k2, k3, k4, k5, level, ..] = hvcc else {
+    let &[
+        _config_version,
+        byte1,
+        c0,
+        c1,
+        c2,
+        c3,
+        k0,
+        k1,
+        k2,
+        k3,
+        k4,
+        k5,
+        level,
+        ..,
+    ] = hvcc
+    else {
         return None;
     };
     let profile_space = (byte1 >> 6) & 0x3;

@@ -84,7 +84,13 @@ async fn main() {
     let _segment = spawn_supervised_with(format!("{CAMERA_NAME}/hls-segment"), {
         let sender = sender.clone();
         let store = Arc::clone(&store);
-        move || run_hls_segment(CAMERA_NAME.to_string(), sender.subscribe(), Arc::clone(&store))
+        move || {
+            run_hls_segment(
+                CAMERA_NAME.to_string(),
+                sender.subscribe(),
+                Arc::clone(&store),
+            )
+        }
     });
 
     let server = HlsServer::bind("127.0.0.1:0".parse().unwrap())

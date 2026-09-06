@@ -89,7 +89,10 @@ impl FakeProvider {
 
 impl StreamProvider for FakeProvider {
     fn describe(&self, name: &str) -> Option<StreamInfo> {
-        let streams = self.streams.lock().expect("test-only mutex is never poisoned");
+        let streams = self
+            .streams
+            .lock()
+            .expect("test-only mutex is never poisoned");
         match streams.get(name)? {
             StreamEntry::Live { info, .. } | StreamEntry::Panicking { info, .. } => {
                 Some(info.clone())
@@ -98,7 +101,10 @@ impl StreamProvider for FakeProvider {
     }
 
     fn subscribe(&self, name: &str) -> Option<Box<dyn FrameReceiver>> {
-        let streams = self.streams.lock().expect("test-only mutex is never poisoned");
+        let streams = self
+            .streams
+            .lock()
+            .expect("test-only mutex is never poisoned");
         match streams.get(name)? {
             StreamEntry::Live { sender, .. } => Some(Box::new(BroadcastFrameReceiver {
                 receiver: sender.subscribe(),
@@ -263,7 +269,11 @@ impl TestClient {
     /// (`trackID=0`), asserting every step succeeds.
     async fn play(&mut self, stream_name: &str) {
         let describe = self
-            .send_request(Method::Describe, &format!("rtsp://127.0.0.1/{stream_name}"), None)
+            .send_request(
+                Method::Describe,
+                &format!("rtsp://127.0.0.1/{stream_name}"),
+                None,
+            )
             .await;
         assert_eq!(describe.status(), StatusCode::Ok, "DESCRIBE must succeed");
 
@@ -277,7 +287,11 @@ impl TestClient {
         assert_eq!(setup.status(), StatusCode::Ok, "SETUP must succeed");
 
         let play = self
-            .send_request(Method::Play, &format!("rtsp://127.0.0.1/{stream_name}"), None)
+            .send_request(
+                Method::Play,
+                &format!("rtsp://127.0.0.1/{stream_name}"),
+                None,
+            )
             .await;
         assert_eq!(play.status(), StatusCode::Ok, "PLAY must succeed");
     }
@@ -291,7 +305,9 @@ async fn start_server(provider: FakeProvider) -> std::net::SocketAddr {
     let server = RtspServer::bind("127.0.0.1:0".parse().unwrap())
         .await
         .expect("binds to an ephemeral loopback port");
-    let addr = server.local_addr().expect("bound server has a local address");
+    let addr = server
+        .local_addr()
+        .expect("bound server has a local address");
     tokio::spawn(server.serve(Arc::new(provider)));
     addr
 }

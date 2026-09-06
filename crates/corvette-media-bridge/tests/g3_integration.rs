@@ -170,7 +170,13 @@ async fn g3_end_to_end_against_a_mock_camera_and_a_synthetic_decodable_one() {
     let mock_segment = spawn_supervised_with("cam-mock/hls-segment".to_string(), {
         let client = Arc::clone(&mock_client);
         let store = Arc::clone(&store);
-        move || run_hls_segment("cam-mock".to_string(), client.subscribe(), Arc::clone(&store))
+        move || {
+            run_hls_segment(
+                "cam-mock".to_string(),
+                client.subscribe(),
+                Arc::clone(&store),
+            )
+        }
     });
 
     // cam-synth: a real, valid H.264 SPS/PPS/IDR triple, fed directly onto a
@@ -181,7 +187,13 @@ async fn g3_end_to_end_against_a_mock_camera_and_a_synthetic_decodable_one() {
     let synth_segment = spawn_supervised_with("cam-synth/hls-segment".to_string(), {
         let sender = synth_sender.clone();
         let store = Arc::clone(&store);
-        move || run_hls_segment("cam-synth".to_string(), sender.subscribe(), Arc::clone(&store))
+        move || {
+            run_hls_segment(
+                "cam-synth".to_string(),
+                sender.subscribe(),
+                Arc::clone(&store),
+            )
+        }
     });
 
     let server = HlsServer::bind("127.0.0.1:0".parse().unwrap())
@@ -239,7 +251,11 @@ async fn g3_end_to_end_against_a_mock_camera_and_a_synthetic_decodable_one() {
     for path in &segments {
         let (status, body) = http_get(addr, path).await;
         assert_eq!(status, 200, "fetching {path}");
-        assert_eq!(&body[4..8], b"moof", "segment at {path} must start with moof");
+        assert_eq!(
+            &body[4..8],
+            b"moof",
+            "segment at {path} must start with moof"
+        );
     }
 
     // ---- Isolation (INV-5(a), verified directly, not by mutation): killing
@@ -248,8 +264,7 @@ async fn g3_end_to_end_against_a_mock_camera_and_a_synthetic_decodable_one() {
     drop(mock_client);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let (status_after_kill, body_after_kill) =
-        http_get(addr, "/cam-synth/playlist.m3u8").await;
+    let (status_after_kill, body_after_kill) = http_get(addr, "/cam-synth/playlist.m3u8").await;
     assert_eq!(
         status_after_kill, 200,
         "cam-synth's playlist must survive cam-mock's Client being killed"
