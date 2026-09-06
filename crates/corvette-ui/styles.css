@@ -1146,44 +1146,65 @@ main {
 }
 
 /* The one-time gesture-to-arm affordance (D-4,
-   `.agents/issue-20/DESIGN-monitor-mode.md`) -- covers the whole viewport,
-   independent of the wall's own safe-area padding, so it is unmissable and
-   the only thing a viewer can interact with before it is dismissed. */
-.monitor-fullscreen-prompt {
+   `.agents/issue-20/DESIGN-monitor-mode.md`) -- issue #21's own follow-up
+   shrank this from a full-viewport modal to a small top-left button, sized
+   and styled like `.monitor-tile-exit-fullscreen` so the two read as one
+   visual language rather than two different treatments of "leave a corner
+   button to control fullscreen". The wrapper, not the button, carries the
+   fixed top-left placement, so `.monitor-enter-fullscreen-hint` below can
+   sit next to the button without its own separate positioning. */
+.monitor-enter-fullscreen-wrap {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
   z-index: 10;
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 0.75rem;
-  padding: 2rem;
-  text-align: center;
-  font-size: 1.5rem;
+  align-items: flex-start;
+}
+
+.monitor-enter-fullscreen {
+  margin: 0;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.85rem;
   color: #e8eeee;
-  background: rgb(16 21 22 / 88%);
+  background: rgb(16 21 22 / 68%);
+  border: 0;
+  border-bottom-right-radius: 0.4rem;
   cursor: pointer;
 }
 
-.monitor-fullscreen-prompt:focus-visible {
+/* Generated content, not real text, matching
+   `.monitor-tile-exit-fullscreen::before`'s own convention -- the button's
+   accessible name is its `aria-label`. */
+.monitor-enter-fullscreen::before {
+  content: "\26F6";
+}
+
+.monitor-enter-fullscreen:focus-visible {
   outline: 2px solid #69d1ba;
   outline-offset: -2px;
 }
 
-/* Both lines rely on the flex container's own `gap` for spacing, not the
-   `<p>` element's default block margin, which would otherwise stack on top
-   of `gap` and space the two lines unevenly. */
-.monitor-fullscreen-prompt p {
-  margin: 0;
+/* The tv-bro Direct Navigation Mode hint (`monitor.rs`'s
+   `EnterFullscreenButton`): a `title` alone only reaches a mouse hovering
+   the button, never keyboard/D-pad focus, so this sibling carries the same
+   text visibly, shown only while the button actually has focus -- the exact
+   moment a TV remote's D-pad has reached it. Hidden otherwise so it costs no
+   permanent screen space, matching this button's own small footprint. */
+.monitor-enter-fullscreen-hint {
+  display: none;
+  align-self: center;
+  margin-left: 0.4rem;
+  padding: 0.3rem 0.6rem;
+  max-width: 20rem;
+  font-size: 0.8rem;
+  color: #cdd8d7;
+  background: rgb(16 21 22 / 68%);
+  border-radius: 0.25rem;
 }
 
-/* Issue #21 D-1's in-product communication step: kept visually secondary
-   (smaller, dimmer) so the "Press OK to enter fullscreen" call-to-action
-   above it keeps its own weight as the prompt's primary message. */
-.monitor-fullscreen-prompt-hint {
-  font-size: 0.95rem;
-  color: #9fb0af;
+.monitor-enter-fullscreen:focus-visible + .monitor-enter-fullscreen-hint {
+  display: block;
 }
 
 .monitor-tile h2 {

@@ -129,17 +129,42 @@ test("visiting /monitor renders one placeholder tile per enabled camera", async 
 // Issue #21 item T3's own Verify step: D-1's decision ("Direct Navigation
 // Mode only") named the in-product communication step pointing users at
 // tv-bro's long-press menu and its Direct Navigation Mode toggle as its own
-// remaining cost, implemented as a second, visually secondary line in this
-// existing one-time prompt (`FullscreenPrompt`, `crates/corvette-ui/src/
-// monitor.rs`) -- not a separate control, so this only checks the rendered
-// text, following the same `toContainText` convention the empty/error-state
-// tests above already use.
-test("the one-time fullscreen prompt names tv-bro's Direct Navigation Mode", async ({ page }) => {
+// remaining cost. A later issue #21 follow-up shrank the one-time gesture
+// prompt (`EnterFullscreenButton`, `crates/corvette-ui/src/monitor.rs`) from
+// a full-viewport modal to a small button, carrying this hint as a `title`
+// for a mouse-hovering viewer. A `title` alone is Chromium-hover-only, never
+// shown on keyboard/programmatic focus, so a sighted TV-remote/D-pad
+// viewer -- exactly who this hint is for -- could never see it that way; a
+// follow-up review caught this, so the hint also renders as a real, visible
+// sibling element gated on the button's own `:focus-visible` state
+// (`styles.css`'s `.monitor-enter-fullscreen:focus-visible +
+// .monitor-enter-fullscreen-hint`), not just present-but-hidden in the DOM.
+test("the fullscreen-entry button names tv-bro's Direct Navigation Mode, reachable by both mouse and keyboard/D-pad focus", async ({ page }) => {
   await mockCameraConfig(page, nCameras(1));
 
   await page.goto("/monitor");
 
-  await expect(page.locator(".monitor-fullscreen-prompt")).toContainText("Direct Navigation Mode");
+  const button = page.getByRole("button", { name: "Enter fullscreen" });
+  const hint = page.locator(".monitor-enter-fullscreen-hint");
+
+  // Mouse-hover path: still carried as `title`.
+  await expect(button).toHaveAttribute("title", /Direct Navigation Mode/);
+  await expect(hint).toContainText("Direct Navigation Mode");
+
+  // Keyboard/D-pad path: `EnterFullscreenButton` auto-focuses on mount, so
+  // the hint is already visible immediately after load, with nothing else
+  // done -- the exact moment a TV remote's D-pad would first reach it.
+  await expect(hint, "visible while the button has focus, right after auto-focus on mount").toBeVisible();
+
+  // Moving focus elsewhere hides it again -- it does not permanently occupy
+  // screen space once the viewer has moved on.
+  await page.locator(".monitor-tile").first().focus();
+  await expect(hint, "hidden once focus leaves the button").not.toBeVisible();
+
+  // Tabbing back re-focuses the button (nothing else on this bare wall is
+  // reachable before it in tab order) and the hint reappears.
+  await button.focus();
+  await expect(hint, "visible again once the button regains focus").toBeVisible();
 });
 
 test("visiting /monitor with no cameras configured shows the empty state, not a blank page", async ({ page }) => {
@@ -339,8 +364,7 @@ const installFullscreenMock = (page) => {
   });
 };
 
-const dismissFullscreenPrompt = (page) =>
-  page.getByRole("button", { name: "Press OK to enter fullscreen" }).click();
+const dismissFullscreenPrompt = (page) => page.getByRole("button", { name: "Enter fullscreen" }).click();
 
 // Marks a DOM node with a property no re-render could preserve -- a fresh
 // node from a re-mount would not carry this forward, unlike an in-place
@@ -362,13 +386,10 @@ test.describe("item M5: click/select-to-fullscreen per tile", () => {
     await mockCameraConfig(page, nCameras(2));
 
     await page.goto("/monitor");
-    // The prompt overlay (`position: fixed; inset: 0`) physically covers
-    // every tile until dismissed, so a real pointer click could never land
-    // on one -- `dispatchEvent` fires the `click` directly on the tile's
-    // own element instead (bypassing Playwright's coordinate-based hit
-    // test, which would otherwise land on the overlay on top of it), to
-    // confirm the underlying gate in `monitor.rs` itself, not just the
-    // overlay's own stacking, is what prevents this.
+    // `dispatchEvent` fires the `click` directly on the tile's own element
+    // (bypassing Playwright's coordinate-based hit test) to confirm the
+    // underlying `armed` gate in `monitor.rs` itself -- not incidental
+    // stacking with the fullscreen-entry button -- is what prevents this.
     await page.locator(".monitor-tile").first().dispatchEvent("click");
 
     expect(await page.evaluate(() => window.__fullscreenRequests.length)).toBe(0);
@@ -379,7 +400,7 @@ test.describe("item M5: click/select-to-fullscreen per tile", () => {
     await mockCameraConfig(page, nCameras(3));
 
     await page.goto("/monitor");
-    await page.getByRole("button", { name: "Press OK to enter fullscreen" }).focus();
+    await page.getByRole("button", { name: "Enter fullscreen" }).focus();
     await page.keyboard.press("Enter");
 
     const tiles = page.locator(".monitor-tile");
@@ -436,7 +457,7 @@ test.describe("item M5: click/select-to-fullscreen per tile", () => {
     ).toBe(true);
   });
 
-  test("the one-time prompt does not reappear once dismissed", async ({ page }) => {
+  test("the one-time fullscreen-entry button does not reappear once dismissed", async ({ page }) => {
     await installFullscreenMock(page);
     await mockCameraConfig(page, nCameras(1));
 
@@ -445,7 +466,7 @@ test.describe("item M5: click/select-to-fullscreen per tile", () => {
     await page.locator(".monitor-tile").first().click();
     await page.keyboard.press("Escape");
 
-    await expect(page.getByRole("button", { name: "Press OK to enter fullscreen" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Enter fullscreen" })).toHaveCount(0);
   });
 });
 

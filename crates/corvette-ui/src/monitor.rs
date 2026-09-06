@@ -8,11 +8,13 @@
 //! Selecting a tile fullscreens it in place via the standard Fullscreen API
 //! (item M5, D-1 in `.agents/issue-20/DESIGN-monitor-mode.md`) -- the same
 //! DOM element that already hosts the tile's live session, so entering or
-//! leaving fullscreen never re-mounts or reconnects it. A one-time prompt on
-//! first load supplies the single real user gesture Chromium's transient-
-//! activation model requires before any `requestFullscreen()` call can
-//! succeed (D-4); `RESEARCH-tvbro-fullscreen.md` found no gesture-free path
-//! on tv-bro/Android `WebView`. Exiting fullscreen relies primarily on the
+//! leaving fullscreen never re-mounts or reconnects it. A small, persistent
+//! top-left button on first load (issue #21's own follow-up, shrunk from an
+//! earlier full-viewport one-time prompt) supplies the single real user
+//! gesture Chromium's transient-activation model requires before any
+//! `requestFullscreen()` call can succeed (D-4); `RESEARCH-tvbro-
+//! fullscreen.md` found no gesture-free path on tv-bro/Android `WebView`.
+//! Exiting fullscreen relies primarily on the
 //! browser's own default Fullscreen-API behavior (Escape, or the platform's
 //! own remote-control equivalent) -- whether tv-bro's own remote Back button
 //! honors that default the same way is real-device-only and stays
@@ -45,11 +47,17 @@ use crate::shell::{Status, StatusGlyph};
 /// per-tile timeout budget.
 const STAGGER_MS: i32 = 200;
 
+/// The tv-bro Direct Navigation Mode hint (D-1 in
+/// `.agents/issue-21/DESIGN-tv-remote-navigation.md`), shared by
+/// `EnterFullscreenButton`'s own `title` attribute and its adjacent visible
+/// hint span so the two stay identical.
+const TV_BRO_HINT: &str = "tv-bro's long-press menu also has a Direct Navigation Mode toggle, for D-pad/keyboard navigation instead of its default touch-emulating cursor.";
+
 /// True for the two keys a `role="button"` element must treat as activation
 /// per the WAI-ARIA button pattern this wall's custom (non-`<button>`)
-/// clickable tiles and prompt follow -- `Enter` and `Space` (`" "` is the
-/// modern `KeyboardEvent.key` value; no browser this crate targets still
-/// reports the legacy `"Spacebar"`).
+/// clickable tiles follow -- `Enter` and `Space` (`" "` is the modern
+/// `KeyboardEvent.key` value; no browser this crate targets still reports
+/// the legacy `"Spacebar"`).
 fn is_activation_key(key: &str) -> bool {
     key == "Enter" || key == " "
 }
@@ -110,55 +118,62 @@ fn MonitorGrid(cameras: Vec<Camera>) -> impl IntoView {
             {cameras.into_iter().enumerate().map(|(index, camera)| view! {
                 <MonitorTile camera=camera index=index layout=layout armed=armed/>
             }).collect_view()}
-            {move || (!armed.get()).then(|| view! { <FullscreenPrompt armed=armed/> })}
+            {move || (!armed.get()).then(|| view! { <EnterFullscreenButton armed=armed/> })}
         </div>
     }
 }
 
-/// The one-time gesture-to-arm affordance D-4 accepted as the unavoidable
-/// cost of Chromium's transient-activation model on a browser
-/// (`RESEARCH-tvbro-fullscreen.md`) that offers no gesture-free path to the
-/// Fullscreen API. Covers the whole viewport so it is the only thing a
-/// viewer can interact with on first load, and auto-focuses itself so a TV
-/// remote's very first "OK" press -- with nothing else yet focused on the
-/// page -- actually reaches it. Dismissing it (click, or `Enter`/`Space`)
-/// sets `armed` and this component stops rendering; nothing sets `armed`
-/// back to `false`, so it does not reappear for the rest of this page load.
+/// The small top-left button that supplies the one real user gesture (click,
+/// or `Enter`/`Space`) D-4 accepted as the unavoidable cost of Chromium's
+/// transient-activation model on a browser (`RESEARCH-tvbro-fullscreen.md`)
+/// that offers no gesture-free path to the Fullscreen API. Issue #21's own
+/// follow-up: previously a full-viewport modal reading "Press OK to enter
+/// fullscreen", now sized and positioned like `MonitorTile`'s own
+/// `.monitor-tile-exit-fullscreen` button so the required gesture reads as
+/// an on-page control rather than a blocking dialog. A real `<button>`
+/// (mirroring that exit button's own markup), so `Enter`/`Space` activation
+/// is native and needs no manual keydown handling. Auto-focuses itself so a
+/// TV remote's very first "OK" press -- with nothing else yet focused on the
+/// page -- actually reaches it. Clicking it sets `armed` and this component
+/// stops rendering; nothing sets `armed` back to `false`, so it does not
+/// reappear for the rest of this page load.
+///
+/// The tv-bro Direct Navigation Mode hint (D-1 in
+/// `.agents/issue-21/DESIGN-tv-remote-navigation.md`) is carried two ways: as
+/// this button's `title`, for a mouse user hovering it, and as the adjacent
+/// `.monitor-enter-fullscreen-hint` span, shown only while the button itself
+/// has focus (`styles.css`'s `.monitor-enter-fullscreen:focus-visible +
+/// .monitor-enter-fullscreen-hint`). `title` alone is not enough: Chromium
+/// only ever shows it on mouse hover, never on keyboard/programmatic focus,
+/// so a sighted TV-remote/D-pad viewer -- who has no mouse and is exactly
+/// who this hint is for -- could never see it that way. The focus-visible
+/// span fixes that without permanently occupying screen space, and because
+/// this button auto-focuses on mount, it is also the first thing a fresh
+/// page load shows. The span is `aria-hidden` since a screen reader already
+/// gets the same text as this button's accessible description (`title`,
+/// per the HTML-AAM description computation, given `aria-label` already
+/// supplies the name) -- without it, the hint would be announced twice.
 #[component]
-fn FullscreenPrompt(armed: RwSignal<bool>) -> impl IntoView {
-    let prompt_ref = NodeRef::<html::Div>::new();
+fn EnterFullscreenButton(armed: RwSignal<bool>) -> impl IntoView {
+    let button_ref = NodeRef::<html::Button>::new();
 
     Effect::new(move |_| {
-        if let Some(element) = prompt_ref.get() {
+        if let Some(element) = button_ref.get() {
             _ = element.focus();
         }
     });
 
-    let dismiss = move || armed.set(true);
-
     view! {
-        <div
-            class="monitor-fullscreen-prompt"
-            node_ref=prompt_ref
-            role="button"
-            tabindex="0"
-            aria-label="Press OK to enter fullscreen"
-            on:click=move |_| dismiss()
-            on:keydown=move |event| {
-                if is_activation_key(&event.key()) {
-                    event.prevent_default();
-                    dismiss();
-                }
-            }
-        >
-            <p>"Press OK to enter fullscreen"</p>
-            // D-1 in `.agents/issue-21/DESIGN-tv-remote-navigation.md`: the
-            // remaining cost of targeting tv-bro's Direct Navigation Mode is
-            // this in-product communication step, nothing more -- an FYI, not
-            // an instruction, since enabling it is a transient, tv-bro-side
-            // action outside this page's control (F-6: it reverts on every
-            // Back press and must be re-entered via the long-press menu).
-            <p class="monitor-fullscreen-prompt-hint">"tv-bro's long-press menu also has a Direct Navigation Mode toggle, for D-pad/keyboard navigation instead of its default touch-emulating cursor."</p>
+        <div class="monitor-enter-fullscreen-wrap">
+            <button
+                type="button"
+                class="monitor-enter-fullscreen"
+                node_ref=button_ref
+                aria-label="Enter fullscreen"
+                title=TV_BRO_HINT
+                on:click=move |_| armed.set(true)
+            ></button>
+            <span class="monitor-enter-fullscreen-hint" aria-hidden="true">{TV_BRO_HINT}</span>
         </div>
     }
 }
