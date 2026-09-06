@@ -116,6 +116,19 @@ const assertTilesPackWithinGrid = (tileBoxes, gridBox) => {
   }
 };
 
+// A `<input type="range" step="1">`'s own value-sanitization algorithm
+// snaps any programmatically-assigned value to the nearest whole step
+// *from its own `min`* -- so reading back a sub-second fractional value can
+// differ slightly from whatever fractional instant a test asked for, purely
+// as a browser-level artifact unrelated to `snap_or_raw`/`playable_time`'s
+// own arithmetic. These assertions compare at whole-second resolution, the
+// same granularity every offset label in this file already renders at
+// (`format_gap_offset`'s own `{:+.0}s`).
+const expectPlayheadValueNear = (playhead, expectedSeconds) =>
+  expect
+    .poll(async () => Math.round(Number(await playhead.inputValue())))
+    .toBe(Math.round(expectedSeconds));
+
 const tileBoxes = (page) =>
   page.locator(".all-cameras-tile").evaluateAll((elements) =>
     elements.map((element) => {
@@ -394,14 +407,98 @@ test("a camera with no recordings anywhere in range shows the no-recordings plac
   await expect(tile("camera-1").locator("video")).toHaveCount(1);
 });
 
+// Issue #25 item S3 (D-2(b)): the shared playhead now snaps to the *union's*
+// own nearest playable time, not any one camera's own. A single-camera
+// fixture can no longer exercise camera-0's own per-tile gap treatment at a
+// scrubbed instant its own clips don't cover, because with nothing else in
+// the union, the shared playhead would itself snap away from that instant
+// before camera-0's own tile ever saw it. camera-1 here fully covers the
+// whole loaded range (mirroring "moving the shared scrub updates each tile
+// independently" above), so the union always covers every instant this test
+// scrubs to -- the shared playhead never snaps, and camera-0 alone still
+// shows its own per-tile gap treatment (R4, untouched by this item) at each
+// of those instants, preserving this test's original intent under D-2(b)'s
+// own accepted tradeoff.
 test("a real gap at the scrubbed time shows a dimmed nearest-frame preview with a signed offset label", async ({
   page,
 }) => {
   const now = Date.now() / 1000;
-  await mockCameraConfig(page, nCameras(1));
+  await mockCameraConfig(page, nCameras(2));
   // camera-0 has a real gap between two retained clips at `now - 1800`..
   // `now - 1700`. The loaded range's own start (`now - 3600`, "Last hour")
   // falls before either clip, so the tile starts in the gap state too.
+  await page.route("**/api/camera-0/recordings?*", (route) =>
+    route.fulfill({
+      json: [
+        { start_time: now - 3500, end_time: now - 1800, motion: null },
+        { start_time: now - 1700, end_time: now - 100, motion: null },
+      ],
+    }),
+  );
+  // camera-1 fully covers the whole loaded range -- there is no instant this
+  // test scrubs to that the union doesn't also cover.
+  await page.route("**/api/camera-1/recordings?*", (route) =>
+    route.fulfill({ json: [{ start_time: now - 3500, end_time: now - 100, motion: null }] }),
+  );
+
+  await page.goto("/recordings");
+  await page.getByRole("button", { name: "Last hour" }).click();
+
+  const tile = page.locator('.all-cameras-tile[data-camera="camera-0"]');
+  await expect(tile.locator(".all-cameras-tile-gap")).toBeVisible();
+
+  const playhead = page.getByRole("slider", { name: "All-cameras playhead" });
+  const scrubTo = (time) =>
+    playhead.evaluate((input, value) => {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, String(time));
+
+  // Nearer to camera-0's second clip (starts `now - 1700`): the nearest
+  // footage is *later* than the scrub position, a positive offset.
+  await scrubTo(now - 1750);
+  // D-2(b)'s positive case: camera-1's own coverage here keeps the shared
+  // signal from moving away from the requested instant at all, even though
+  // camera-0 alone lacks footage for it.
+  await expectPlayheadValueNear(playhead, now - 1750);
+  await expect(tile.locator(".all-cameras-tile-gap-preview")).toHaveAttribute(
+    "src",
+    `/api/camera-0/recordings/${now - 1700}/snapshot.jpg?height=720`,
+  );
+  await expect(tile.locator(".all-cameras-tile-gap-offset")).toContainText("+50s");
+
+  // Nearer to camera-0's first clip's own end margin (`now - 1801`, one
+  // second inside the clip's own `now - 1800` end): the offset flips sign --
+  // the nearest footage is now *earlier* than the scrub position.
+  await scrubTo(now - 1795);
+  await expectPlayheadValueNear(playhead, now - 1795);
+  await expect(tile.locator(".all-cameras-tile-gap-preview")).toHaveAttribute(
+    "src",
+    `/api/camera-0/recordings/${now - 1801}/snapshot.jpg?height=720`,
+  );
+  await expect(tile.locator(".all-cameras-tile-gap-offset")).toContainText("-6s");
+
+  // Scrubbing back into real coverage removes the gap placeholder and
+  // renders the tile's own `TimelinePlayer` again -- the shared scrub
+  // position itself never snapped away from any of these instants (D-2(b)'s
+  // union-snap semantics, positive case); only this tile's own rendering
+  // reacted to the gap.
+  await scrubTo(now - 3000);
+  await expect(tile.locator(".all-cameras-tile-gap")).toHaveCount(0);
+  await expect(tile.locator("video")).toHaveCount(1);
+});
+
+// D-2(b)'s union-snap semantics, negative case: with no second camera to
+// cover camera-0's own gap, the *shared* playhead itself now snaps to the
+// union's nearest playable time -- the exact tradeoff D-2(b) accepted, and
+// the first test in this file to exercise the shared playhead's own
+// `snap_or_raw` guard (S1) live, now that S3 wires a real merged clips list
+// into it.
+test("dragging to an instant no camera covers snaps the shared playhead to the nearest covered instant", async ({
+  page,
+}) => {
+  const now = Date.now() / 1000;
+  await mockCameraConfig(page, nCameras(1));
   await page.route("**/api/camera-0/recordings?*", (route) =>
     route.fulfill({
       json: [
@@ -414,42 +511,22 @@ test("a real gap at the scrubbed time shows a dimmed nearest-frame preview with 
   await page.goto("/recordings");
   await page.getByRole("button", { name: "Last hour" }).click();
 
-  const tile = page.locator('.all-cameras-tile[data-camera="camera-0"]');
-  await expect(tile.locator(".all-cameras-tile-gap")).toBeVisible();
-
+  const playhead = page.getByRole("slider", { name: "All-cameras playhead" });
   const scrubTo = (time) =>
-    page.getByRole("slider", { name: "All-cameras playhead" }).evaluate((input, value) => {
+    playhead.evaluate((input, value) => {
       input.value = value;
       input.dispatchEvent(new Event("input", { bubbles: true }));
     }, String(time));
 
-  // Nearer to camera-0's second clip (starts `now - 1700`): the nearest
-  // footage is *later* than the scrub position, a positive offset.
+  // Nearer to the second clip's own start (`now - 1700`): the shared
+  // playhead snaps forward to it.
   await scrubTo(now - 1750);
-  await expect(tile.locator(".all-cameras-tile-gap-preview")).toHaveAttribute(
-    "src",
-    `/api/camera-0/recordings/${now - 1700}/snapshot.jpg?height=720`,
-  );
-  await expect(tile.locator(".all-cameras-tile-gap-offset")).toContainText("+50s");
+  await expectPlayheadValueNear(playhead, now - 1700);
 
-  // Nearer to camera-0's first clip's own end margin (`now - 1801`, one
-  // second inside the clip's own `now - 1800` end): the offset flips sign --
-  // the nearest footage is now *earlier* than the scrub position.
+  // Nearer to the first clip's own end margin (`now - 1801`): the snap
+  // flips direction.
   await scrubTo(now - 1795);
-  await expect(tile.locator(".all-cameras-tile-gap-preview")).toHaveAttribute(
-    "src",
-    `/api/camera-0/recordings/${now - 1801}/snapshot.jpg?height=720`,
-  );
-  await expect(tile.locator(".all-cameras-tile-gap-offset")).toContainText("-6s");
-
-  // Scrubbing back into real coverage removes the gap placeholder and
-  // renders the tile's own `TimelinePlayer` again -- the shared scrub
-  // position itself never snapped to camera-0's own nearest time while it
-  // was gapped (D-3's rejected option (c)); only this tile's own rendering
-  // reacted.
-  await scrubTo(now - 3000);
-  await expect(tile.locator(".all-cameras-tile-gap")).toHaveCount(0);
-  await expect(tile.locator("video")).toHaveCount(1);
+  await expectPlayheadValueNear(playhead, now - 1801);
 });
 
 test("a camera with previews but no clips gets the gap treatment, not the no-recordings placeholder", async ({
@@ -519,4 +596,180 @@ test("a camera with previews but no clips gets the gap treatment, not the no-rec
     "/clips/previews/camera-0/hour.mp4#t=99.000",
   );
   await expect(tile.locator(".all-cameras-tile-gap-offset")).toContainText("-101s");
+});
+
+// Issue #25 item S3 wires the shared, per-camera-hoisted `merged_media`
+// (S2, D-4(a)/D-6(a)) into `crate::timeline::RecordingScrubber` for the
+// first time -- this is the first test asserting the *merged track itself*
+// (as opposed to any one tile) reflects more than one camera's own data.
+test("the merged track shows availability, motion, and review spans from more than one camera", async ({
+  page,
+}) => {
+  const now = Date.now() / 1000;
+  await mockCameraConfig(page, nCameras(2));
+  // Two well-separated (>1s gap) clips, each with its own motion --
+  // `push_contiguous_range`'s own merge-gap tolerance (`MAX_SEGMENT_GAP_SECONDS`)
+  // keeps these as two distinct spans rather than folding them into one.
+  await page.route("**/api/camera-0/recordings?*", (route) =>
+    route.fulfill({ json: [{ start_time: now - 3500, end_time: now - 3000, motion: 5 }] }),
+  );
+  await page.route("**/api/camera-1/recordings?*", (route) =>
+    route.fulfill({ json: [{ start_time: now - 1500, end_time: now - 1000, motion: 5 }] }),
+  );
+  await page.route("**/api/review?*", (route) =>
+    route.fulfill({
+      json: [
+        { start_time: now - 3200, end_time: now - 3190, severity: "alert", camera: "camera-0" },
+        { start_time: now - 1200, end_time: now - 1190, severity: "detection", camera: "camera-1" },
+      ],
+    }),
+  );
+
+  await page.goto("/recordings");
+  await page.getByRole("button", { name: "Last hour" }).click();
+
+  const track = page.locator(".recording-timeline .timeline-track");
+  // One availability span and one motion span per camera -- neither clip
+  // overlaps or nears the other, so D-4(a)'s union never folds them
+  // together, and D-6(a)'s plain concatenation keeps both cameras' own
+  // motion ranges intact.
+  await expect(track.locator(".timeline-availability")).toHaveCount(2);
+  await expect(track.locator(".timeline-motion-recording")).toHaveCount(2);
+  // Reviews were already forwarded as one already-combined resource before
+  // this item (S2); this is the first test confirming both severities
+  // render as markers once threaded through the shared scrubber.
+  await expect(track.locator(".activity-alert")).toHaveCount(1);
+  await expect(track.locator(".activity-detection")).toHaveCount(1);
+});
+
+// D-5(b), invariant 3: a merged span must not expose which camera(s)
+// contributed to it. Reuses the two-camera, two-separate-span fixture above
+// so there are real merged spans to inspect.
+test("no merged availability span exposes which camera contributed to it", async ({ page }) => {
+  const now = Date.now() / 1000;
+  await mockCameraConfig(page, nCameras(2));
+  await page.route("**/api/camera-0/recordings?*", (route) =>
+    route.fulfill({ json: [{ start_time: now - 3500, end_time: now - 3000, motion: null }] }),
+  );
+  await page.route("**/api/camera-1/recordings?*", (route) =>
+    route.fulfill({ json: [{ start_time: now - 1500, end_time: now - 1000, motion: null }] }),
+  );
+
+  await page.goto("/recordings");
+  await page.getByRole("button", { name: "Last hour" }).click();
+
+  const spans = page.locator(".recording-timeline .timeline-availability");
+  await expect(spans).toHaveCount(2);
+
+  const attributesByElement = await spans.evaluateAll((elements) =>
+    elements.map((element) =>
+      Object.fromEntries(
+        [...element.attributes].map((attribute) => [attribute.name, attribute.value]),
+      ),
+    ),
+  );
+
+  for (const attributes of attributesByElement) {
+    expect(
+      attributes["data-camera"],
+      "a merged availability span should not carry a data-camera attribute",
+    ).toBeUndefined();
+    expect(
+      attributes.title,
+      "a merged availability span should not carry a title attribute",
+    ).toBeUndefined();
+    for (const [name, value] of Object.entries(attributes)) {
+      expect(value, `attribute ${name} on a merged span should not name camera-0`).not.toContain(
+        "camera-0",
+      );
+      expect(value, `attribute ${name} on a merged span should not name camera-1`).not.toContain(
+        "camera-1",
+      );
+    }
+  }
+});
+
+// Invariant 4's own mandatory guard, live: `ReviewMarkers`' own `on:click`
+// handler must call `snap_or_raw`, not `playable_time` directly, since
+// `playable_time` panics via `.expect(...)` on an empty clips slice --
+// exactly what a merged "All" mode clips list can legitimately be (G-16).
+// camera-0's own `/recordings` route is deliberately delayed so this test
+// deterministically exercises the ordering `review_activity` already
+// resolves in during real use: it is fetched independently at page mount
+// (`recordings.rs`'s `RecordingContext`, keyed only on the selected camera,
+// not on the loaded range or the camera list), so it is already resolved
+// well before any per-camera `recording_clips` resource -- hoisted into
+// `AllCamerasGrid` by S2 -- ever starts fetching. `AllCamerasGrid` gates
+// `RecordingScrubber`'s own rendering on both resolving, so the review
+// marker only becomes visible once camera-0's own (empty) clips resolve --
+// at which point the merged clips list is empty and this guard is what
+// keeps the click from panicking.
+test("a review marker rendered once a camera's own recording_clips resolves empty can be clicked without crashing", async ({
+  page,
+}) => {
+  const now = Date.now() / 1000;
+  const consoleErrors = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") {
+      consoleErrors.push(message.text());
+    }
+  });
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(String(error)));
+
+  await mockCameraConfig(page, nCameras(1));
+  await page.route("**/api/camera-0/recordings?*", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await route.fulfill({ json: [] });
+  });
+  await page.route("**/api/review?*", (route) =>
+    route.fulfill({
+      json: [
+        { start_time: now - 1800, end_time: now - 1790, severity: "alert", camera: "camera-0" },
+      ],
+    }),
+  );
+
+  await page.goto("/recordings");
+  await page.getByRole("button", { name: "Last hour" }).click();
+
+  // The scrubber (and the review marker inside it) stays gated behind the
+  // loading state while camera-0's own resource is still pending, even
+  // though the review data backing that marker already arrived.
+  await expect(page.getByText("Loading recording availability")).toBeVisible();
+
+  const marker = page.getByRole("button", { name: /alert activity at/i });
+  await expect(marker).toBeVisible();
+
+  await marker.click();
+
+  expect(
+    pageErrors,
+    "clicking a review marker over an empty merged clips list threw an uncaught exception",
+  ).toEqual([]);
+  // Three known-benign lines this harness itself produces, unrelated to
+  // this item's own correctness (`expanded_view.spec.cjs`'s own identical
+  // precedent): no favicon is served here, this release bundle still wires
+  // cargo-leptos's dev-mode hot-reload WebSocket client (nothing to connect
+  // to outside `cargo leptos watch`), and an unrelated upstream (Frigate)
+  // connection refusal this test's own mocked routes don't cover.
+  const unexpectedConsoleErrors = consoleErrors.filter(
+    (line) =>
+      !line.includes("favicon") &&
+      !line.includes("live_reload") &&
+      !/50[0-9] \(.*Gateway\)/.test(line),
+  );
+  expect(
+    unexpectedConsoleErrors,
+    "clicking a review marker over an empty merged clips list logged an unexpected console error",
+  ).toEqual([]);
+
+  // Positively confirms the click landed rather than merely "nothing
+  // visibly broke": the shared playhead moves to the review's own
+  // unclamped start time, proving `snap_or_raw` returned it unchanged
+  // rather than ever calling into `playable_time`.
+  await expectPlayheadValueNear(
+    page.getByRole("slider", { name: "All-cameras playhead" }),
+    now - 1800,
+  );
 });

@@ -1307,18 +1307,6 @@ main {
   border-radius: 0.4rem;
 }
 
-/* The shared scrub `AllCamerasPlayback` owns (D-1(c)): a plain range input,
-   deliberately simpler than `.timeline-track`'s own zoomable, span-annotated
-   track -- there is no per-camera availability/motion/review data to show in
-   aggregate here (this plan's own "Implementation-level choices" #2). */
-.all-cameras-scrub {
-  margin: 0 0 1rem;
-}
-
-.all-cameras-scrub input {
-  width: 100%;
-}
-
 /* A tile's own "not yet settled" indicator: shown while its `TimelinePlayer`
    has not yet confirmed landing on the shared scrub position (D-1(c)'s own
    honest-signal requirement). Independent per tile -- no cross-tile

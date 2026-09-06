@@ -40,9 +40,15 @@
 //! its own. Once every camera's own resource has resolved, `AllCamerasGrid`
 //! folds every `Ok(media)` through `merge_recording_media` (D-4(a)'s true
 //! interval union for `clips`, D-6(a)'s plain concatenation for
-//! `motion_ranges`) into one shared union track. S3 renders that union
-//! through `crate::timeline::RecordingScrubber` as a sibling of this grid's
-//! own tiles; this item only builds the hoisted fetch and the merge itself.
+//! `motion_ranges`) into one shared union track.
+//!
+//! Item S3 renders that union through `crate::timeline::RecordingScrubber`,
+//! as a sibling of this grid's own tiles, once every camera's own resource
+//! *and* `review_activity` (D-6(a)'s already-combined "All" mode reviews
+//! resource, forwarded with no transformation) have both resolved -- a
+//! "Loading recording availability" `Status` renders in its place until
+//! then, the same gating pattern `AllCamerasPlayback` already applies to
+//! `(cameras, preview_clips)`.
 
 use corvette_api::{Camera, PreviewClip, ReviewSegment};
 use leptos::html;
@@ -55,7 +61,7 @@ use crate::local_time::format_event_time;
 use crate::media::{RecordingMedia, RecordingRange, merge_recording_media, recording_media};
 use crate::monitor_layout::{TileRect, pack_tiles};
 use crate::shell::{Status, StatusGlyph};
-use crate::timeline::{TimelinePlayer, clip_at_time, playable_time};
+use crate::timeline::{RecordingScrubber, TimelinePlayer, clip_at_time, playable_time};
 
 /// Placeholder camera name for merged availability spans that cannot
 /// honestly name one real camera (D-4(a)'s own named cost, D-5(b)'s "discard
@@ -85,9 +91,8 @@ pub(crate) fn AllCamerasPlayback(
     preview_clips: LocalResource<Result<Vec<PreviewClip>, String>>,
     /// `RecordingBrowser`'s already-fetched, already-combined "All" mode
     /// reviews resource (`recordings.rs`'s `RecordingContext.review_activity`,
-    /// G-6) -- forwarded straight through with no transformation (D-6(a)),
-    /// never re-fetched or merged here. Nothing renders it yet (that is
-    /// issue #25's own S3); this item only threads it through.
+    /// G-6) -- forwarded straight through to `AllCamerasGrid` with no
+    /// transformation (D-6(a)), never re-fetched or merged here.
     review_activity: LocalResource<Result<Vec<ReviewSegment>, String>>,
 ) -> impl IntoView {
     let detail = format!(
@@ -100,23 +105,6 @@ pub(crate) fn AllCamerasPlayback(
 
     view! {
         <div class="playback-heading"><h2>"All cameras"</h2><p>{detail}</p></div>
-        <div class="all-cameras-scrub">
-            <input
-                type="range"
-                min=start_time
-                max=end_time
-                step="1"
-                prop:value=move || selected_time.get()
-                aria-label="All-cameras playhead"
-                on:input=move |event| {
-                    let requested_time = event_target_value(&event)
-                        .parse::<f64>()
-                        .unwrap_or(start_time);
-                    uses_preview.set(true);
-                    selected_time.set(requested_time);
-                }
-            />
-        </div>
         {move || match (cameras.get(), preview_clips.get()) {
             (None, _) | (_, None) => view! {
                 <Status heading="Loading cameras" detail="Connecting to the Frigate API." glyph=StatusGlyph::Camera/>
@@ -149,12 +137,12 @@ pub(crate) fn AllCamerasPlayback(
 ///
 /// Also owns every camera's own `recording_clips` fetch (hoisted here from
 /// `AllCameraTile`, D-3(a)) and folds them, once every one has resolved,
-/// through `merge_recording_media` into the shared union track issue #25's
-/// own `RecordingScrubber` renders (S3) -- no per-camera resource ever
-/// publishes its own resolved result back up through anything other than
-/// this component's own `merged_media` memo, keeping D-3(a)'s own named
-/// virtue (no child-to-parent publish of an async-resolved result) intact
-/// for both the fetches and their merge.
+/// through `merge_recording_media` into the shared union track this
+/// component renders through `crate::timeline::RecordingScrubber` -- no
+/// per-camera resource ever publishes its own resolved result back up
+/// through anything other than this component's own `merged_media` memo,
+/// keeping D-3(a)'s own named virtue (no child-to-parent publish of an
+/// async-resolved result) intact for both the fetches and their merge.
 #[component]
 fn AllCamerasGrid(
     cameras: Vec<Camera>,
@@ -163,9 +151,10 @@ fn AllCamerasGrid(
     end_time: f64,
     selected_time: RwSignal<f64>,
     uses_preview: RwSignal<bool>,
-    /// Forwarded straight through from `AllCamerasPlayback`, unread by
-    /// anything in this item -- issue #25's S3 renders it through the shared
-    /// `RecordingScrubber`.
+    /// `RecordingBrowser`'s already-fetched, already-combined "All" mode
+    /// reviews resource (D-6(a), G-6) -- forwarded straight through to
+    /// `RecordingScrubber` with no transformation, never re-fetched or
+    /// merged here.
     review_activity: LocalResource<Result<Vec<ReviewSegment>, String>>,
 ) -> impl IntoView {
     let grid_container = NodeRef::<html::Div>::new();
@@ -178,14 +167,6 @@ fn AllCamerasGrid(
     // still requires a `Send + Sync` closure regardless of target -- see
     // `monitor.rs`'s own `session` field for the identical rationale.
     let resize_watcher = StoredValue::new_local(None::<GridResizeWatcher>);
-
-    // Not read yet -- issue #25's S3 renders this through the shared
-    // `RecordingScrubber`. Renaming the parameter itself to silence the
-    // "unused" warning would force every call site off its current
-    // `review_activity` shorthand (see `AllCamerasPlayback`'s own
-    // `<AllCamerasGrid .. review_activity />`), so this is a plain
-    // acknowledgment instead.
-    let _ = &review_activity;
 
     // One `LocalResource` per camera, in the same order as `cameras`,
     // moved here verbatim from `AllCameraTile`'s own former `LocalResource`
@@ -224,8 +205,7 @@ fn AllCamerasGrid(
     // is read unconditionally on each run (never short-circuited) so this
     // memo keeps tracking every one of them as a reactive dependency, even
     // while some are still `None`.
-    // Not read yet -- issue #25's S3 wires this into `RecordingScrubber`.
-    let _merged_media: Memo<Option<RecordingMedia>> = {
+    let merged_media: Memo<Option<RecordingMedia>> = {
         let resources = recording_media_resources.clone();
         Memo::new(move |_| {
             let statuses = resources.iter().map(LocalResource::get).collect::<Vec<_>>();
@@ -262,6 +242,35 @@ fn AllCamerasGrid(
     });
 
     view! {
+        {move || match (merged_media.get(), review_activity.get()) {
+            (Some(media), Some(reviews)) => view! {
+                <section class="recording-timeline" aria-label="All-cameras timeline">
+                    <RecordingScrubber
+                        range_start=start_time
+                        range_end=end_time
+                        clips=media.clips
+                        motion_ranges=media.motion_ranges
+                        // A failed `review_activity` fetch contributes no
+                        // markers rather than blocking the shared scrubber --
+                        // the same per-resource error tolerance
+                        // `merged_media`'s own fold already applies to an
+                        // errored camera.
+                        reviews=reviews.unwrap_or_default()
+                        active_activity=RwSignal::new(None)
+                        selected_time
+                        uses_preview
+                        playhead_aria_label="All-cameras playhead".to_string()
+                    />
+                </section>
+            }.into_any(),
+            _ => view! {
+                <Status
+                    heading="Loading recording availability"
+                    detail="Checking retained footage and activity across every camera."
+                    glyph=StatusGlyph::Recording
+                />
+            }.into_any(),
+        }}
         <div class="all-cameras-grid" node_ref=grid_container aria-label="All cameras">
             {cameras.into_iter().enumerate().map(|(index, camera)| {
                 let camera_previews = previews
