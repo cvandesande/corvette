@@ -12,6 +12,7 @@
 
 use corvette_api::{ErrorBody, Health};
 use std::future::Future;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -82,7 +83,8 @@ impl ApiServer {
     ///
     /// # Errors
     ///
-    /// Returns an error if removing a stale file or binding the socket fails.
+    /// Returns an error if removing a stale file, binding the socket, or
+    /// making the socket file world-writable fails.
     pub fn bind(
         socket_path: &Path,
         connection_timeout: Duration,
@@ -95,6 +97,9 @@ impl ApiServer {
             std::fs::remove_file(socket_path)?;
         }
         let listener = UnixListener::bind(socket_path)?;
+        // nginx runs without CAP_DAC_OVERRIDE, so it needs write permission on
+        // the socket file itself; its directory is the access boundary (D4).
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))?;
         Ok(Self {
             listener,
             socket_path: socket_path.to_path_buf(),

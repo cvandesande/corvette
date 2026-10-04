@@ -5,6 +5,7 @@ use corvette_api::ErrorBody;
 use corvette_api_server::config::{ConfigSource, DEFAULT_CACHE_TTL};
 use corvette_api_server::{ApiServer, CONNECTION_TIMEOUT};
 use std::collections::HashMap;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -288,6 +289,36 @@ async fn a_stale_socket_file_at_the_path_is_replaced() {
     assert_error_shape(&response, "404", "not_found");
 
     handle.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn the_bound_socket_file_is_writable_by_every_user() {
+    let dir = unique_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let socket = dir.join("api.sock");
+
+    let server = ApiServer::bind(
+        &socket,
+        CONNECTION_TIMEOUT,
+        unreachable_config(),
+        &dir.join("absent.db"),
+    )
+    .expect("bind");
+
+    let metadata = std::fs::metadata(&socket).expect("stat the socket file");
+    assert!(
+        metadata.file_type().is_socket(),
+        "bound path is not a socket"
+    );
+    assert_eq!(
+        metadata.permissions().mode() & 0o777,
+        0o666,
+        "nginx has no CAP_DAC_OVERRIDE, so it needs write on the socket file"
+    );
+
+    drop(server);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
