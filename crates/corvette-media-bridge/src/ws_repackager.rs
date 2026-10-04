@@ -215,6 +215,10 @@ impl Fmp4WsServer {
 /// with no further protocol beyond a close.
 async fn handle_connection(stream: TcpStream, store: &MultiCameraFmp4Store) {
     let mut camera_name = String::new();
+    #[expect(
+        clippy::result_large_err,
+        reason = "tungstenite's Callback trait fixes the Err type (issue #29)"
+    )]
     let handshake =
         tokio_tungstenite::accept_hdr_async(stream, |request: &Request, response: Response| {
             camera_name = request.uri().path().trim_start_matches('/').to_string();
