@@ -430,6 +430,65 @@ verbatim — no client-side derivation, scaling, or defaulting when the upstream
 consumer needing a camera's aspect ratio computes it from these two fields directly rather than
 inferring it from stream probing, a hard-coded default, or any other source.
 
+## Corvette's own API lives under `/corvette/api/v1/`
+
+Corvette's routes live under `/corvette/api/v1/`. Frigate keeps serving everything under
+its own `/api/` unchanged, and the two route trees are separate. Camera names appear as
+segments inside Frigate's `/api/` routes, so a Corvette segment placed there could collide
+with a camera; a separate top-level prefix cannot. One nginx block,
+`location ^~ /corvette/api/`, covers every current and future Corvette route, so adding a
+route needs no nginx change. The `^~` modifier ranks it ahead of Frigate's unanchored
+`/api/` image regex, so `/corvette/api/v1/x.jpg` reaches Corvette and gets its `404` body
+(confirmed against the deployed pod).
+
+nginx sends every request to the prefix through an identity check before forwarding it —
+a subrequest to Frigate's `/auth` today — and sets `Remote-User` and `Remote-Role` from
+that response, so a browser cannot supply them. On the authenticated port (8971) the
+check requires a login; on Frigate's internal port (5000) it grants every caller the
+`admin` role, so that port must stay inside the cluster. nginx forwards `GET` and
+`HEAD` and answers any other method with `403`; the service's parser accepts nothing but
+`GET` and answers `400` to anything else, so a `HEAD` request receives `400`. The
+service has no TCP listener: it binds a Unix socket file in a volume shared only with the
+`frigate` container, where nginx runs, which is what keeps the identity headers
+unspoofable from outside that container.
+
+Identity is required before routing: a request that reaches the service with a missing or
+empty `Remote-User` gets `401` whatever the path, so an unauthenticated caller learns
+nothing about which routes exist.
+
+Every response the service sends — success and error alike — is JSON with
+`Content-Type: application/json`, carries `Cache-Control: no-store`, and closes the
+connection. Responses nginx generates itself — `401` from a failed identity check, `403`
+for a refused method, `502` when the service is unreachable — carry nginx's own HTML
+body instead. Service errors share one shape, `{"code": ..., "message": ...}`, where
+`code` is a stable machine value to branch on and `message` describes the failure:
+
+- `bad_request` (`400`): the request could not be parsed; `message` names the reason.
+- `unauthorized` (`401`): no or empty `Remote-User`.
+- `not_found` (`404`): a path under the prefix that names no route.
+- `config_unavailable` (`503`): the cameras route has no usable Frigate configuration.
+- `unhealthy` (`503`): the health route found failing parts; `message` names each one.
+
+`GET /corvette/api/v1/health` answers `200` `{"database":"ok","config":"ok"}` when both
+probes pass, and `503` `unhealthy` naming each failing part otherwise. The database probe
+opens Frigate's SQLite database strictly read-only — the service never writes it — and
+consists of one short read proving a Frigate table is queryable.
+
+`GET /corvette/api/v1/cameras` answers `200` `{"cameras":[...]}`, one entry per camera the
+caller's role may see, each carrying `name`, `display_name`, `order`, `detect_width`, and
+`detect_height`. The entries are the enabled cameras in dashboard order: `ui.order`, then
+camera name. The list is filtered by role, so a role limited to one camera receives only
+that camera's entry; Frigate's `/api/config` returns every camera to every user, which
+is the reason the route exists. The role rule: a role absent from the configured
+`auth.roles` — including the empty role of a request that carries no `Remote-Role` —
+sees no cameras, and a configuration with no `auth.roles` at all grants nothing; a role
+with an empty camera list sees every enabled camera; otherwise the role sees exactly the
+listed cameras that exist, and a listed name that is disabled or unknown is dropped. The route answers `503`
+`config_unavailable` when no Frigate configuration copy younger than 10 s can be served.
+
+When Corvette owns login (issue #30), and later its own camera configuration, these
+response shapes stay the same; only their sources change.
+
 ## No camera's audio track is published on any live-view transport yet
 
 The "RTSP camera frames carry Annex-B video, not a container format" contract above already
