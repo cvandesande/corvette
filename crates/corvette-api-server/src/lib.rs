@@ -1,19 +1,25 @@
-//! The read-only Corvette API service (issue #4 A2).
+//! The read-only Corvette API service (issue #4 A2, A3).
 //!
-//! Serves [`corvette_api`] error bodies over a Unix domain socket with a
+//! Serves [`corvette_api`] wire types over a Unix domain socket with a
 //! hand-written `HTTP/1.0` request parser and an identity-gated router under
 //! `/corvette/api/v1/`. nginx is the only client: it forwards `GET` requests
 //! with no body and sets `Remote-User`/`Remote-Role` from Frigate's auth
 //! response, so the parser accepts exactly that narrow form and rejects
 //! everything else. The service listens on a Unix socket only (no TCP) because
-//! that is what keeps the identity headers unspoofable (issue #4 D4).
+//! that is what keeps the identity headers unspoofable (issue #4 D4). The one
+//! data route so far, `cameras`, answers from [`config::ConfigSource`].
 
 use corvette_api::ErrorBody;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+
+pub mod config;
+
+use crate::config::ConfigSource;
 
 /// Every Corvette route lives under this prefix (issue #4 D6).
 const API_PREFIX: &str = "/corvette/api/v1/";
@@ -31,7 +37,7 @@ pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Writes one structured log line, matching `corvette-media-bridge`'s own
 /// `eprintln!`-based convention: no logging framework exists in this workspace.
-fn log_event(unit: &str, event: &str, detail: impl std::fmt::Display) {
+pub(crate) fn log_event(unit: &str, event: &str, detail: impl std::fmt::Display) {
     eprintln!("corvette-api-server unit=\"{unit}\" event={event} detail=\"{detail}\"");
 }
 
@@ -62,6 +68,7 @@ pub struct ApiServer {
     listener: UnixListener,
     socket_path: PathBuf,
     connection_timeout: Duration,
+    config: Arc<ConfigSource>,
 }
 
 impl ApiServer {
@@ -71,7 +78,11 @@ impl ApiServer {
     /// # Errors
     ///
     /// Returns an error if removing a stale file or binding the socket fails.
-    pub fn bind(socket_path: &Path, connection_timeout: Duration) -> std::io::Result<Self> {
+    pub fn bind(
+        socket_path: &Path,
+        connection_timeout: Duration,
+        config: Arc<ConfigSource>,
+    ) -> std::io::Result<Self> {
         // A socket file left by a crashed run makes `bind` fail `EADDRINUSE`;
         // the private `emptyDir` volume keeps it across a container restart.
         if socket_path.exists() {
@@ -82,6 +93,7 @@ impl ApiServer {
             listener,
             socket_path: socket_path.to_path_buf(),
             connection_timeout,
+            config,
         })
     }
 
@@ -98,6 +110,7 @@ impl ApiServer {
             listener,
             socket_path,
             connection_timeout,
+            config,
         } = self;
         tokio::pin!(shutdown);
         loop {
@@ -106,8 +119,9 @@ impl ApiServer {
                 () = &mut shutdown => break,
                 accepted = listener.accept() => match accepted {
                     Ok((stream, _peer)) => {
+                        let config = Arc::clone(&config);
                         tokio::spawn(async move {
-                            handle_connection(stream, connection_timeout).await;
+                            handle_connection(stream, connection_timeout, config).await;
                         });
                     }
                     Err(err) => log_event("listener", "accept-error", err),
@@ -138,8 +152,8 @@ pub async fn shutdown_signal() {
 
 /// Handles one connection within `timeout`: read, route, respond, close. A
 /// timeout or an early peer close ends the connection with no response.
-async fn handle_connection(mut stream: UnixStream, timeout: Duration) {
-    let outcome = tokio::time::timeout(timeout, read_route_respond(&mut stream)).await;
+async fn handle_connection(mut stream: UnixStream, timeout: Duration, config: Arc<ConfigSource>) {
+    let outcome = tokio::time::timeout(timeout, read_route_respond(&mut stream, &config)).await;
     match outcome {
         Ok(Ok(Outcome::Responded)) => {}
         Ok(Ok(Outcome::ClosedEarly)) => {
@@ -161,7 +175,10 @@ async fn handle_connection(mut stream: UnixStream, timeout: Duration) {
 }
 
 /// Reads one request from `stream`, routes it, and writes the response.
-async fn read_route_respond(stream: &mut UnixStream) -> std::io::Result<Outcome> {
+async fn read_route_respond(
+    stream: &mut UnixStream,
+    config: &ConfigSource,
+) -> std::io::Result<Outcome> {
     let block = match read_header_block(stream).await {
         HeaderRead::Complete(block) => block,
         HeaderRead::TooLarge => {
@@ -175,7 +192,7 @@ async fn read_route_respond(stream: &mut UnixStream) -> std::io::Result<Outcome>
         HeaderRead::Closed => return Ok(Outcome::ClosedEarly),
     };
     let response = match parse_request(&block) {
-        Ok(request) => route(&request),
+        Ok(request) => route(&request, config).await,
         Err(reason) => bad_request(&reason),
     };
     write_response(stream, &response).await?;
@@ -222,13 +239,13 @@ async fn read_header_block(stream: &mut UnixStream) -> HeaderRead {
 }
 
 /// Byte index of the first `\r\n\r\n`, which ends the header block.
-fn find_header_end(buffer: &[u8]) -> Option<usize> {
+pub(crate) fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
 /// Splits `block` (already free of the terminating `\r\n\r\n`) into the
 /// request line and header lines, on each `\r\n`.
-fn split_header_lines(block: &[u8]) -> Vec<&[u8]> {
+pub(crate) fn split_header_lines(block: &[u8]) -> Vec<&[u8]> {
     let mut lines = Vec::new();
     let mut start = 0;
     let mut index = 0;
@@ -340,7 +357,7 @@ fn parse_request_line(line: &[u8]) -> Result<&str, String> {
 }
 
 /// Splits `bytes` at the first `byte`, returning the parts either side of it.
-fn split_at_byte(bytes: &[u8], byte: u8) -> Option<(&[u8], &[u8])> {
+pub(crate) fn split_at_byte(bytes: &[u8], byte: u8) -> Option<(&[u8], &[u8])> {
     bytes
         .iter()
         .position(|candidate| *candidate == byte)
@@ -356,7 +373,7 @@ fn is_valid_header_name(name: &[u8]) -> bool {
 }
 
 /// Trims leading and trailing ASCII spaces from a header value.
-fn trim_spaces(value: &[u8]) -> &[u8] {
+pub(crate) fn trim_spaces(value: &[u8]) -> &[u8] {
     let start = value
         .iter()
         .position(|byte| *byte != b' ')
@@ -369,33 +386,50 @@ fn trim_spaces(value: &[u8]) -> &[u8] {
 }
 
 /// Interprets `bytes` as UTF-8 text, or `None`.
-fn utf8(bytes: &[u8]) -> Option<&str> {
+pub(crate) fn utf8(bytes: &[u8]) -> Option<&str> {
     std::str::from_utf8(bytes).ok()
 }
 
 /// The identity gate and router: a missing or empty `Remote-User` is `401`
-/// whatever the path (issue #4 D4). A2 has no data routes yet.
-fn route(request: &Request) -> Response {
+/// whatever the path (issue #4 D4). A data route may fetch, so routing is
+/// async; the gate still runs first, so an anonymous request never reaches a
+/// fetch.
+async fn route(request: &Request, config: &ConfigSource) -> Response {
     // Identity gate runs before any routing decision, so an anonymous caller
     // learns nothing about which paths exist (issue #4 D4).
-    let Some(user) = request
+    let Some(_user) = request
         .remote_user
         .as_deref()
         .filter(|user| !user.is_empty())
     else {
         return unauthorized();
     };
-    // A2 declares no data routes, so an authenticated request matches nothing;
-    // A3/A4 read `user` and `role` in the arms they add (issue #4 D6).
-    let (_user, _role) = (user, request.remote_role.as_str());
     // Everything the service serves lives under the API prefix; a path outside
     // it can match no route (issue #4 D6).
-    if request.path.strip_prefix(API_PREFIX).is_none() {
+    let Some(rest) = request.path.strip_prefix(API_PREFIX) else {
         return not_found();
+    };
+    match rest {
+        "cameras" => cameras(config, &request.remote_role).await,
+        _ => not_found(),
     }
-    // A3/A4 add one `match` arm per route under the prefix here; A2 has none,
-    // so every authenticated, prefixed path is `404` in the one error shape.
-    not_found()
+}
+
+/// `GET /corvette/api/v1/cameras` (issue #4 D3): the caller's role sees the
+/// cameras it may access, or the route reports `503` when no configuration
+/// copy fresh enough to serve exists.
+async fn cameras(config: &ConfigSource, role: &str) -> Response {
+    match config.camera_list_json(role).await {
+        Ok(body) => Response {
+            status: "200 OK",
+            body,
+        },
+        Err(err) => error_response(
+            "503 Service Unavailable",
+            "config_unavailable",
+            &format!("Frigate configuration is unavailable: {err}"),
+        ),
+    }
 }
 
 fn error_response(status: &'static str, code: &str, message: &str) -> Response {

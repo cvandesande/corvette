@@ -1,0 +1,8 @@
+{
+  "auth": { "roles": { "admin": [], "viewer": [] } },
+  "cameras": {
+    "front":  { "enabled": true,  "friendly_name": null, "ui": { "order": 0 }, "detect": { "width": 704, "height": 576 } },
+    "back":   { "enabled": true,  "friendly_name": null, "ui": { "order": 0 }, "detect": { "width": 704, "height": 576 } },
+    "living": { "enabled": false, "friendly_name": null, "ui": { "order": 0 }, "detect": { "width": 640, "height": 480 } }
+  }
+}

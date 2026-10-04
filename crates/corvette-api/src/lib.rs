@@ -7,6 +7,19 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct FrigateConfig {
     cameras: BTreeMap<String, FrigateCamera>,
+    /// Absent `auth` or `roles` deserializes to an empty map, so every role
+    /// sees no cameras: an unreadable authorization section fails closed.
+    #[serde(default)]
+    auth: FrigateAuth,
+}
+
+/// The subset of Frigate's `auth` configuration that decides camera access.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+struct FrigateAuth {
+    /// Frigate's role name to permitted camera names map; an empty list means
+    /// every camera.
+    #[serde(default)]
+    roles: BTreeMap<String, Vec<String>>,
 }
 
 impl FrigateConfig {
@@ -29,7 +42,32 @@ impl FrigateConfig {
     /// as the wire entries served by Corvette's own camera list (issue #4).
     #[must_use]
     pub fn enabled_camera_entries(self) -> Vec<CameraEntry> {
-        Self::enabled_in_dashboard_order(self.cameras)
+        Self::camera_entries_in_dashboard_order(self.cameras)
+    }
+
+    /// Returns the enabled cameras `role` may see, in the order of
+    /// [`FrigateConfig::enabled_camera_entries`], as the wire entries of
+    /// Corvette's camera list (issue #4 D4).
+    ///
+    /// A role absent from `auth.roles` sees nothing, as does the empty role of
+    /// a request with no `Remote-Role`. A disabled camera is never returned,
+    /// even when the role lists it.
+    #[must_use]
+    pub fn camera_entries_for_role(self, role: &str) -> Vec<CameraEntry> {
+        let Self { cameras, auth } = self;
+        let entries = Self::camera_entries_in_dashboard_order(cameras);
+        let enabled_names: Vec<String> = entries.iter().map(|entry| entry.name.clone()).collect();
+        let allowed = allowed_cameras(role, &auth.roles, &enabled_names);
+        entries
+            .into_iter()
+            .filter(|entry| allowed.contains(&entry.name.as_str()))
+            .collect()
+    }
+
+    fn camera_entries_in_dashboard_order(
+        cameras: BTreeMap<String, FrigateCamera>,
+    ) -> Vec<CameraEntry> {
+        Self::enabled_in_dashboard_order(cameras)
             .into_iter()
             .map(|(name, camera)| CameraEntry {
                 display_name: camera.friendly_name.unwrap_or_else(|| name.clone()),
@@ -86,6 +124,16 @@ pub struct CameraEntry {
     pub detect_width: u32,
     /// Height in pixels of the stream Frigate runs detection on, unscaled.
     pub detect_height: u32,
+}
+
+/// The response body of Corvette's camera list route (issue #4).
+///
+/// An object rather than a bare array so later fields can be added without a
+/// breaking change.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct CameraList {
+    /// The cameras the caller's role may see, in dashboard order.
+    pub cameras: Vec<CameraEntry>,
 }
 
 /// Error payload returned by Corvette's own API routes (issue #4).
@@ -439,6 +487,147 @@ mod tests {
             serde_json::from_str::<CameraEntry>(&json).expect("camera entry should deserialize"),
             entry
         );
+    }
+
+    /// `MULTI_CAMERA_CONFIG` plus roles: `admin` sees everything, `limited`
+    /// lists a disabled and a nonexistent camera beside a real one.
+    const ROLE_CAMERA_CONFIG: &str = r#"{
+        "auth": {
+            "roles": {
+                "admin": [],
+                "limited": ["front_door", "garage", "cellar"]
+            }
+        },
+        "cameras": {
+            "side_door": {
+                "enabled": true,
+                "friendly_name": "Side door",
+                "ui": {"order": 20},
+                "detect": {"width": 1920, "height": 1080}
+            },
+            "garage": {
+                "enabled": false,
+                "friendly_name": "Garage",
+                "ui": {"order": 0},
+                "detect": {"width": 1280, "height": 720}
+            },
+            "front_door": {
+                "enabled": true,
+                "friendly_name": null,
+                "ui": {"order": 10},
+                "detect": {"width": 640, "height": 480}
+            }
+        }
+    }"#;
+
+    fn role_entries(config: &str, role: &str) -> Vec<CameraEntry> {
+        serde_json::from_str::<FrigateConfig>(config)
+            .expect("Frigate config should deserialize")
+            .camera_entries_for_role(role)
+    }
+
+    #[test]
+    fn camera_entries_for_role_grants_nothing_to_a_role_absent_from_roles() {
+        assert!(role_entries(ROLE_CAMERA_CONFIG, "auditor").is_empty());
+    }
+
+    #[test]
+    fn camera_entries_for_role_grants_every_enabled_camera_to_an_empty_list_role() {
+        assert_eq!(
+            role_entries(ROLE_CAMERA_CONFIG, "admin")
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            ["front_door", "side_door"],
+        );
+    }
+
+    #[test]
+    fn camera_entries_for_role_keeps_dashboard_order_for_a_listed_role() {
+        // The role lists in name order; the entries come back in dashboard
+        // order instead (`ui.order`, then name).
+        let config = r#"{
+            "auth": { "roles": { "viewer": ["side_door", "east", "west"] } },
+            "cameras": {
+                "west": {
+                    "enabled": true,
+                    "friendly_name": null,
+                    "ui": {"order": 1},
+                    "detect": {"width": 1920, "height": 1080}
+                },
+                "east": {
+                    "enabled": true,
+                    "friendly_name": null,
+                    "ui": {"order": 1},
+                    "detect": {"width": 1920, "height": 1080}
+                },
+                "side_door": {
+                    "enabled": true,
+                    "friendly_name": null,
+                    "ui": {"order": 10},
+                    "detect": {"width": 640, "height": 480}
+                }
+            }
+        }"#;
+
+        assert_eq!(
+            role_entries(config, "viewer")
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            ["east", "west", "side_door"],
+        );
+    }
+
+    #[test]
+    fn camera_entries_for_role_drops_listed_names_that_are_disabled_or_unknown() {
+        assert_eq!(
+            role_entries(ROLE_CAMERA_CONFIG, "limited")
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            ["front_door"],
+        );
+    }
+
+    #[test]
+    fn camera_entries_for_role_grants_nothing_when_the_config_has_no_auth() {
+        assert!(role_entries(MULTI_CAMERA_CONFIG, "admin").is_empty());
+        assert!(role_entries(MULTI_CAMERA_CONFIG, "").is_empty());
+    }
+
+    #[test]
+    fn camera_entries_for_role_grants_nothing_when_auth_has_no_roles() {
+        let entries = serde_json::from_str::<FrigateConfig>(
+            r#"{
+                "auth": { "cookie_secret": "x", "restored": false },
+                "cameras": {
+                    "front": {
+                        "enabled": true,
+                        "friendly_name": null,
+                        "ui": {"order": 0},
+                        "detect": {"width": 640, "height": 480}
+                    }
+                }
+            }"#,
+        )
+        .expect("Frigate config should deserialize")
+        .camera_entries_for_role("admin");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn camera_list_json_round_trips_as_the_route_object() {
+        let list = CameraList {
+            cameras: role_entries(ROLE_CAMERA_CONFIG, "admin"),
+        };
+
+        let json = serde_json::to_string(&list).expect("camera list should serialize");
+        assert_eq!(
+            serde_json::from_str::<CameraList>(&json).expect("camera list should deserialize"),
+            list
+        );
+        assert!(json.starts_with(r#"{"cameras":["#));
     }
 
     #[test]
