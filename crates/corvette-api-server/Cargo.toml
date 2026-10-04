@@ -1,0 +1,19 @@
+[package]
+name = "corvette-api-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Read-only Corvette API service on a Unix socket: hand-written HTTP/1.0 request parser, the identity gate, and the shared error shape (issue #4 A2)"
+
+[[bin]]
+name = "corvette-api-server"
+path = "src/main.rs"
+
+[dependencies]
+corvette-api = { path = "../corvette-api" }
+serde_json = "1.0.149"
+tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "time", "io-util", "macros", "signal"] }
+
+[lints]
+workspace = true

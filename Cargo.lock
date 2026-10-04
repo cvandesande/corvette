@@ -437,6 +437,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "corvette-api-server"
+version = "0.1.0"
+dependencies = [
+ "corvette-api",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "corvette-media-bridge"
 version = "0.1.0"
 dependencies = [
