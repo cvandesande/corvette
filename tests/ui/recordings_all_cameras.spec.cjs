@@ -116,18 +116,12 @@ const assertTilesPackWithinGrid = (tileBoxes, gridBox) => {
   }
 };
 
-// A `<input type="range" step="1">`'s own value-sanitization algorithm
-// snaps any programmatically-assigned value to the nearest whole step
-// *from its own `min`* -- so reading back a sub-second fractional value can
-// differ slightly from whatever fractional instant a test asked for, purely
-// as a browser-level artifact unrelated to `snap_or_raw`/`playable_time`'s
-// own arithmetic. These assertions compare at whole-second resolution, the
-// same granularity every offset label in this file already renders at
-// (`format_gap_offset`'s own `{:+.0}s`).
+// A step-1 range input stores only whole steps from its own `min`, a page-
+// clock value, so a set value reads back up to 0.5 s off (issue #28).
 const expectPlayheadValueNear = (playhead, expectedSeconds) =>
   expect
-    .poll(async () => Math.round(Number(await playhead.inputValue())))
-    .toBe(Math.round(expectedSeconds));
+    .poll(async () => Math.abs(Number(await playhead.inputValue()) - expectedSeconds))
+    .toBeLessThanOrEqual(0.5 + 1e-6);
 
 const tileBoxes = (page) =>
   page.locator(".all-cameras-tile").evaluateAll((elements) =>
