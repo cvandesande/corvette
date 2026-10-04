@@ -29,12 +29,18 @@ const tabToFocus = async (page, anchor, target, maxTabs = 1) => {
   throw new Error(`Tab did not reach the target within ${maxTabs} press(es)`);
 };
 
+// Keyed on the browser's local calendar date, matching the time zone the UI
+// requests recording days in (issue #27).
 const recentRecordingDays = (count) =>
   Object.fromEntries(
     Array.from({ length: count }, (_, offset) => {
       const date = new Date();
       date.setDate(date.getDate() - offset);
-      return [date.toISOString().slice(0, 10), true];
+      const pad = (part) => String(part).padStart(2, "0");
+      return [
+        `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+        true,
+      ];
     }),
   );
 
