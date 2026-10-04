@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1.7
+# Corvette's own read-only API service image (issue #4 A5); the shape follows
+# docker/Dockerfile.media-bridge, published by scripts/publish_api_server_image.sh.
+ARG RUST_IMAGE=rust:1.97.1-trixie
+ARG RUNTIME_IMAGE=debian:trixie-slim
+
+# --- Stage 1: build corvette-api-server --------------------------------------
+FROM ${RUST_IMAGE} AS builder
+# build-essential only: rusqlite's bundled SQLite is the C source built here.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates crates
+# The workspace [patch.crates-io] resolves proc-macro-error2 from this local
+# path, so cargo cannot resolve the dependency graph at all without it.
+COPY vendor vendor
+RUN cargo build --release --locked --bin corvette-api-server
+
+# --- Stage 2: minimal runtime --------------------------------------------------
+# No extra packages: the service makes no TLS connection, so it needs no certificate store.
+FROM ${RUNTIME_IMAGE} AS runtime
+COPY --from=builder /src/target/release/corvette-api-server /usr/local/bin/corvette-api-server
+COPY LICENSE /usr/share/licenses/corvette/LICENSE
+
+# The live frigate.db* files are 0644 root and nginx runs as root, so a
+# non-root service can read the database and nginx can still reach its socket.
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/corvette-api-server"]
