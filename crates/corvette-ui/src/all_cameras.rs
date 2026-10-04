@@ -47,8 +47,8 @@
 //! *and* `review_activity` (D-6(a)'s already-combined "All" mode reviews
 //! resource, forwarded with no transformation) have both resolved -- a
 //! "Loading recording availability" `Status` renders in its place until
-//! then, the same gating pattern `AllCamerasPlayback` already applies to
-//! `(cameras, preview_clips)`.
+//! then. Issue #26: `AllCamerasPlayback` gates on the preview resource's
+//! status only, so this grid mounts exactly once.
 
 use corvette_api::{Camera, PreviewClip, ReviewSegment};
 use leptos::html;
@@ -102,10 +102,14 @@ pub(crate) fn AllCamerasPlayback(
     );
     let selected_time = RwSignal::new(start_time);
     let uses_preview = RwSignal::new(true);
+    // Gate the grid on the preview resource's status only: a re-resolved
+    // list keeps this memo equal, so per-camera fetches run once (issue #26).
+    let preview_status: Memo<Option<Result<(), String>>> =
+        Memo::new(move |_| preview_clips.get().map(|result| result.map(|_| ())));
 
     view! {
         <div class="playback-heading"><h2>"All cameras"</h2><p>{detail}</p></div>
-        {move || match (cameras.get(), preview_clips.get()) {
+        {move || match (cameras.get(), preview_status.get()) {
             (None, _) | (_, None) => view! {
                 <Status heading="Loading cameras" detail="Connecting to the Frigate API." glyph=StatusGlyph::Camera/>
             }.into_any(),
@@ -115,10 +119,10 @@ pub(crate) fn AllCamerasPlayback(
             (Some(Ok(cameras)), _) if cameras.is_empty() => view! {
                 <Status heading="No cameras configured" detail="Add or enable a camera in Frigate, then reload this page." glyph=StatusGlyph::Camera/>
             }.into_any(),
-            (Some(Ok(cameras)), Some(Ok(previews))) => view! {
+            (Some(Ok(cameras)), Some(Ok(()))) => view! {
                 <AllCamerasGrid
                     cameras
-                    previews
+                    previews=preview_clips
                     start_time
                     end_time
                     selected_time
@@ -146,7 +150,7 @@ pub(crate) fn AllCamerasPlayback(
 #[component]
 fn AllCamerasGrid(
     cameras: Vec<Camera>,
-    previews: Vec<PreviewClip>,
+    previews: LocalResource<Result<Vec<PreviewClip>, String>>,
     start_time: f64,
     end_time: f64,
     selected_time: RwSignal<f64>,
@@ -273,11 +277,6 @@ fn AllCamerasGrid(
         }}
         <div class="all-cameras-grid" node_ref=grid_container aria-label="All cameras">
             {cameras.into_iter().enumerate().map(|(index, camera)| {
-                let camera_previews = previews
-                    .iter()
-                    .filter(|preview| preview.camera == camera.name)
-                    .cloned()
-                    .collect::<Vec<_>>();
                 let media = recording_media_resources[index];
                 view! {
                     <AllCameraTile
@@ -285,7 +284,7 @@ fn AllCamerasGrid(
                         index=index
                         layout=layout
                         media
-                        previews=camera_previews
+                        previews
                         selected_time
                         uses_preview
                     />
@@ -356,7 +355,8 @@ fn tile_placement_style(rect: TileRect) -> String {
 /// (and created by) `AllCamerasGrid` (issue #25 S2, D-3(a)) rather than
 /// fetched here -- `/{camera}/recordings` has no bulk form (F-12), so
 /// `AllCamerasGrid` still creates one `LocalResource` per camera, just no
-/// longer inside this component.
+/// longer inside this component. `previews` is the shared preview resource,
+/// filtered per camera in the content closure (issue #26).
 ///
 /// A camera with nothing at all retained in the loaded range, a camera with
 /// previews but no clips, or a real gap at the shared scrub position, gets
@@ -372,7 +372,7 @@ fn AllCameraTile(
     index: usize,
     layout: RwSignal<Vec<TileRect>>,
     media: LocalResource<Result<RecordingMedia, String>>,
-    previews: Vec<PreviewClip>,
+    previews: LocalResource<Result<Vec<PreviewClip>, String>>,
     selected_time: RwSignal<f64>,
     uses_preview: RwSignal<bool>,
 ) -> impl IntoView {
@@ -395,20 +395,29 @@ fn AllCameraTile(
             <h2>{display_name}</h2>
             {
                 let camera_name = content_camera_name;
-                move || match recording_clips.get() {
-                    None => ().into_any(),
-                    Some(Err(error)) => view! {
+                move || match (recording_clips.get(), previews.get()) {
+                    (Some(Err(error)), _) => view! {
                         <p class="all-cameras-tile-error" role="alert">{error}</p>
                     }.into_any(),
-                    Some(Ok(media)) => view! {
-                        <AllCameraTileContent
-                            media
-                            previews=previews.clone()
-                            camera_name=camera_name.clone()
-                            selected_time
-                            uses_preview
-                        />
-                    }.into_any(),
+                    (Some(Ok(media)), Some(Ok(list))) => {
+                        let camera_previews = list
+                            .into_iter()
+                            .filter(|preview| preview.camera == camera_name)
+                            .collect::<Vec<_>>();
+                        view! {
+                            <AllCameraTileContent
+                                media
+                                previews=camera_previews
+                                camera_name=camera_name.clone()
+                                selected_time
+                                uses_preview
+                            />
+                        }
+                        .into_any()
+                    }
+                    // Media still loading, or previews unresolved or failed --
+                    // the grid-level `Status` already reports preview errors.
+                    _ => ().into_any(),
                 }
             }
         </div>
