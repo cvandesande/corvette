@@ -83,6 +83,12 @@ impl ConfigSource {
         Ok(serde_json::to_vec(&list).expect("camera list serializes"))
     }
 
+    /// Reports whether a configuration copy fresh enough to serve exists: a
+    /// fresh cached copy, or a successful fetch (issue #4 D3).
+    pub(crate) async fn available(&self) -> Result<(), ConfigFetchError> {
+        self.config().await.map(|_config| ())
+    }
+
     /// The newest configuration, refetched when the cached copy is older than
     /// the TTL. A copy older than the TTL is never returned: a failed fetch
     /// propagates even when a stale copy is held.

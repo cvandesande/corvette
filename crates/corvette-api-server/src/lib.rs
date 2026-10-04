@@ -6,10 +6,11 @@
 //! with no body and sets `Remote-User`/`Remote-Role` from Frigate's auth
 //! response, so the parser accepts exactly that narrow form and rejects
 //! everything else. The service listens on a Unix socket only (no TCP) because
-//! that is what keeps the identity headers unspoofable (issue #4 D4). The one
-//! data route so far, `cameras`, answers from [`config::ConfigSource`].
+//! that is what keeps the identity headers unspoofable (issue #4 D4). The data
+//! routes answer from [`config::ConfigSource`] and, for `health`, from a
+//! read-only probe of [`database`].
 
-use corvette_api::ErrorBody;
+use corvette_api::{ErrorBody, Health};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
 pub mod config;
+pub mod database;
 
 use crate::config::ConfigSource;
 
@@ -69,11 +71,14 @@ pub struct ApiServer {
     socket_path: PathBuf,
     connection_timeout: Duration,
     config: Arc<ConfigSource>,
+    db_path: PathBuf,
 }
 
 impl ApiServer {
     /// Binds a Unix socket at `socket_path`, first removing any stale file a
     /// previous run left behind. Accepts nothing until [`Self::serve_until`].
+    /// `db_path` is Frigate's database file, opened read-only per request
+    /// (issue #4 D5).
     ///
     /// # Errors
     ///
@@ -82,6 +87,7 @@ impl ApiServer {
         socket_path: &Path,
         connection_timeout: Duration,
         config: Arc<ConfigSource>,
+        db_path: &Path,
     ) -> std::io::Result<Self> {
         // A socket file left by a crashed run makes `bind` fail `EADDRINUSE`;
         // the private `emptyDir` volume keeps it across a container restart.
@@ -94,6 +100,7 @@ impl ApiServer {
             socket_path: socket_path.to_path_buf(),
             connection_timeout,
             config,
+            db_path: db_path.to_path_buf(),
         })
     }
 
@@ -111,6 +118,7 @@ impl ApiServer {
             socket_path,
             connection_timeout,
             config,
+            db_path,
         } = self;
         tokio::pin!(shutdown);
         loop {
@@ -120,8 +128,9 @@ impl ApiServer {
                 accepted = listener.accept() => match accepted {
                     Ok((stream, _peer)) => {
                         let config = Arc::clone(&config);
+                        let db_path = db_path.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, connection_timeout, config).await;
+                            handle_connection(stream, connection_timeout, config, &db_path).await;
                         });
                     }
                     Err(err) => log_event("listener", "accept-error", err),
@@ -152,8 +161,14 @@ pub async fn shutdown_signal() {
 
 /// Handles one connection within `timeout`: read, route, respond, close. A
 /// timeout or an early peer close ends the connection with no response.
-async fn handle_connection(mut stream: UnixStream, timeout: Duration, config: Arc<ConfigSource>) {
-    let outcome = tokio::time::timeout(timeout, read_route_respond(&mut stream, &config)).await;
+async fn handle_connection(
+    mut stream: UnixStream,
+    timeout: Duration,
+    config: Arc<ConfigSource>,
+    db_path: &Path,
+) {
+    let outcome =
+        tokio::time::timeout(timeout, read_route_respond(&mut stream, &config, db_path)).await;
     match outcome {
         Ok(Ok(Outcome::Responded)) => {}
         Ok(Ok(Outcome::ClosedEarly)) => {
@@ -178,6 +193,7 @@ async fn handle_connection(mut stream: UnixStream, timeout: Duration, config: Ar
 async fn read_route_respond(
     stream: &mut UnixStream,
     config: &ConfigSource,
+    db_path: &Path,
 ) -> std::io::Result<Outcome> {
     let block = match read_header_block(stream).await {
         HeaderRead::Complete(block) => block,
@@ -192,7 +208,7 @@ async fn read_route_respond(
         HeaderRead::Closed => return Ok(Outcome::ClosedEarly),
     };
     let response = match parse_request(&block) {
-        Ok(request) => route(&request, config).await,
+        Ok(request) => route(&request, config, db_path).await,
         Err(reason) => bad_request(&reason),
     };
     write_response(stream, &response).await?;
@@ -394,7 +410,7 @@ pub(crate) fn utf8(bytes: &[u8]) -> Option<&str> {
 /// whatever the path (issue #4 D4). A data route may fetch, so routing is
 /// async; the gate still runs first, so an anonymous request never reaches a
 /// fetch.
-async fn route(request: &Request, config: &ConfigSource) -> Response {
+async fn route(request: &Request, config: &ConfigSource, db_path: &Path) -> Response {
     // Identity gate runs before any routing decision, so an anonymous caller
     // learns nothing about which paths exist (issue #4 D4).
     let Some(_user) = request
@@ -411,6 +427,7 @@ async fn route(request: &Request, config: &ConfigSource) -> Response {
     };
     match rest {
         "cameras" => cameras(config, &request.remote_role).await,
+        "health" => health(config, db_path).await,
         _ => not_found(),
     }
 }
@@ -429,6 +446,44 @@ async fn cameras(config: &ConfigSource, role: &str) -> Response {
             "config_unavailable",
             &format!("Frigate configuration is unavailable: {err}"),
         ),
+    }
+}
+
+/// `GET /corvette/api/v1/health` (issue #4 D2): `200` when Frigate's database
+/// answers the read-only probe and a configuration copy fresh enough to serve
+/// exists; `503` naming the failing parts otherwise. The underlying errors
+/// are logged, never sent to the caller.
+async fn health(config: &ConfigSource, db_path: &Path) -> Response {
+    let mut failing = Vec::new();
+    if let Err(err) = probe_database(db_path).await {
+        log_event("database", "probe-error", err);
+        failing.push("database unreadable");
+    }
+    // A fetch failure is already logged with unit `config` where it happens.
+    if config.available().await.is_err() {
+        failing.push("config unavailable");
+    }
+    if !failing.is_empty() {
+        return error_response("503 Service Unavailable", "unhealthy", &failing.join("; "));
+    }
+    let body = Health {
+        database: "ok".to_owned(),
+        config: "ok".to_owned(),
+    };
+    // `Health` is two String fields; its derived Serialize never fails.
+    Response {
+        status: "200 OK",
+        body: serde_json::to_vec(&body).expect("health body serializes"),
+    }
+}
+
+/// Runs the read-only database probe on a blocking thread; rusqlite is
+/// synchronous and must not run on an async worker (issue #4 D5).
+async fn probe_database(db_path: &Path) -> Result<(), String> {
+    let db_path = db_path.to_path_buf();
+    match tokio::task::spawn_blocking(move || database::probe(&db_path)).await {
+        Ok(result) => result,
+        Err(err) => Err(format!("the database probe task failed: {err}")),
     }
 }
 

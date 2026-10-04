@@ -43,12 +43,20 @@ fn unreachable_config() -> std::sync::Arc<ConfigSource> {
 }
 
 /// Binds a service on a temp socket and serves it until the test aborts it.
+/// The database path names no file: none of these tests reaches a route that
+/// probes it.
 fn start_server(timeout: Duration) -> TestServer {
     let dir = unique_dir();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let socket = dir.join("api.sock");
-    let server = ApiServer::bind(&socket, timeout, unreachable_config()).expect("bind");
+    let server = ApiServer::bind(
+        &socket,
+        timeout,
+        unreachable_config(),
+        &dir.join("absent.db"),
+    )
+    .expect("bind");
     let path = server.socket_path().to_path_buf();
     let handle = tokio::spawn(server.serve_until(std::future::pending::<()>()));
     TestServer {
@@ -170,9 +178,10 @@ async fn authenticated_requests_to_unknown_routes_are_not_found() {
     .await;
     assert_error_shape(&with_role, "404", "not_found");
 
+    // `Remote-User` alone passes the gate; the path is unknown either way.
     let without_role = exchange(
         &server.socket,
-        &get("/corvette/api/v1/health", &["Remote-User: alice"]),
+        &get("/corvette/api/v1/unknown-path", &["Remote-User: alice"]),
     )
     .await;
     assert_error_shape(&without_role, "404", "not_found");
@@ -182,11 +191,11 @@ async fn authenticated_requests_to_unknown_routes_are_not_found() {
 #[tokio::test]
 async fn the_remote_user_header_name_is_case_insensitive() {
     let server = start_server(CONNECTION_TIMEOUT);
-    // Any non-401 answer proves the header passed the identity gate; `health`
-    // is the closest route that needs no upstream for this test.
+    // Any non-401 answer proves the header passed the identity gate; an
+    // unknown path answers without touching any upstream.
     let response = exchange(
         &server.socket,
-        &get("/corvette/api/v1/health", &["remote-user: alice"]),
+        &get("/corvette/api/v1/unknown-path", &["remote-user: alice"]),
     )
     .await;
     assert_error_shape(&response, "404", "not_found");
@@ -262,13 +271,18 @@ async fn a_stale_socket_file_at_the_path_is_replaced() {
     let socket = dir.join("api.sock");
     std::fs::write(&socket, b"left over from a previous run").expect("write stale file");
 
-    let server = ApiServer::bind(&socket, CONNECTION_TIMEOUT, unreachable_config())
-        .expect("binding must replace a stale socket file");
+    let server = ApiServer::bind(
+        &socket,
+        CONNECTION_TIMEOUT,
+        unreachable_config(),
+        &dir.join("absent.db"),
+    )
+    .expect("binding must replace a stale socket file");
     let handle = tokio::spawn(server.serve_until(std::future::pending::<()>()));
 
     let response = exchange(
         &socket,
-        &get("/corvette/api/v1/health", &["Remote-User: alice"]),
+        &get("/corvette/api/v1/unknown-path", &["Remote-User: alice"]),
     )
     .await;
     assert_error_shape(&response, "404", "not_found");

@@ -136,6 +136,15 @@ pub struct CameraList {
     pub cameras: Vec<CameraEntry>,
 }
 
+/// The response body of Corvette's health route (issue #4 D2).
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct Health {
+    /// Result of the database probe; always `ok` in a `200` answer.
+    pub database: String,
+    /// Result of the configuration check; always `ok` in a `200` answer.
+    pub config: String,
+}
+
 /// Error payload returned by Corvette's own API routes (issue #4).
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ErrorBody {
@@ -645,6 +654,21 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ErrorBody>(&json).expect("error body should deserialize"),
             body
+        );
+    }
+
+    #[test]
+    fn health_json_round_trips_with_the_rust_field_names() {
+        let health = Health {
+            database: "ok".to_owned(),
+            config: "ok".to_owned(),
+        };
+
+        let json = serde_json::to_string(&health).expect("health body should serialize");
+        assert_eq!(json, r#"{"database":"ok","config":"ok"}"#);
+        assert_eq!(
+            serde_json::from_str::<Health>(&json).expect("health body should deserialize"),
+            health
         );
     }
 

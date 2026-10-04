@@ -47,13 +47,15 @@ fn unique_dir() -> PathBuf {
 }
 
 /// Binds a service on a temp socket, reading its configuration from `addr`.
+/// The database path names no file: no test here probes it.
 fn start_server(config_addr: String) -> TestServer {
     let dir = unique_dir();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let socket = dir.join("api.sock");
     let config = Arc::new(ConfigSource::new(config_addr, CACHE_TTL));
-    let server = ApiServer::bind(&socket, CONNECTION_TIMEOUT, config).expect("bind");
+    let server =
+        ApiServer::bind(&socket, CONNECTION_TIMEOUT, config, &dir.join("absent.db")).expect("bind");
     let path = server.socket_path().to_path_buf();
     let handle = tokio::spawn(server.serve_until(std::future::pending::<()>()));
     TestServer {
