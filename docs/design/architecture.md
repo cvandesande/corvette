@@ -73,15 +73,16 @@ system starts holding recordings someone relies on.
 
 ## Incremental replacement
 
-nginx is already the router for the deployed system. Frigate's API is an
-upstream at `127.0.0.1:5001`, so a Rust service can join the pod as another
-upstream. Routes move individually, preserving a per-route rollback to Frigate.
+nginx is already the router for the deployed system. Corvette's API service
+joins the pod behind the same nginx and login, and serves Corvette's own routes
+under `/corvette/api/v1/`. The UI moves to them one route at a time, and keeps the
+Frigate code path for a route until the Corvette route is verified (issue #4).
 
 The replacement order follows the dependency and risk boundaries:
 
 1. Deploy the Leptos UI against Frigate's existing APIs.
-2. Introduce read-only Rust routes for configuration, statistics, and events.
-3. Replace frame ingest, motion processing, ncnn inference, and tracking.
+2. Introduce Corvette's API service with configuration, then activity (events and review).
+3. Replace frame ingest, motion processing, ncnn inference, and tracking; statistics follow.
 4. Replace recording, event creation, and retention.
 5. Retire Frigate and move nginx ownership into Corvette.
 
