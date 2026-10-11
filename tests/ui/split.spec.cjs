@@ -175,17 +175,18 @@ test.describe("recording timeline", () => {
         return Promise.resolve();
       };
     });
-    await page.route("**/api/config", (route) =>
+    await page.route("**/corvette/api/v1/cameras", (route) =>
       route.fulfill({
         json: {
-          cameras: {
-            front: {
-              enabled: true,
-              friendly_name: "Front",
-              ui: { order: 0 },
-              detect: { width: 1920, height: 1080 },
+          cameras: [
+            {
+              name: "front",
+              display_name: "Front",
+              order: 0,
+              detect_width: 1920,
+              detect_height: 1080,
             },
-          },
+          ],
         },
       }),
     );
@@ -487,7 +488,7 @@ test.describe("recording timeline", () => {
 test("recent events are filtered review activity from the last six hours", async ({ page }) => {
   let alertClipPath;
   let mergedMotionPreviewPath;
-  await page.route("**/api/config", (route) => route.fulfill({ json: { cameras: {} } }));
+  await page.route("**/corvette/api/v1/cameras", (route) => route.fulfill({ json: { cameras: [] } }));
   await page.route("**/api/review?*", (route) => {
     const url = new URL(route.request().url());
     const after = Number(url.searchParams.get("after"));
@@ -563,7 +564,7 @@ test("recent events are filtered review activity from the last six hours", async
 test("event cards show the detection snapshot, falling back to the review crop", async ({
   page,
 }) => {
-  await page.route("**/api/config", (route) => route.fulfill({ json: { cameras: {} } }));
+  await page.route("**/corvette/api/v1/cameras", (route) => route.fulfill({ json: { cameras: [] } }));
   await page.route("**/api/review?*", (route) => {
     const before = Number(new URL(route.request().url()).searchParams.get("before"));
     return route.fulfill({
@@ -630,7 +631,7 @@ test("event cards show the detection snapshot, falling back to the review crop",
 test("a review whose footage expired reports the absence, not a media error", async ({
   page,
 }) => {
-  await page.route("**/api/config", (route) => route.fulfill({ json: { cameras: {} } }));
+  await page.route("**/corvette/api/v1/cameras", (route) => route.fulfill({ json: { cameras: [] } }));
   await page.route("**/api/review?*", (route) => {
     const before = Number(new URL(route.request().url()).searchParams.get("before"));
     return route.fulfill({

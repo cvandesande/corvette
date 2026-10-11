@@ -99,17 +99,18 @@ test.describe("recent-activity filters", () => {
 
 test.describe("recording browser controls", () => {
   test.beforeEach(async ({ page }) => {
-    await page.route("**/api/config", (route) =>
+    await page.route("**/corvette/api/v1/cameras", (route) =>
       route.fulfill({
         json: {
-          cameras: {
-            front: {
-              enabled: true,
-              friendly_name: "Front",
-              ui: { order: 0 },
-              detect: { width: 1920, height: 1080 },
+          cameras: [
+            {
+              name: "front",
+              display_name: "Front",
+              order: 0,
+              detect_width: 1920,
+              detect_height: 1080,
             },
-          },
+          ],
         },
       }),
     );
@@ -188,17 +189,18 @@ test.describe("recording timeline", () => {
         return Promise.resolve();
       };
     });
-    await page.route("**/api/config", (route) =>
+    await page.route("**/corvette/api/v1/cameras", (route) =>
       route.fulfill({
         json: {
-          cameras: {
-            front: {
-              enabled: true,
-              friendly_name: "Front",
-              ui: { order: 0 },
-              detect: { width: 1920, height: 1080 },
+          cameras: [
+            {
+              name: "front",
+              display_name: "Front",
+              order: 0,
+              detect_width: 1920,
+              detect_height: 1080,
             },
-          },
+          ],
         },
       }),
     );
@@ -283,17 +285,18 @@ test.describe("selected-event playback", () => {
   test("recording playback's close button shows the harmonized outline on keyboard focus", async ({
     page,
   }) => {
-    await page.route("**/api/config", (route) =>
+    await page.route("**/corvette/api/v1/cameras", (route) =>
       route.fulfill({
         json: {
-          cameras: {
-            front: {
-              enabled: true,
-              friendly_name: "Front",
-              ui: { order: 0 },
-              detect: { width: 1920, height: 1080 },
+          cameras: [
+            {
+              name: "front",
+              display_name: "Front",
+              order: 0,
+              detect_width: 1920,
+              detect_height: 1080,
             },
-          },
+          ],
         },
       }),
     );

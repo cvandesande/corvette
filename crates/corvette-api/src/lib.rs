@@ -126,6 +126,18 @@ pub struct CameraEntry {
     pub detect_height: u32,
 }
 
+impl From<CameraEntry> for Camera {
+    fn from(entry: CameraEntry) -> Self {
+        Self {
+            name: entry.name,
+            display_name: entry.display_name,
+            width: entry.detect_width,
+            height: entry.detect_height,
+            order: entry.order,
+        }
+    }
+}
+
 /// The response body of Corvette's camera list route (issue #4).
 ///
 /// An object rather than a bare array so later fields can be added without a
@@ -495,6 +507,28 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CameraEntry>(&json).expect("camera entry should deserialize"),
             entry
+        );
+    }
+
+    #[test]
+    fn camera_from_entry_maps_order_and_detection_size_to_camera_fields() {
+        let camera = Camera::from(CameraEntry {
+            name: "front_door".to_owned(),
+            display_name: "Front door".to_owned(),
+            order: 10,
+            detect_width: 640,
+            detect_height: 480,
+        });
+
+        assert_eq!(
+            camera,
+            Camera {
+                name: "front_door".to_owned(),
+                display_name: "Front door".to_owned(),
+                width: 640,
+                height: 480,
+                order: 10,
+            }
         );
     }
 

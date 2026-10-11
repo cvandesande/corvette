@@ -27,17 +27,18 @@ const cameraName = process.env.U1_LIVE_VIEW_CAMERA_NAME;
 test("the grid tile renders no iframe, with or without a live media-bridge endpoint", async ({
   page,
 }) => {
-  await page.route("**/api/config", (route) =>
+  await page.route("**/corvette/api/v1/cameras", (route) =>
     route.fulfill({
       json: {
-        cameras: {
-          front: {
-            enabled: true,
-            friendly_name: "Front",
-            ui: { order: 0 },
-            detect: { width: 1920, height: 1080 },
+        cameras: [
+          {
+            name: "front",
+            display_name: "Front",
+            order: 0,
+            detect_width: 1920,
+            detect_height: 1080,
           },
-        },
+        ],
       },
     }),
   );
@@ -74,17 +75,18 @@ test("the grid tile's video element reaches HAVE_CURRENT_DATA against G2's real 
     window.__corvetteMediaBridgeWsOrigin = origin;
   }, wsOrigin);
 
-  await page.route("**/api/config", (route) =>
+  await page.route("**/corvette/api/v1/cameras", (route) =>
     route.fulfill({
       json: {
-        cameras: {
-          [cameraName]: {
-            enabled: true,
-            friendly_name: "Browser check",
-            ui: { order: 0 },
-            detect: { width: 1920, height: 1080 },
+        cameras: [
+          {
+            name: cameraName,
+            display_name: "Browser check",
+            order: 0,
+            detect_width: 1920,
+            detect_height: 1080,
           },
-        },
+        ],
       },
     }),
   );
@@ -148,17 +150,18 @@ test("prefers ManagedMediaSource when present, disables remote playback, and sti
     };
   }, wsOrigin);
 
-  await page.route("**/api/config", (route) =>
+  await page.route("**/corvette/api/v1/cameras", (route) =>
     route.fulfill({
       json: {
-        cameras: {
-          [cameraName]: {
-            enabled: true,
-            friendly_name: "Browser check",
-            ui: { order: 0 },
-            detect: { width: 1920, height: 1080 },
+        cameras: [
+          {
+            name: cameraName,
+            display_name: "Browser check",
+            order: 0,
+            detect_width: 1920,
+            detect_height: 1080,
           },
-        },
+        ],
       },
     }),
   );

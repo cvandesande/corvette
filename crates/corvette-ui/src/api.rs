@@ -1,4 +1,4 @@
-//! Browser access to the Frigate API boundary.
+//! Browser access to Corvette's own API and the Frigate API boundary.
 //!
 //! Every request reports failure as a `String` naming the path and what went
 //! wrong, for display to the reader. Two absences are reported as an empty
@@ -11,14 +11,14 @@
 
 use crate::activity::MOTION_BUCKET_SECONDS;
 use corvette_api::{
-    Camera, Event, FrigateConfig, MotionActivity, PreviewClip, RecordingSegment, ReviewEvent,
+    Camera, CameraList, Event, MotionActivity, PreviewClip, RecordingSegment, ReviewEvent,
     ReviewSegment,
 };
 use gloo_net::http::{Request, RequestBuilder};
 use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 
-const CONFIG_PATH: &str = "/api/config";
+const CAMERAS_PATH: &str = "/corvette/api/v1/cameras";
 const EVENTS_PATH: &str = "/api/events?limit=10&sort=date_desc&has_clip=1";
 const REVIEW_LIMIT: u32 = 1_000;
 
@@ -60,14 +60,11 @@ async fn fetch_json<T: DeserializeOwned>(request: RequestBuilder, path: &str) ->
         .ok_or_else(|| format!("request {path}: server returned HTTP 404"))
 }
 
-/// Fetches the enabled cameras visible in Frigate's current configuration.
+/// Fetches the cameras Corvette's camera list route grants to this caller, in
+/// the order the route returned them.
 pub(super) async fn fetch_cameras() -> Result<Vec<Camera>, String> {
-    let config: FrigateConfig = fetch_json(
-        Request::get(CONFIG_PATH).header("X-CACHE-BYPASS", "1"),
-        CONFIG_PATH,
-    )
-    .await?;
-    Ok(config.enabled_cameras())
+    let list: CameraList = fetch_json(Request::get(CAMERAS_PATH), CAMERAS_PATH).await?;
+    Ok(list.cameras.into_iter().map(Camera::from).collect())
 }
 
 /// Fetches the 10 most recent playable events in descending start-time order.

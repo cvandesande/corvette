@@ -72,8 +72,8 @@
 //!
 //! D-3 requires the relay's exposure mechanism to be configurable, and this
 //! value has nowhere else to live yet: it is not Frigate's own `/api/config`
-//! (`crate::api`'s `FrigateConfig` is Frigate's own backend contract, out of
-//! this item's reach per the plan's own gates), and unlike U1's WebSocket
+//! (Frigate's `/api/config` is Frigate's own backend contract, and Corvette's
+//! UI no longer reads it), and unlike U1's WebSocket
 //! origin it has no same-origin default to fall back to -- the relay is
 //! reachable over its own `NodePort` (D-3/K1), a different host/port than the
 //! page's own origin, not something nginx proxies. `docs/design/

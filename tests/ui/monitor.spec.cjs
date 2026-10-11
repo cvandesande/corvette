@@ -11,26 +11,27 @@ const { expect, test } = require(process.env.PLAYWRIGHT_TEST_PATH);
 // reimplemented -- plan invariant 2). Layout and fullscreen are later items
 // (M4/M5).
 
-const mockCameraConfig = (page, cameras) => {
+const mockCameraList = (page, cameras) => {
   return Promise.all([
-    page.route("**/api/config", (route) => route.fulfill({ json: { cameras } })),
+    page.route("**/corvette/api/v1/cameras", (route) => route.fulfill({ json: { cameras } })),
     page.route("**/api/review?*", (route) => route.fulfill({ json: [] })),
     page.route("**/api/review/activity/motion?*", (route) => route.fulfill({ json: [] })),
   ]);
 };
 
-// Builds N enabled cameras named "camera-0".."camera-{n-1}", in dashboard
-// order -- enough to exercise M3's per-tile staggering without hand-writing
-// a fixture per test.
+// Builds N camera entries named "camera-0".."camera-{n-1}", in the order the
+// camera list route returns them -- enough to exercise M3's per-tile
+// staggering without hand-writing a fixture per test.
 const nCameras = (count) => {
-  const cameras = {};
+  const cameras = [];
   for (let index = 0; index < count; index += 1) {
-    cameras[`camera-${index}`] = {
-      enabled: true,
-      friendly_name: `Camera ${index}`,
-      ui: { order: index },
-      detect: { width: 1920, height: 1080 },
-    };
+    cameras.push({
+      name: `camera-${index}`,
+      display_name: `Camera ${index}`,
+      order: index,
+      detect_width: 1920,
+      detect_height: 1080,
+    });
   }
   return cameras;
 };
@@ -46,15 +47,16 @@ const MIXED_ASPECT_RATIOS = [
 ];
 
 const nMixedAspectCameras = (count) => {
-  const cameras = {};
+  const cameras = [];
   for (let index = 0; index < count; index += 1) {
     const { width, height } = MIXED_ASPECT_RATIOS[index % MIXED_ASPECT_RATIOS.length];
-    cameras[`camera-${index}`] = {
-      enabled: true,
-      friendly_name: `Camera ${index}`,
-      ui: { order: index },
-      detect: { width, height },
-    };
+    cameras.push({
+      name: `camera-${index}`,
+      display_name: `Camera ${index}`,
+      order: index,
+      detect_width: width,
+      detect_height: height,
+    });
   }
   return cameras;
 };
@@ -97,26 +99,22 @@ const installLivePathLog = (page) => {
 };
 
 test("visiting /monitor renders one placeholder tile per enabled camera", async ({ page }) => {
-  await mockCameraConfig(page, {
-    "front-door": {
-      enabled: true,
-      friendly_name: "Front door",
-      ui: { order: 0 },
-      detect: { width: 1920, height: 1080 },
+  await mockCameraList(page, [
+    {
+      name: "front-door",
+      display_name: "Front door",
+      order: 0,
+      detect_width: 1920,
+      detect_height: 1080,
     },
-    "back-yard": {
-      enabled: true,
-      friendly_name: "Back yard",
-      ui: { order: 1 },
-      detect: { width: 1280, height: 720 },
+    {
+      name: "back-yard",
+      display_name: "Back yard",
+      order: 1,
+      detect_width: 1280,
+      detect_height: 720,
     },
-    disabled: {
-      enabled: false,
-      friendly_name: "Disabled camera",
-      ui: { order: 2 },
-      detect: { width: 1280, height: 720 },
-    },
-  });
+  ]);
 
   await page.goto("/monitor");
 
@@ -140,7 +138,7 @@ test("visiting /monitor renders one placeholder tile per enabled camera", async 
 // (`styles.css`'s `.monitor-enter-fullscreen:focus-visible +
 // .monitor-enter-fullscreen-hint`), not just present-but-hidden in the DOM.
 test("the fullscreen-entry button names tv-bro's Direct Navigation Mode, reachable by both mouse and keyboard/D-pad focus", async ({ page }) => {
-  await mockCameraConfig(page, nCameras(1));
+  await mockCameraList(page, nCameras(1));
 
   await page.goto("/monitor");
 
@@ -168,7 +166,7 @@ test("the fullscreen-entry button names tv-bro's Direct Navigation Mode, reachab
 });
 
 test("visiting /monitor with no cameras configured shows the empty state, not a blank page", async ({ page }) => {
-  await mockCameraConfig(page, {});
+  await mockCameraList(page, []);
 
   await page.goto("/monitor");
 
@@ -177,7 +175,7 @@ test("visiting /monitor with no cameras configured shows the empty state, not a 
 });
 
 test("visiting /monitor when the camera fetch errors shows the error state, not a blank page", async ({ page }) => {
-  await page.route("**/api/config", (route) => route.fulfill({ status: 500, body: "boom" }));
+  await page.route("**/corvette/api/v1/cameras", (route) => route.fulfill({ status: 500, body: "boom" }));
 
   await page.goto("/monitor");
 
@@ -194,7 +192,7 @@ const CAMERA_COUNT = 3;
 
 test("every tile independently reaches the HLS fallback with no cross-tile interference", async ({ page }) => {
   await installLivePathLog(page);
-  await mockCameraConfig(page, nCameras(CAMERA_COUNT));
+  await mockCameraList(page, nCameras(CAMERA_COUNT));
 
   await page.goto("/monitor");
 
@@ -228,7 +226,7 @@ test("every tile independently reaches the HLS fallback with no cross-tile inter
 
 test("tiles' initial dial is staggered rather than simultaneous", async ({ page }) => {
   await installLivePathLog(page);
-  await mockCameraConfig(page, nCameras(CAMERA_COUNT));
+  await mockCameraList(page, nCameras(CAMERA_COUNT));
 
   await page.goto("/monitor");
 
@@ -264,7 +262,7 @@ test("tiles' initial dial is staggered rather than simultaneous", async ({ page 
 // camera count this item's own Verify step names (2, 4, 5).
 for (const cameraCount of [2, 4, 5]) {
   test(`/monitor with ${cameraCount} mixed-aspect cameras fills the viewport with no scrollbar`, async ({ page }) => {
-    await mockCameraConfig(page, nMixedAspectCameras(cameraCount));
+    await mockCameraList(page, nMixedAspectCameras(cameraCount));
 
     await page.goto("/monitor");
 
@@ -383,7 +381,7 @@ const playerIdentityPreserved = (page) =>
 test.describe("item M5: click/select-to-fullscreen per tile", () => {
   test("a tile click before the one-time prompt is dismissed does not attempt requestFullscreen", async ({ page }) => {
     await installFullscreenMock(page);
-    await mockCameraConfig(page, nCameras(2));
+    await mockCameraList(page, nCameras(2));
 
     await page.goto("/monitor");
     // `dispatchEvent` fires the `click` directly on the tile's own element
@@ -397,7 +395,7 @@ test.describe("item M5: click/select-to-fullscreen per tile", () => {
 
   test("dismissing the prompt (Enter) then clicking a tile fullscreens that tile's own element, and only that one", async ({ page }) => {
     await installFullscreenMock(page);
-    await mockCameraConfig(page, nCameras(3));
+    await mockCameraList(page, nCameras(3));
 
     await page.goto("/monitor");
     await page.getByRole("button", { name: "Enter fullscreen" }).focus();
@@ -422,7 +420,7 @@ test.describe("item M5: click/select-to-fullscreen per tile", () => {
 
   test("entering fullscreen does not remount or reconnect the tile's live session", async ({ page }) => {
     await installFullscreenMock(page);
-    await mockCameraConfig(page, nCameras(1));
+    await mockCameraList(page, nCameras(1));
 
     await page.goto("/monitor");
     await dismissFullscreenPrompt(page);
@@ -439,7 +437,7 @@ test.describe("item M5: click/select-to-fullscreen per tile", () => {
 
   test("Escape exits fullscreen back to the wall, with the tile's own session still running", async ({ page }) => {
     await installFullscreenMock(page);
-    await mockCameraConfig(page, nCameras(1));
+    await mockCameraList(page, nCameras(1));
 
     await page.goto("/monitor");
     await dismissFullscreenPrompt(page);
@@ -459,7 +457,7 @@ test.describe("item M5: click/select-to-fullscreen per tile", () => {
 
   test("the one-time fullscreen-entry button does not reappear once dismissed", async ({ page }) => {
     await installFullscreenMock(page);
-    await mockCameraConfig(page, nCameras(1));
+    await mockCameraList(page, nCameras(1));
 
     await page.goto("/monitor");
     await dismissFullscreenPrompt(page);
@@ -494,7 +492,7 @@ test.describe("item M5: click/select-to-fullscreen per tile", () => {
 // already uses for the exit transition.
 test.describe("on-page fullscreen-exit control", () => {
   test("the exit control is a real DOM node but not visible or interactable before the tile is fullscreened", async ({ page }) => {
-    await mockCameraConfig(page, nCameras(1));
+    await mockCameraList(page, nCameras(1));
 
     await page.goto("/monitor");
     await dismissFullscreenPrompt(page);
@@ -505,7 +503,7 @@ test.describe("on-page fullscreen-exit control", () => {
   });
 
   test("the exit control becomes visible once the tile is actually fullscreen, and clicking it exits fullscreen without re-entering it", async ({ page }) => {
-    await mockCameraConfig(page, nCameras(1));
+    await mockCameraList(page, nCameras(1));
 
     await page.goto("/monitor");
     await dismissFullscreenPrompt(page);
@@ -557,7 +555,7 @@ test.describe("on-page fullscreen-exit control", () => {
   });
 
   test("pressing Enter on the focused exit control also exits fullscreen, without re-entering it", async ({ page }) => {
-    await mockCameraConfig(page, nCameras(1));
+    await mockCameraList(page, nCameras(1));
 
     await page.goto("/monitor");
     await dismissFullscreenPrompt(page);

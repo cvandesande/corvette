@@ -52,19 +52,20 @@ const patchWebTransportCertificateHashes = (page, certSha256Hex) => {
   }, certSha256Hex);
 };
 
-const mockCameraConfig = (page) => {
+const mockCameraList = (page) => {
   return Promise.all([
-    page.route("**/api/config", (route) =>
+    page.route("**/corvette/api/v1/cameras", (route) =>
       route.fulfill({
         json: {
-          cameras: {
-            [CAMERA_NAME]: {
-              enabled: true,
-              friendly_name: "Browser check",
-              ui: { order: 0 },
-              detect: { width: 1920, height: 1080 },
+          cameras: [
+            {
+              name: CAMERA_NAME,
+              display_name: "Browser check",
+              order: 0,
+              detect_width: 1920,
+              detect_height: 1080,
             },
-          },
+          ],
         },
       }),
     ),
@@ -106,7 +107,7 @@ test.describe("relay reachable", () => {
       window.__corvetteMoqRelayUrl = url;
     }, moqRelayUrl);
 
-    await mockCameraConfig(page);
+    await mockCameraList(page);
     await page.goto("/");
 
     await page.getByRole("button", { name: /expand browser check to full view/i }).click();
@@ -148,7 +149,7 @@ test("the fallback fires within the bounded timeout and mounts a real HLS video 
     { moqUrl: `https://127.0.0.1:${deadPort}/anon`, origin: hlsOrigin },
   );
 
-  await mockCameraConfig(page);
+  await mockCameraList(page);
   await page.goto("/");
 
   await page.getByRole("button", { name: /expand browser check to full view/i }).click();

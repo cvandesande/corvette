@@ -21,9 +21,9 @@ const { expect, test } = require(process.env.PLAYWRIGHT_TEST_PATH);
 // clips and preview intervals independently per `retain.mode`, so a
 // surviving preview with no surviving clip is routine, not an anomaly.
 
-const mockCameraConfig = (page, cameras) => {
+const mockCameraList = (page, cameras) => {
   return Promise.all([
-    page.route("**/api/config", (route) => route.fulfill({ json: { cameras } })),
+    page.route("**/corvette/api/v1/cameras", (route) => route.fulfill({ json: { cameras } })),
     page.route("**/api/review?*", (route) => route.fulfill({ json: [] })),
     page.route("**/api/recordings/summary?*", (route) => route.fulfill({ json: {} })),
     // "All" mode's own combined preview fetch (`camera == "all"`, F-13):
@@ -34,17 +34,18 @@ const mockCameraConfig = (page, cameras) => {
   ]);
 };
 
-// Builds N enabled cameras named "camera-0".."camera-{n-1}", matching
+// Builds N camera entries named "camera-0".."camera-{n-1}", matching
 // `monitor.spec.cjs`'s own helper shape.
 const nCameras = (count) => {
-  const cameras = {};
+  const cameras = [];
   for (let index = 0; index < count; index += 1) {
-    cameras[`camera-${index}`] = {
-      enabled: true,
-      friendly_name: `Camera ${index}`,
-      ui: { order: index },
-      detect: { width: 1920, height: 1080 },
-    };
+    cameras.push({
+      name: `camera-${index}`,
+      display_name: `Camera ${index}`,
+      order: index,
+      detect_width: 1920,
+      detect_height: 1080,
+    });
   }
   return cameras;
 };
@@ -60,15 +61,16 @@ const MIXED_ASPECT_RATIOS = [
 ];
 
 const nMixedAspectCameras = (count) => {
-  const cameras = {};
+  const cameras = [];
   for (let index = 0; index < count; index += 1) {
     const { width, height } = MIXED_ASPECT_RATIOS[index % MIXED_ASPECT_RATIOS.length];
-    cameras[`camera-${index}`] = {
-      enabled: true,
-      friendly_name: `Camera ${index}`,
-      ui: { order: index },
-      detect: { width, height },
-    };
+    cameras.push({
+      name: `camera-${index}`,
+      display_name: `Camera ${index}`,
+      order: index,
+      detect_width: width,
+      detect_height: height,
+    });
   }
   return cameras;
 };
@@ -132,7 +134,7 @@ const tileBoxes = (page) =>
   );
 
 test("recordings defaults to All cameras with no explicit selection", async ({ page }) => {
-  await mockCameraConfig(page, nCameras(2));
+  await mockCameraList(page, nCameras(2));
 
   await page.goto("/recordings");
 
@@ -144,7 +146,7 @@ for (const cameraCount of [2, 4, 5]) {
   test(`choosing a preset in All mode packs ${cameraCount} placeholder tiles with no overlap`, async ({
     page,
   }) => {
-    await mockCameraConfig(page, nMixedAspectCameras(cameraCount));
+    await mockCameraList(page, nMixedAspectCameras(cameraCount));
 
     await page.goto("/recordings");
     await page.getByRole("button", { name: "Last hour" }).click();
@@ -177,7 +179,7 @@ test("resizing the viewport after tiles render re-packs them to the new grid box
 }) => {
   const cameraCount = 3;
   await page.setViewportSize({ width: 1280, height: 900 });
-  await mockCameraConfig(page, nMixedAspectCameras(cameraCount));
+  await mockCameraList(page, nMixedAspectCameras(cameraCount));
 
   await page.goto("/recordings");
   await page.getByRole("button", { name: "Last hour" }).click();
@@ -214,7 +216,7 @@ test("All mode fetches each real camera's own recordings and never a synthetic \
     }
   });
 
-  await mockCameraConfig(page, nCameras(3));
+  await mockCameraList(page, nCameras(3));
   await page.route("**/api/camera-*/recordings?*", (route) => route.fulfill({ json: [] }));
   await page.goto("/recordings");
   await page.getByRole("button", { name: "Last hour" }).click();
@@ -254,7 +256,7 @@ for (const cameraCount of [1, 3]) {
       }
     });
 
-    await mockCameraConfig(page, nCameras(cameraCount));
+    await mockCameraList(page, nCameras(cameraCount));
     await page.route("**/api/camera-*/recordings?*", (route) => route.fulfill({ json: [] }));
     await page.goto("/recordings");
     await page.getByRole("button", { name: "Last hour" }).click();
@@ -268,7 +270,7 @@ test("moving the shared scrub updates each tile independently of the others' cli
   page,
 }) => {
   const now = Date.now() / 1000;
-  await mockCameraConfig(page, nCameras(2));
+  await mockCameraList(page, nCameras(2));
   // camera-0 has a real gap between two retained clips at `now - 1800`..
   // `now - 1700`; camera-1's own single clip spans the whole loaded range
   // with no boundary to cross. Both cameras' own first clip starts 100
@@ -328,7 +330,7 @@ test("moving the shared scrub updates each tile independently of the others' cli
 });
 
 test("the \"not yet settled\" indicator is independent per tile", async ({ page }) => {
-  await mockCameraConfig(page, nCameras(2));
+  await mockCameraList(page, nCameras(2));
   // A segment clamped to the whole loaded range on both cameras, so each
   // tile's initial source starts exactly at the shared scrub position (the
   // loaded range's own start) -- its `requested_offset` is exactly `0`,
@@ -369,9 +371,9 @@ test("the \"not yet settled\" indicator is independent per tile", async ({ page 
 test("a camera with no recordings anywhere in range shows the no-recordings placeholder", async ({
   page,
 }) => {
-  await mockCameraConfig(page, nCameras(2));
+  await mockCameraList(page, nCameras(2));
   // camera-0 has zero retained segments anywhere in the loaded range, and
-  // (via `mockCameraConfig`'s own empty-json "All" preview route) zero
+  // (via `mockCameraList`'s own empty-json "All" preview route) zero
   // previews either -- the plain no-recordings placeholder is reserved for
   // this genuinely-nothing-here combination (R4's targeted fix, resolved
   // 2026-09-06: clips-empty-but-previews-non-empty gets the gap treatment
@@ -417,7 +419,7 @@ test("a real gap at the scrubbed time shows a dimmed nearest-frame preview with 
   page,
 }) => {
   const now = Date.now() / 1000;
-  await mockCameraConfig(page, nCameras(2));
+  await mockCameraList(page, nCameras(2));
   // camera-0 has a real gap between two retained clips at `now - 1800`..
   // `now - 1700`. The loaded range's own start (`now - 3600`, "Last hour")
   // falls before either clip, so the tile starts in the gap state too.
@@ -492,7 +494,7 @@ test("dragging to an instant no camera covers snaps the shared playhead to the n
   page,
 }) => {
   const now = Date.now() / 1000;
-  await mockCameraConfig(page, nCameras(1));
+  await mockCameraList(page, nCameras(1));
   await page.route("**/api/camera-0/recordings?*", (route) =>
     route.fulfill({
       json: [
@@ -527,7 +529,7 @@ test("a camera with previews but no clips gets the gap treatment, not the no-rec
   page,
 }) => {
   const now = Date.now() / 1000;
-  await mockCameraConfig(page, nCameras(1));
+  await mockCameraList(page, nCameras(1));
   // camera-0 has zero retained recording clips anywhere in the loaded
   // range, but Frigate still retained a low-res preview covering part of
   // it -- Frigate prunes recording segments and preview intervals
@@ -600,7 +602,7 @@ test("the merged track shows availability, motion, and review spans from more th
   page,
 }) => {
   const now = Date.now() / 1000;
-  await mockCameraConfig(page, nCameras(2));
+  await mockCameraList(page, nCameras(2));
   // Two well-separated (>1s gap) clips, each with its own motion --
   // `push_contiguous_range`'s own merge-gap tolerance (`MAX_SEGMENT_GAP_SECONDS`)
   // keeps these as two distinct spans rather than folding them into one.
@@ -641,7 +643,7 @@ test("the merged track shows availability, motion, and review spans from more th
 // so there are real merged spans to inspect.
 test("no merged availability span exposes which camera contributed to it", async ({ page }) => {
   const now = Date.now() / 1000;
-  await mockCameraConfig(page, nCameras(2));
+  await mockCameraList(page, nCameras(2));
   await page.route("**/api/camera-0/recordings?*", (route) =>
     route.fulfill({ json: [{ start_time: now - 3500, end_time: now - 3000, motion: null }] }),
   );
@@ -711,7 +713,7 @@ test("a review marker rendered once a camera's own recording_clips resolves empt
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(String(error)));
 
-  await mockCameraConfig(page, nCameras(1));
+  await mockCameraList(page, nCameras(1));
   await page.route("**/api/camera-0/recordings?*", async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 300));
     await route.fulfill({ json: [] });
