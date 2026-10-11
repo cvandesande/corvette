@@ -411,6 +411,26 @@ pub(crate) fn utf8(bytes: &[u8]) -> Option<&str> {
     std::str::from_utf8(bytes).ok()
 }
 
+/// Every route the service serves; the router matches nothing else (issue #4 I2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Route {
+    Cameras,
+    Health,
+}
+
+impl Route {
+    pub const ALL: [Self; 2] = [Self::Cameras, Self::Health];
+
+    /// Full request path, including `API_PREFIX`.
+    #[must_use]
+    pub fn path(self) -> String {
+        match self {
+            Self::Cameras => format!("{API_PREFIX}cameras"),
+            Self::Health => format!("{API_PREFIX}health"),
+        }
+    }
+}
+
 /// The identity gate and router: a missing or empty `Remote-User` is `401`
 /// whatever the path (issue #4 D4). A data route may fetch, so routing is
 /// async; the gate still runs first, so an anonymous request never reaches a
@@ -425,15 +445,17 @@ async fn route(request: &Request, config: &ConfigSource, db_path: &Path) -> Resp
     else {
         return unauthorized();
     };
-    // Everything the service serves lives under the API prefix; a path outside
-    // it can match no route (issue #4 D6).
-    let Some(rest) = request.path.strip_prefix(API_PREFIX) else {
+    // A path is served exactly when it equals a route-table path; those carry
+    // the API prefix, so nothing outside it can match (issue #4 D6).
+    let Some(route) = Route::ALL
+        .into_iter()
+        .find(|candidate| candidate.path() == request.path)
+    else {
         return not_found();
     };
-    match rest {
-        "cameras" => cameras(config, &request.remote_role).await,
-        "health" => health(config, db_path).await,
-        _ => not_found(),
+    match route {
+        Route::Cameras => cameras(config, &request.remote_role).await,
+        Route::Health => health(config, db_path).await,
     }
 }
 

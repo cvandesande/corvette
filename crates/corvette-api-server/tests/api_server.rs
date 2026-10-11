@@ -3,7 +3,7 @@
 
 use corvette_api::ErrorBody;
 use corvette_api_server::config::{ConfigSource, DEFAULT_CACHE_TTL};
-use corvette_api_server::{ApiServer, CONNECTION_TIMEOUT};
+use corvette_api_server::{ApiServer, CONNECTION_TIMEOUT, Route};
 use std::collections::HashMap;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -148,11 +148,11 @@ fn assert_error_shape(raw: &[u8], status_prefix: &str, code: &str) {
 #[tokio::test]
 async fn every_route_requires_remote_user() {
     let server = start_server(CONNECTION_TIMEOUT);
-    for path in [
-        "/corvette/api/v1/cameras",
-        "/corvette/api/v1/health",
-        "/corvette/api/v1/unknown-path",
-    ] {
+    // The router's own route table plus one path it does not serve, so a route
+    // added to the table is checked here without touching this test.
+    let mut paths: Vec<String> = Route::ALL.map(Route::path).to_vec();
+    paths.push("/corvette/api/v1/unknown-path".to_owned());
+    for path in &paths {
         let response = exchange(&server.socket, &get(path, &[])).await;
         assert_error_shape(&response, "401", "unauthorized");
     }
