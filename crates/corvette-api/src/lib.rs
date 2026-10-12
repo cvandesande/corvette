@@ -23,23 +23,8 @@ struct FrigateAuth {
 }
 
 impl FrigateConfig {
-    /// Returns enabled cameras in their configured dashboard order.
-    #[must_use]
-    pub fn enabled_cameras(self) -> Vec<Camera> {
-        Self::enabled_in_dashboard_order(self.cameras)
-            .into_iter()
-            .map(|(name, camera)| Camera {
-                display_name: camera.friendly_name.unwrap_or_else(|| name.clone()),
-                name,
-                order: camera.ui.order,
-                width: camera.detect.width,
-                height: camera.detect.height,
-            })
-            .collect()
-    }
-
-    /// Returns the same cameras and order as [`FrigateConfig::enabled_cameras`],
-    /// as the wire entries served by Corvette's own camera list (issue #4).
+    /// Returns enabled cameras in their configured dashboard order, as the
+    /// wire entries served by Corvette's own camera list (issue #4).
     #[must_use]
     pub fn enabled_camera_entries(self) -> Vec<CameraEntry> {
         Self::camera_entries_in_dashboard_order(self.cameras)
@@ -389,32 +374,6 @@ mod tests {
     }"#;
 
     #[test]
-    fn enabled_cameras_are_ordered_and_ignore_unneeded_config() {
-        let config: FrigateConfig =
-            serde_json::from_str(MULTI_CAMERA_CONFIG).expect("Frigate config should deserialize");
-
-        assert_eq!(
-            config.enabled_cameras(),
-            vec![
-                Camera {
-                    name: "front_door".to_owned(),
-                    display_name: "front_door".to_owned(),
-                    width: 640,
-                    height: 480,
-                    order: 10,
-                },
-                Camera {
-                    name: "side_door".to_owned(),
-                    display_name: "Side door".to_owned(),
-                    width: 1920,
-                    height: 1080,
-                    order: 20,
-                },
-            ]
-        );
-    }
-
-    #[test]
     fn cameras_with_equal_order_are_sorted_by_stable_name() {
         let config: FrigateConfig = serde_json::from_str(
             r#"{
@@ -437,29 +396,11 @@ mod tests {
         .expect("Frigate config should deserialize");
 
         let names = config
-            .enabled_cameras()
+            .enabled_camera_entries()
             .into_iter()
-            .map(|camera| camera.name)
+            .map(|entry| entry.name)
             .collect::<Vec<_>>();
         assert_eq!(names, ["east", "west"]);
-    }
-
-    #[test]
-    fn camera_entries_match_enabled_camera_names_and_order() {
-        let entries = serde_json::from_str::<FrigateConfig>(MULTI_CAMERA_CONFIG)
-            .expect("Frigate config should deserialize")
-            .enabled_camera_entries();
-        let cameras = serde_json::from_str::<FrigateConfig>(MULTI_CAMERA_CONFIG)
-            .expect("Frigate config should deserialize")
-            .enabled_cameras();
-
-        assert_eq!(
-            entries.iter().map(|entry| &entry.name).collect::<Vec<_>>(),
-            cameras
-                .iter()
-                .map(|camera| &camera.name)
-                .collect::<Vec<_>>()
-        );
     }
 
     #[test]
