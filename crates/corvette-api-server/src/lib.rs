@@ -19,6 +19,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
+pub mod activity;
 pub mod config;
 pub mod database;
 
