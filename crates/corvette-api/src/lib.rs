@@ -287,7 +287,7 @@ pub struct PreviewClip {
 }
 
 /// Frigate's ordered review activity classifications.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewSeverity {
     /// Recorded motion that did not become a detection.
@@ -316,6 +316,80 @@ impl ReviewSeverity {
             Self::Alert => 2,
         }
     }
+}
+
+/// The body of `GET /corvette/api/v1/activity` (issue #5).
+///
+/// The shape is fixed: every field is always written, absent media as `null`
+/// and empty lists as `[]`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ActivityResponse {
+    /// The request's `after` echoed back, as Unix seconds.
+    pub after: f64,
+    /// The request's `before` echoed back, as Unix seconds.
+    pub before: f64,
+    /// Width in seconds of one motion bucket.
+    pub motion_bucket_seconds: u32,
+    /// The reviews inside the requested window.
+    pub reviews: Vec<ActivityReview>,
+    /// The motion buckets covering the requested window.
+    pub motion: Vec<MotionBucket>,
+}
+
+/// One review inside an [`ActivityResponse`] (issue #5).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ActivityReview {
+    /// Stable review identifier.
+    pub id: String,
+    /// Camera that observed the activity.
+    pub camera: String,
+    /// Highest activity classification reached by the review.
+    pub severity: ReviewSeverity,
+    /// Activity start as Unix seconds.
+    pub start: f64,
+    /// Activity end as Unix seconds; `None` while the review is ongoing.
+    pub end: Option<f64>,
+    /// Sorted detected object labels.
+    pub objects: Vec<String>,
+    /// Sorted zones entered during the review.
+    pub zones: Vec<String>,
+    /// Sorted identifiers of the tracked-object events this review was built
+    /// from.
+    pub detections: Vec<String>,
+    /// Sorted recognition labels assigned to detected objects.
+    pub sub_labels: Vec<String>,
+    /// Sorted detected audio labels.
+    pub audio: Vec<String>,
+    /// The review's media as available now.
+    pub media: ReviewMedia,
+}
+
+/// The media offered with a review; each link is `None` when that media is
+/// not available now (issue #5).
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ReviewMedia {
+    /// Still image of the review.
+    pub thumbnail: Option<MediaLink>,
+    /// Video of the review.
+    pub clip: Option<MediaLink>,
+}
+
+/// One fetchable piece of review media (issue #5).
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct MediaLink {
+    /// URL the browser requests to fetch the media.
+    pub url: String,
+}
+
+/// One motion bucket inside an [`ActivityResponse`] (issue #5).
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct MotionBucket {
+    /// Bucket start as Unix seconds, a multiple of `motion_bucket_seconds`.
+    pub start: i64,
+    /// Greatest raw motion count recorded within the bucket.
+    pub level: i64,
+    /// Sorted cameras that recorded motion within the bucket.
+    pub cameras: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -837,5 +911,105 @@ mod tests {
         assert_eq!(preview.camera, "front");
         assert_eq!(preview.media_type, "video/mp4");
         assert_eq!(preview.src, "/clips/previews/front/1785764400.0.mp4");
+    }
+
+    /// The documented `GET /corvette/api/v1/activity` body (issue #5).
+    /// Whole-number `f64` fields are written with `.0`.
+    const ACTIVITY_RESPONSE_JSON: &str = r#"{
+        "after": 1760227200.0, "before": 1760313600.0, "motion_bucket_seconds": 30,
+        "reviews": [
+          {
+            "id": "1760230000.5-abc123", "camera": "front", "severity": "alert",
+            "start": 1760230000.5, "end": 1760230042.0,
+            "objects": ["person"], "zones": ["driveway"], "detections": ["1760230001.2-def456"],
+            "sub_labels": ["alice"], "audio": [],
+            "media": {
+              "thumbnail": {"url": "/clips/review/thumb-front-1760230000.5-abc123.webp"},
+              "clip": {"url": "/api/front/start/1760230000.5/end/1760230042.0/clip.mp4"}
+            }
+          },
+          {
+            "id": "1760231000.0-xyz789", "camera": "back", "severity": "significant_motion",
+            "start": 1760231000.0, "end": null,
+            "objects": [], "zones": [], "detections": [], "sub_labels": [], "audio": ["bark"],
+            "media": {"thumbnail": null, "clip": null}
+          }
+        ],
+        "motion": [{"start": 1760230020, "level": 14, "cameras": ["back", "front"]}]
+    }"#;
+
+    /// The value `ACTIVITY_RESPONSE_JSON` documents.
+    fn documented_activity_response() -> ActivityResponse {
+        ActivityResponse {
+            after: 1_760_227_200.0,
+            before: 1_760_313_600.0,
+            motion_bucket_seconds: 30,
+            reviews: vec![
+                ActivityReview {
+                    id: "1760230000.5-abc123".to_owned(),
+                    camera: "front".to_owned(),
+                    severity: ReviewSeverity::Alert,
+                    start: 1_760_230_000.5,
+                    end: Some(1_760_230_042.0),
+                    objects: vec!["person".to_owned()],
+                    zones: vec!["driveway".to_owned()],
+                    detections: vec!["1760230001.2-def456".to_owned()],
+                    sub_labels: vec!["alice".to_owned()],
+                    audio: vec![],
+                    media: ReviewMedia {
+                        thumbnail: Some(MediaLink {
+                            url: "/clips/review/thumb-front-1760230000.5-abc123.webp".to_owned(),
+                        }),
+                        clip: Some(MediaLink {
+                            url: "/api/front/start/1760230000.5/end/1760230042.0/clip.mp4"
+                                .to_owned(),
+                        }),
+                    },
+                },
+                ActivityReview {
+                    id: "1760231000.0-xyz789".to_owned(),
+                    camera: "back".to_owned(),
+                    severity: ReviewSeverity::SignificantMotion,
+                    start: 1_760_231_000.0,
+                    end: None,
+                    objects: vec![],
+                    zones: vec![],
+                    detections: vec![],
+                    sub_labels: vec![],
+                    audio: vec!["bark".to_owned()],
+                    media: ReviewMedia {
+                        thumbnail: None,
+                        clip: None,
+                    },
+                },
+            ],
+            motion: vec![MotionBucket {
+                start: 1_760_230_020,
+                level: 14,
+                cameras: vec!["back".to_owned(), "front".to_owned()],
+            }],
+        }
+    }
+
+    #[test]
+    fn activity_response_serializes_to_the_documented_shape() {
+        let response = documented_activity_response();
+
+        assert_eq!(
+            serde_json::to_value(&response).expect("activity response should serialize"),
+            serde_json::from_str::<serde_json::Value>(ACTIVITY_RESPONSE_JSON)
+                .expect("documented activity body should parse")
+        );
+    }
+
+    #[test]
+    fn activity_response_round_trips() {
+        let response = documented_activity_response();
+
+        assert_eq!(
+            serde_json::from_str::<ActivityResponse>(ACTIVITY_RESPONSE_JSON)
+                .expect("documented activity body should deserialize"),
+            response
+        );
     }
 }
