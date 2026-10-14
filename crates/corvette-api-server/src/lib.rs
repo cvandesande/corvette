@@ -1,4 +1,4 @@
-//! The read-only Corvette API service (issue #4 A2, A3).
+//! The read-only Corvette API service (issue #4 A2, A3; issue #5 phase A).
 //!
 //! Serves [`corvette_api`] wire types over a Unix domain socket with a
 //! hand-written `HTTP/1.0` request parser and an identity-gated router under
@@ -6,11 +6,13 @@
 //! with no body and sets `Remote-User`/`Remote-Role` from Frigate's auth
 //! response, so the parser accepts exactly that narrow form and rejects
 //! everything else. The service listens on a Unix socket only (no TCP) because
-//! that is what keeps the identity headers unspoofable (issue #4 D4). The data
-//! routes answer from [`config::ConfigSource`] and, for `health`, from a
-//! read-only probe of [`database`].
+//! that is what keeps the identity headers unspoofable (issue #4 D4). The
+//! routes are `cameras`, `health`, and `activity`: `cameras` answers from
+//! [`config::ConfigSource`], `health` also probes [`database`] read-only, and
+//! `activity` also reads that database and links each review to media under
+//! the media root.
 
-use corvette_api::{ErrorBody, Health};
+use corvette_api::{ActivityResponse, ErrorBody, Health};
 use std::future::Future;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -23,6 +25,7 @@ pub mod activity;
 pub mod config;
 pub mod database;
 
+use crate::activity::{ActivityQuery, ActivityRows};
 use crate::config::ConfigSource;
 
 /// Every Corvette route lives under this prefix (issue #4 D6).
@@ -49,6 +52,9 @@ pub(crate) fn log_event(unit: &str, event: &str, detail: impl std::fmt::Display)
 /// need, with the identity headers already validated and case-folded.
 struct Request {
     path: String,
+    /// The text after the first `?` in the request target, empty when the
+    /// request carries no query.
+    query: String,
     remote_user: Option<String>,
     remote_role: String,
 }
@@ -74,6 +80,7 @@ pub struct ApiServer {
     connection_timeout: Duration,
     config: Arc<ConfigSource>,
     db_path: PathBuf,
+    media_root: PathBuf,
 }
 
 impl ApiServer {
@@ -107,7 +114,17 @@ impl ApiServer {
             connection_timeout,
             config,
             db_path: db_path.to_path_buf(),
+            media_root: PathBuf::from(activity::DEFAULT_MEDIA_ROOT),
         })
+    }
+
+    /// Serves review media from `media_root`, the directory Frigate's
+    /// `/media/frigate/` paths are relative to, instead of
+    /// [`DEFAULT_MEDIA_ROOT`](activity::DEFAULT_MEDIA_ROOT).
+    #[must_use]
+    pub fn with_media_root(mut self, media_root: &Path) -> Self {
+        self.media_root = media_root.to_path_buf();
+        self
     }
 
     /// The socket path this server is listening on.
@@ -125,6 +142,7 @@ impl ApiServer {
             connection_timeout,
             config,
             db_path,
+            media_root,
         } = self;
         tokio::pin!(shutdown);
         loop {
@@ -135,8 +153,16 @@ impl ApiServer {
                     Ok((stream, _peer)) => {
                         let config = Arc::clone(&config);
                         let db_path = db_path.clone();
+                        let media_root = media_root.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, connection_timeout, config, &db_path).await;
+                            handle_connection(
+                                stream,
+                                connection_timeout,
+                                config,
+                                &db_path,
+                                &media_root,
+                            )
+                            .await;
                         });
                     }
                     Err(err) => log_event("listener", "accept-error", err),
@@ -172,9 +198,13 @@ async fn handle_connection(
     timeout: Duration,
     config: Arc<ConfigSource>,
     db_path: &Path,
+    media_root: &Path,
 ) {
-    let outcome =
-        tokio::time::timeout(timeout, read_route_respond(&mut stream, &config, db_path)).await;
+    let outcome = tokio::time::timeout(
+        timeout,
+        read_route_respond(&mut stream, &config, db_path, media_root),
+    )
+    .await;
     match outcome {
         Ok(Ok(Outcome::Responded)) => {}
         Ok(Ok(Outcome::ClosedEarly)) => {
@@ -200,6 +230,7 @@ async fn read_route_respond(
     stream: &mut UnixStream,
     config: &ConfigSource,
     db_path: &Path,
+    media_root: &Path,
 ) -> std::io::Result<Outcome> {
     let block = match read_header_block(stream).await {
         HeaderRead::Complete(block) => block,
@@ -214,7 +245,7 @@ async fn read_route_respond(
         HeaderRead::Closed => return Ok(Outcome::ClosedEarly),
     };
     let response = match parse_request(&block) {
-        Ok(request) => route(&request, config, db_path).await,
+        Ok(request) => route(&request, config, db_path, media_root).await,
         Err(reason) => bad_request(&reason),
     };
     write_response(stream, &response).await?;
@@ -292,7 +323,7 @@ fn parse_request(block: &[u8]) -> Result<Request, String> {
         .next()
         .filter(|line| !line.is_empty())
         .ok_or_else(|| "missing request line".to_owned())?;
-    let path = parse_request_line(request_line)?;
+    let (path, query) = parse_request_line(request_line)?;
 
     let mut remote_user: Option<String> = None;
     let mut remote_role: Option<String> = None;
@@ -351,14 +382,16 @@ fn parse_request(block: &[u8]) -> Result<Request, String> {
     }
     Ok(Request {
         path: path.to_owned(),
+        query: query.to_owned(),
         remote_user,
         remote_role: remote_role.unwrap_or_default(),
     })
 }
 
 /// Validates `GET <target> HTTP/1.0`/`HTTP/1.1` (single spaces, target starts
-/// with `/`) and returns the path (the target up to any `?`).
-fn parse_request_line(line: &[u8]) -> Result<&str, String> {
+/// with `/`) and returns the path (the target up to any `?`) and the query
+/// (the text after that `?`, empty when the target has none).
+fn parse_request_line(line: &[u8]) -> Result<(&str, &str), String> {
     let line =
         std::str::from_utf8(line).map_err(|_| "request line is not valid UTF-8".to_owned())?;
     let parts: Vec<&str> = line.split(' ').collect();
@@ -375,7 +408,10 @@ fn parse_request_line(line: &[u8]) -> Result<&str, String> {
     if !target.starts_with('/') {
         return Err("request target does not start with /".to_owned());
     }
-    Ok(target.split_once('?').map_or(target, |(path, _)| path))
+    Ok(match target.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (target, ""),
+    })
 }
 
 /// Splits `bytes` at the first `byte`, returning the parts either side of it.
@@ -415,17 +451,19 @@ pub(crate) fn utf8(bytes: &[u8]) -> Option<&str> {
 /// Every route the service serves; the router matches nothing else (issue #4 I2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Route {
+    Activity,
     Cameras,
     Health,
 }
 
 impl Route {
-    pub const ALL: [Self; 2] = [Self::Cameras, Self::Health];
+    pub const ALL: [Self; 3] = [Self::Activity, Self::Cameras, Self::Health];
 
     /// Full request path, including `API_PREFIX`.
     #[must_use]
     pub fn path(self) -> String {
         match self {
+            Self::Activity => format!("{API_PREFIX}activity"),
             Self::Cameras => format!("{API_PREFIX}cameras"),
             Self::Health => format!("{API_PREFIX}health"),
         }
@@ -436,7 +474,12 @@ impl Route {
 /// whatever the path (issue #4 D4). A data route may fetch, so routing is
 /// async; the gate still runs first, so an anonymous request never reaches a
 /// fetch.
-async fn route(request: &Request, config: &ConfigSource, db_path: &Path) -> Response {
+async fn route(
+    request: &Request,
+    config: &ConfigSource,
+    db_path: &Path,
+    media_root: &Path,
+) -> Response {
     // Identity gate runs before any routing decision, so an anonymous caller
     // learns nothing about which paths exist (issue #4 D4).
     let Some(_user) = request
@@ -455,6 +498,7 @@ async fn route(request: &Request, config: &ConfigSource, db_path: &Path) -> Resp
         return not_found();
     };
     match route {
+        Route::Activity => activity(request, config, db_path, media_root).await,
         Route::Cameras => cameras(config, &request.remote_role).await,
         Route::Health => health(config, db_path).await,
     }
@@ -474,6 +518,70 @@ async fn cameras(config: &ConfigSource, role: &str) -> Response {
             "config_unavailable",
             &format!("Frigate configuration is unavailable: {err}"),
         ),
+    }
+}
+
+/// `GET /corvette/api/v1/activity` (issue #5 D-4..D-10): the role picks the
+/// cameras, the query picks the range and kinds, and each review is linked to
+/// the media available now. A malformed query is `400`; a source that cannot
+/// be read is `503`. The underlying database error is logged, never sent.
+async fn activity(
+    request: &Request,
+    config: &ConfigSource,
+    db_path: &Path,
+    media_root: &Path,
+) -> Response {
+    let query = match ActivityQuery::parse(&request.query) {
+        Ok(query) => query,
+        Err(reason) => return bad_request(&reason),
+    };
+    // A fetch failure is already logged with unit `config` where it happens.
+    let mut cameras = match config.allowed_camera_names(&request.remote_role).await {
+        Ok(cameras) => cameras,
+        Err(err) => {
+            return error_response(
+                "503 Service Unavailable",
+                "config_unavailable",
+                &format!("Frigate configuration is unavailable: {err}"),
+            );
+        }
+    };
+    if let Some(requested) = &query.cameras {
+        cameras.retain(|name| requested.contains(name));
+    }
+    // With no readable camera left, the answer is empty and the database is
+    // never opened.
+    let response = if cameras.is_empty() {
+        activity::activity_response(&query, ActivityRows::default(), media_root)
+    } else {
+        // rusqlite and the media `stat` calls are synchronous; the links are
+        // built only after the read transaction has ended (issue #5 I4).
+        let db_path = db_path.to_path_buf();
+        let media_root = media_root.to_path_buf();
+        let read = tokio::task::spawn_blocking(move || -> rusqlite::Result<ActivityResponse> {
+            let mut connection = database::open_read_only(&db_path)?;
+            let rows = activity::read_activity(&mut connection, &query, &cameras)?;
+            drop(connection);
+            Ok(activity::activity_response(&query, rows, &media_root))
+        })
+        .await;
+        match read {
+            Ok(Ok(response)) => response,
+            Ok(Err(err)) => {
+                log_event("database", "activity-read-error", err);
+                return database_unavailable();
+            }
+            Err(err) => {
+                log_event("database", "activity-task-error", err);
+                return database_unavailable();
+            }
+        }
+    };
+    // ActivityResponse holds only strings and numbers; its derived Serialize
+    // never fails.
+    Response {
+        status: "200 OK",
+        body: serde_json::to_vec(&response).expect("activity body serializes"),
     }
 }
 
@@ -531,6 +639,14 @@ fn bad_request(message: &str) -> Response {
     error_response("400 Bad Request", "bad_request", message)
 }
 
+fn database_unavailable() -> Response {
+    error_response(
+        "503 Service Unavailable",
+        "database_unavailable",
+        "Frigate's database could not be read.",
+    )
+}
+
 fn unauthorized() -> Response {
     error_response(
         "401 Unauthorized",
@@ -579,14 +695,16 @@ mod tests {
     fn request_line_accepts_get_with_a_leading_slash_target() {
         let request = parse("GET /corvette/api/v1/cameras HTTP/1.0", &[]).expect("valid");
         assert_eq!(request.path, "/corvette/api/v1/cameras");
+        assert_eq!(request.query, "");
         assert_eq!(request.remote_user, None);
         assert_eq!(request.remote_role, "");
     }
 
     #[test]
-    fn request_line_strips_the_query_string_from_the_path() {
+    fn request_line_splits_the_path_from_the_query() {
         let request = parse("GET /corvette/api/v1/cameras?a=b HTTP/1.1", &[]).expect("valid");
         assert_eq!(request.path, "/corvette/api/v1/cameras");
+        assert_eq!(request.query, "a=b");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Entrypoint: binds the Unix socket named by `CORVETTE_API_SOCKET` and serves
 //! until the process is asked to terminate (issue #4 A2, A3).
 
+use corvette_api_server::activity::{DEFAULT_MEDIA_ROOT, MEDIA_ROOT_ENV};
 use corvette_api_server::config::{
     CONFIG_ADDR_ENV, ConfigSource, DEFAULT_CACHE_TTL, DEFAULT_CONFIG_ADDR,
 };
@@ -20,6 +21,8 @@ async fn main() -> std::process::ExitCode {
     let config_addr =
         std::env::var(CONFIG_ADDR_ENV).unwrap_or_else(|_| DEFAULT_CONFIG_ADDR.to_owned());
     let db_path = std::env::var(DB_PATH_ENV).unwrap_or_else(|_| DEFAULT_DB_PATH.to_owned());
+    let media_root =
+        std::env::var(MEDIA_ROOT_ENV).unwrap_or_else(|_| DEFAULT_MEDIA_ROOT.to_owned());
     let config = Arc::new(ConfigSource::new(config_addr, DEFAULT_CACHE_TTL));
     let server = match ApiServer::bind(
         Path::new(&socket_path),
@@ -27,7 +30,7 @@ async fn main() -> std::process::ExitCode {
         config,
         Path::new(&db_path),
     ) {
-        Ok(server) => server,
+        Ok(server) => server.with_media_root(Path::new(&media_root)),
         Err(err) => {
             eprintln!("corvette-api-server: failed to bind {socket_path}: {err}");
             return std::process::ExitCode::FAILURE;

@@ -89,6 +89,21 @@ impl ConfigSource {
         self.config().await.map(|_config| ())
     }
 
+    /// The enabled cameras `role` may see, as names in dashboard order, or
+    /// the fetch failure when no copy younger than the TTL is available.
+    pub(crate) async fn allowed_camera_names(
+        &self,
+        role: &str,
+    ) -> Result<Vec<String>, ConfigFetchError> {
+        Ok(self
+            .config()
+            .await?
+            .camera_entries_for_role(role)
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect())
+    }
+
     /// The newest configuration, refetched when the cached copy is older than
     /// the TTL. A copy older than the TTL is never returned: a failed fetch
     /// propagates even when a stale copy is held.

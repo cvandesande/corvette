@@ -1,15 +1,25 @@
 //! Parsing and reads for `GET /corvette/api/v1/activity` (issue #5).
 
-use corvette_api::{MotionBucket, ReviewSeverity};
+use corvette_api::{
+    ActivityResponse, ActivityReview, MediaLink, MotionBucket, ReviewMedia, ReviewSeverity,
+};
 use rusqlite::types::{Type, Value};
 use rusqlite::{Connection, params, params_from_iter};
 use std::collections::BTreeMap;
+use std::path::{Component, Path};
 
 /// Longest accepted range: 31 days in seconds (issue #5 D-4).
 pub const MAX_RANGE_SECONDS: f64 = 2_678_400.0;
 
 /// Width of one motion bucket in seconds (issue #5 D-8).
 pub const MOTION_BUCKET_SECONDS: u32 = 30;
+
+/// Environment variable naming the directory the media tree is served from.
+pub const MEDIA_ROOT_ENV: &str = "CORVETTE_API_MEDIA_ROOT";
+
+/// The media root used when `CORVETTE_API_MEDIA_ROOT` is unset: Frigate's
+/// media mount path as Corvette sees it (issue #5).
+pub const DEFAULT_MEDIA_ROOT: &str = "/media/frigate";
 
 /// Validated parameters of one activity query.
 #[derive(Clone, Debug, PartialEq)]
@@ -469,6 +479,110 @@ fn text_conversion_error(column_index: usize, column_name: &str, reason: &str) -
         Type::Text,
         Box::new(std::io::Error::other(format!("`{column_name}`: {reason}"))),
     )
+}
+
+/// Builds the `GET /corvette/api/v1/activity` body from rows read under
+/// `query`: the range echoed back, each review carrying media links only for
+/// media available now.
+///
+/// `media_root` is the directory Frigate's stored `/media/frigate/` paths are
+/// relative to; checking a file's presence there must happen after the read
+/// transaction has ended (issue #5 I4).
+#[must_use]
+pub fn activity_response(
+    query: &ActivityQuery,
+    rows: ActivityRows,
+    media_root: &Path,
+) -> ActivityResponse {
+    ActivityResponse {
+        after: query.after,
+        before: query.before,
+        motion_bucket_seconds: MOTION_BUCKET_SECONDS,
+        reviews: rows
+            .reviews
+            .into_iter()
+            .map(|row| ActivityReview {
+                id: row.id,
+                camera: row.camera.clone(),
+                severity: row.severity,
+                start: row.start,
+                end: row.end,
+                objects: row.objects,
+                zones: row.zones,
+                detections: row.detections,
+                sub_labels: row.sub_labels,
+                audio: row.audio,
+                media: ReviewMedia {
+                    thumbnail: thumbnail_link(&row.thumb_path, media_root),
+                    clip: clip_link(&row.camera, row.start, row.end, row.has_recording),
+                },
+            })
+            .collect(),
+        motion: rows.motion,
+    }
+}
+
+/// The path prefix Frigate stores in `reviewsegment.thumb_path`: Frigate's
+/// own media mount as Frigate sees it.
+const THUMB_PATH_PREFIX: &str = "/media/frigate/";
+
+/// The link to fetch a review's thumbnail, or `None` when the stored path is
+/// outside the media prefix, escapes `media_root` through `.` or `..` or an
+/// empty remainder, or names no regular file there.
+fn thumbnail_link(thumb_path: &str, media_root: &Path) -> Option<MediaLink> {
+    let rel = thumb_path.strip_prefix(THUMB_PATH_PREFIX)?;
+    let escaped = rel.is_empty()
+        || !Path::new(rel)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)));
+    if escaped || !media_root.join(rel).is_file() {
+        return None;
+    }
+    Some(MediaLink {
+        url: format!(
+            "/{}",
+            rel.split('/')
+                .map(percent_encode_segment)
+                .collect::<Vec<String>>()
+                .join("/")
+        ),
+    })
+}
+
+/// The clip URL for a review, present only when the review ended and a
+/// recording of its camera overlaps it; an ongoing review has no clip.
+fn clip_link(camera: &str, start: f64, end: Option<f64>, has_recording: bool) -> Option<MediaLink> {
+    let end = end?;
+    if !has_recording {
+        return None;
+    }
+    // `{}` on an f64 is Rust's shortest round-trip form, so stored whole
+    // seconds come back as `1500`, not `1500.0`.
+    Some(MediaLink {
+        url: format!(
+            "/api/{}/start/{}/end/{}/clip.mp4",
+            percent_encode_segment(camera),
+            start,
+            end
+        ),
+    })
+}
+
+/// Percent-encodes every byte outside the unreserved set
+/// (`A-Z a-z 0-9 - . _ ~`) as an upper-case `%XX` escape.
+fn percent_encode_segment(segment: &str) -> String {
+    const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(segment.len());
+    for byte in segment.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(*byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX_DIGITS[usize::from(byte & 0x0F)]));
+        }
+    }
+    encoded
 }
 
 #[cfg(test)]
@@ -1491,5 +1605,156 @@ mod tests {
                 include_motion: true,
             }
         );
+    }
+
+    /// A unique writable temp dir; removed again by the caller's cleanup.
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "corvette-media-test-{}-{tag}-{id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    /// Writes `rel` under `root`, creating parent directories.
+    fn write_file(root: &Path, rel: &str) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().expect("file parent")).expect("create dirs");
+        std::fs::write(&path, "bytes").expect("write file");
+    }
+
+    #[test]
+    fn a_file_under_the_media_prefix_gets_a_serving_url() {
+        let root = temp_dir("thumb-present");
+        write_file(&root, "clips/review/thumb-front-1.5-ab.webp");
+        assert_eq!(
+            thumbnail_link("/media/frigate/clips/review/thumb-front-1.5-ab.webp", &root),
+            Some(MediaLink {
+                url: "/clips/review/thumb-front-1.5-ab.webp".to_owned()
+            })
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_stored_path_outside_the_media_prefix_is_not_linked() {
+        assert_eq!(
+            thumbnail_link("/media/elsewhere/thumb.webp", Path::new("/media/frigate")),
+            None
+        );
+    }
+
+    #[test]
+    fn an_empty_remainder_or_absent_file_is_not_linked() {
+        let root = temp_dir("thumb-absent");
+        assert_eq!(thumbnail_link("/media/frigate/", &root), None);
+        assert_eq!(thumbnail_link("/media/frigate/absent.webp", &root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_thumbnail_path_with_a_parent_or_current_dir_is_not_linked() {
+        let dir = temp_dir("thumb-escape");
+        let root = dir.join("media");
+        std::fs::create_dir_all(&root).expect("create media root");
+        // Both files exist where the escaped path would resolve, so only the
+        // component rule can refuse the link.
+        write_file(&dir, "secret.webp");
+        write_file(&root, "inner.webp");
+        assert_eq!(thumbnail_link("/media/frigate/../secret.webp", &root), None);
+        assert_eq!(thumbnail_link("/media/frigate/./inner.webp", &root), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thumbnail_url_segments_encode_everything_outside_the_unreserved_set() {
+        let root = temp_dir("thumb-encoded");
+        write_file(&root, "two words/100%.webp");
+        assert_eq!(
+            thumbnail_link("/media/frigate/two words/100%.webp", &root),
+            Some(MediaLink {
+                url: "/two%20words/100%25.webp".to_owned()
+            })
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_clip_url_appears_only_for_an_ended_review_with_a_recording() {
+        // `{}` on `1.5` and `2.0` renders `1.5` and `2`: shortest
+        // round-trip, so whole seconds carry no decimal point.
+        assert_eq!(
+            clip_link("front door", 1.5, Some(2.0), true).expect("clip link"),
+            MediaLink {
+                url: "/api/front%20door/start/1.5/end/2/clip.mp4".to_owned()
+            }
+        );
+        assert_eq!(clip_link("front", 1.5, Some(2.0), false), None);
+        assert_eq!(clip_link("front", 1.5, None, false), None);
+    }
+
+    #[test]
+    fn the_response_echoes_the_range_and_links_each_review() {
+        let root = temp_dir("response");
+        write_file(&root, "thumb.webp");
+        let rows = ActivityRows {
+            reviews: vec![ReviewRow {
+                id: "r-1".to_owned(),
+                camera: "front".to_owned(),
+                severity: ReviewSeverity::Alert,
+                start: 1_500.0,
+                end: Some(1_600.0),
+                thumb_path: "/media/frigate/thumb.webp".to_owned(),
+                objects: vec!["cat".to_owned()],
+                zones: vec![],
+                detections: vec![],
+                sub_labels: vec![],
+                audio: vec![],
+                has_recording: true,
+            }],
+            motion: vec![MotionBucket {
+                start: 1_500,
+                level: 3,
+                cameras: vec!["front".to_owned()],
+            }],
+        };
+        assert_eq!(
+            activity_response(&range_query(1_000.0, 2_000.0), rows, &root),
+            ActivityResponse {
+                after: 1_000.0,
+                before: 2_000.0,
+                motion_bucket_seconds: MOTION_BUCKET_SECONDS,
+                reviews: vec![ActivityReview {
+                    id: "r-1".to_owned(),
+                    camera: "front".to_owned(),
+                    severity: ReviewSeverity::Alert,
+                    start: 1_500.0,
+                    end: Some(1_600.0),
+                    objects: vec!["cat".to_owned()],
+                    zones: vec![],
+                    detections: vec![],
+                    sub_labels: vec![],
+                    audio: vec![],
+                    media: ReviewMedia {
+                        thumbnail: Some(MediaLink {
+                            url: "/thumb.webp".to_owned()
+                        }),
+                        clip: Some(MediaLink {
+                            url: "/api/front/start/1500/end/1600/clip.mp4".to_owned()
+                        }),
+                    },
+                }],
+                motion: vec![MotionBucket {
+                    start: 1_500,
+                    level: 3,
+                    cameras: vec!["front".to_owned()],
+                }],
+            }
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
