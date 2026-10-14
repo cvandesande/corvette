@@ -36,9 +36,15 @@ playable footage.
 
 ## Ranges use half-open overlap
 
-Every activity query uses half-open `[after, before)` bounds and selects records
-that overlap the range. Adjacent ranges therefore partition the timeline without
-dropping records that cross a boundary.
+Every activity query uses half-open `[after, before)` bounds. A review belongs to
+the range when it overlaps it: it starts before `before`, and it is ongoing, ends
+after `after`, or starts at or after `after`. The last clause keeps a zero-length
+review that sits exactly on a boundary in the later range. A review that crosses a
+boundary appears in both adjacent ranges with the same `id`, and clients
+deduplicate by `id`. A motion bucket belongs to the range that contains its start
+(see "Motion aggregation stays server-side"), so each bucket lies in exactly one of
+two adjacent ranges. Adjacent ranges therefore cover the timeline without dropping
+a record at a boundary.
 
 This deliberately differs from Frigate's two activity endpoints:
 
@@ -60,8 +66,22 @@ a default at request time or rejects an unbounded query.
 Frigate loads matching recording rows into pandas, resamples them into buckets,
 and normalizes each hour. Corvette replaces that per-request dataframe with an
 ordered database query and a bounded-memory reduction. SQL filters and orders
-the authoritative rows; Rust selects the signed value with the greatest
-absolute magnitude and collects the participating camera set for each bucket.
+the authoritative rows; Rust selects the greatest motion count and collects the
+participating camera set for each bucket, streaming the ordered rows and holding one
+open bucket at a time.
+
+Buckets are 30 s wide and start at multiples of 30 s since the epoch. A recording
+row with a positive motion count belongs to the one bucket that contains its
+`start_time`. A bucket is returned when its start lies in `[after, before)`, and its
+level and cameras come from all of its rows, including rows that start at or after
+`before` in a bucket the range only partly covers. The query therefore selects rows
+whose `start_time` lies in `[ceil30(after), ceil30(before))`, where `ceil30` rounds
+up to a multiple of 30. A bucket has the same value however the timeline is split.
+
+The level is the raw motion count, not normalized. Frigate rescales each hour of buckets
+(120 at its default 30 s scale) to 0..100 on its own, so its values are not comparable
+across runs or across adjacent queries. Clients scale the raw count for display over the
+span they draw.
 
 The API returns compact activity buckets rather than raw recording telemetry.
 Sending storage-shaped rows would increase transfer size, repeat aggregation in
@@ -466,7 +486,10 @@ body instead. Service errors share one shape, `{"code": ..., "message": ...}`, w
 - `bad_request` (`400`): the request could not be parsed; `message` names the reason.
 - `unauthorized` (`401`): no or empty `Remote-User`.
 - `not_found` (`404`): a path under the prefix that names no route.
-- `config_unavailable` (`503`): the cameras route has no usable Frigate configuration.
+- `config_unavailable` (`503`): the cameras or activity route has no usable Frigate
+  configuration.
+- `database_unavailable` (`503`): the activity route could not read Frigate's
+  database. The underlying error is logged, not returned.
 - `unhealthy` (`503`): the health route found failing parts; `message` names each one.
 
 `GET /corvette/api/v1/health` answers `200` `{"database":"ok","config":"ok"}` when both
@@ -485,6 +508,60 @@ sees no cameras, and a configuration with no `auth.roles` at all grants nothing;
 with an empty camera list sees every enabled camera; otherwise the role sees exactly the
 listed cameras that exist, and a listed name that is disabled or unknown is dropped. The route answers `503`
 `config_unavailable` when no Frigate configuration copy younger than 10 s can be served.
+
+`GET /corvette/api/v1/activity?after=&before=&cameras=&include=` answers the reviews and
+motion of a time range for the cameras the caller's role may see:
+
+- `after` and `before` are required Unix seconds, decimal fractions allowed, finite and not
+  negative, with `after < before` and a range of at most 31 days (2678400 s).
+- `cameras` is an optional comma-separated list of camera names. Absent, it means every
+  camera the role may see; present, it narrows that set. A name that is unknown, disabled,
+  or not allowed for the role is dropped without an error, the same way the cameras route
+  drops it, so the route reveals nothing about cameras the caller cannot see.
+- `include` is an optional comma-separated subset of `reviews,motion`; absent means both,
+  and an omitted kind is returned as an empty array.
+- Names and values are percent-decoded (`+` stays `+`). An unknown, repeated, or
+  value-less parameter, an empty segment (`&&` or a trailing `&`), a malformed escape or one
+  that decodes to invalid UTF-8, or a value outside these rules answers `400` `bad_request`
+  with a message naming the reason. An empty `cameras` value names no camera and answers
+  empty arrays.
+
+The query is checked before the configuration is fetched, so a malformed request answers
+`400` even while Frigate's configuration is unavailable. When the role's cameras leave
+nothing to read, the route answers `200` with empty arrays without opening the database.
+Otherwise it reads the requested kinds in one short read-only transaction and closes the
+database before it checks media files.
+
+The response is
+`{"after", "before", "motion_bucket_seconds": 30, "reviews": [...], "motion": [...]}`:
+
+- `after` and `before` echo the request.
+- Each review carries `id`, `camera`, `severity`, `start`, `end` (`null` while the review is
+  ongoing), the sorted lists `objects`, `zones`, `detections` (event IDs), `sub_labels`,
+  and `audio` from Frigate's review data, and `media: {"thumbnail", "clip"}`. Reviews are
+  ordered by `start`, then `id`. Labels pass through verbatim, including Frigate's
+  `-verified` suffix. Per-user review status is not returned: it belongs to a user
+  identity Corvette does not have until issue #30.
+- Each motion entry is `{"start", "level", "cameras"}`, one per 30 s bucket with motion,
+  ordered by `start`, with `cameras` sorted; buckets without motion are omitted.
+
+Media links follow "Media availability is explicit". Snapshots belong to detections, not to
+reviews, so a review's `media` carries only its thumbnail and its clip. Each link is
+`{"url": ...}` when the media is available now and `null` otherwise:
+
+- `thumbnail` is present when Frigate's stored thumbnail path lies under `/media/frigate/`,
+  contains no `..` segment, does not begin with `.`, and names a file that exists. The
+  service checks the file under its media root (`CORVETTE_API_MEDIA_ROOT`, default
+  `/media/frigate`), which must be Frigate's media volume, mounted read-only, so a thumbnail
+  deleted outside Frigate is reported unavailable. The URL is the stored path with the
+  `/media/frigate` prefix removed, each segment percent-encoded, which nginx serves under
+  `/clips/` (see "Thumbnails under `/clips/` carry no usable content type").
+- `clip` is present when the review has ended and at least one recording row of its camera
+  overlaps `[start, end)`. The URL is Frigate's `/api/{camera}/start/{start}/end/{end}/clip.mp4`
+  with the review's own bounds; Frigate's query for that URL selects every row Corvette's
+  check selects, so Frigate serves every clip URL Corvette returns while those recordings
+  remain. A recording file deleted outside Frigate while its row remains is not detected,
+  as Frigate does not detect it.
 
 When Corvette owns login (issue #30), and later its own camera configuration, these
 response shapes stay the same; only their sources change.
