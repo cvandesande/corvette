@@ -1,12 +1,15 @@
 //! Parsing and reads for `GET /corvette/api/v1/activity` (issue #5).
 
-use corvette_api::ReviewSeverity;
+use corvette_api::{MotionBucket, ReviewSeverity};
 use rusqlite::types::{Type, Value};
 use rusqlite::{Connection, params, params_from_iter};
 use std::collections::BTreeMap;
 
 /// Longest accepted range: 31 days in seconds (issue #5 D-4).
 pub const MAX_RANGE_SECONDS: f64 = 2_678_400.0;
+
+/// Width of one motion bucket in seconds (issue #5 D-8).
+pub const MOTION_BUCKET_SECONDS: u32 = 30;
 
 /// Validated parameters of one activity query.
 #[derive(Clone, Debug, PartialEq)]
@@ -194,16 +197,24 @@ pub struct ReviewRow {
 pub struct ActivityRows {
     /// Reviews ordered by start time, then id.
     pub reviews: Vec<ReviewRow>,
+    /// Motion buckets ordered by start.
+    pub motion: Vec<MotionBucket>,
 }
 
 /// Reads from one transaction the reviews of `cameras` that overlap the
-/// query's range, each with its clip availability, ordered by start time
-/// then id.
+/// query's range, each with its clip availability, and the motion buckets
+/// whose start lies in the range.
 ///
 /// A review overlaps the half-open range `[after, before)` when it starts
 /// before `before` and either has no end yet, ends after `after`, or starts
-/// at or after `after`. An empty `cameras` list or `include_reviews` false
-/// reads nothing, and no review SQL runs.
+/// at or after `after`. A motion bucket starts at a multiple of
+/// [`MOTION_BUCKET_SECONDS`] since the epoch, contains every positive-motion
+/// recording whose `start_time` falls inside it, and is returned when its
+/// start lies in the range.
+///
+/// An empty `cameras` list, or a query that includes neither kind, reads
+/// nothing and runs no SQL; a query including one kind runs only that kind's
+/// query.
 ///
 /// # Errors
 ///
@@ -215,13 +226,102 @@ pub fn read_activity(
     query: &ActivityQuery,
     cameras: &[String],
 ) -> rusqlite::Result<ActivityRows> {
-    if !query.include_reviews || cameras.is_empty() {
+    if cameras.is_empty() || !(query.include_reviews || query.include_motion) {
         return Ok(ActivityRows::default());
     }
     let transaction = connection.transaction()?;
-    let reviews = read_reviews(&transaction, query, cameras)?;
+    let reviews = if query.include_reviews {
+        read_reviews(&transaction, query, cameras)?
+    } else {
+        Vec::new()
+    };
+    let motion = if query.include_motion {
+        read_motion(&transaction, query, cameras)?
+    } else {
+        Vec::new()
+    };
     transaction.commit()?;
-    Ok(ActivityRows { reviews })
+    Ok(ActivityRows { reviews, motion })
+}
+
+/// One `?` per camera, for a `camera IN (...)` list.
+fn camera_placeholders(cameras: &[String]) -> String {
+    cameras
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<&str>>()
+        .join(", ")
+}
+
+/// Reads the motion buckets whose start lies in the query's range, ordered
+/// by start. The rows selected are those with `start_time` in
+/// `[ceil30(after), ceil30(before))`, so a partly covered bucket keeps the
+/// level and cameras of all of its rows, including ones past `before`.
+fn read_motion(
+    transaction: &rusqlite::Transaction<'_>,
+    query: &ActivityQuery,
+    cameras: &[String],
+) -> rusqlite::Result<Vec<MotionBucket>> {
+    let placeholders = camera_placeholders(cameras);
+    let sql = format!(
+        "SELECT CAST(start_time / {MOTION_BUCKET_SECONDS} AS INTEGER) * {MOTION_BUCKET_SECONDS}, \
+         camera, motion FROM recordings WHERE camera IN ({placeholders}) \
+         AND motion > 0 AND start_time >= ? AND start_time < ? \
+         ORDER BY start_time"
+    );
+    let mut parameters: Vec<Value> = cameras
+        .iter()
+        .map(|camera| Value::Text(camera.clone()))
+        .collect();
+    parameters.extend([
+        Value::Real(ceil30(query.after)),
+        Value::Real(ceil30(query.before)),
+    ]);
+
+    let mut buckets: Vec<MotionBucket> = Vec::new();
+    let mut open: Option<MotionBucket> = None;
+    let mut statement = transaction.prepare(&sql)?;
+    let mut rows = statement.query(params_from_iter(&parameters))?;
+    while let Some(row) = rows.next()? {
+        let start: i64 = row.get(0)?;
+        let camera: String = row.get(1)?;
+        let level: i64 = row.get(2)?;
+        match open {
+            Some(mut bucket) if bucket.start == start => {
+                bucket.cameras.push(camera);
+                bucket.level = bucket.level.max(level);
+                open = Some(bucket);
+            }
+            finished => {
+                if let Some(bucket) = finished {
+                    buckets.push(sorted_cameras(bucket));
+                }
+                open = Some(MotionBucket {
+                    start,
+                    level,
+                    cameras: vec![camera],
+                });
+            }
+        }
+    }
+    if let Some(bucket) = open {
+        buckets.push(sorted_cameras(bucket));
+    }
+    Ok(buckets)
+}
+
+/// The smallest multiple of [`MOTION_BUCKET_SECONDS`] that is at or after
+/// `x`.
+fn ceil30(x: f64) -> f64 {
+    let width = f64::from(MOTION_BUCKET_SECONDS);
+    (x / width).ceil() * width
+}
+
+/// An open bucket with its cameras sorted and deduplicated.
+fn sorted_cameras(mut bucket: MotionBucket) -> MotionBucket {
+    bucket.cameras.sort_unstable();
+    bucket.cameras.dedup();
+    bucket
 }
 
 fn read_reviews(
@@ -229,11 +329,7 @@ fn read_reviews(
     query: &ActivityQuery,
     cameras: &[String],
 ) -> rusqlite::Result<Vec<ReviewRow>> {
-    let placeholders = cameras
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<&str>>()
-        .join(", ");
+    let placeholders = camera_placeholders(cameras);
     let sql = format!(
         "SELECT id, camera, severity, start_time, end_time, thumb_path, data \
          FROM reviewsegment WHERE camera IN ({placeholders}) \
@@ -379,6 +475,7 @@ fn text_conversion_error(column_index: usize, column_name: &str, reason: &str) -
 mod tests {
     use super::*;
     use rusqlite::Connection;
+    use std::collections::BTreeSet;
 
     const REVIEWSEGMENT_DDL: &str = r#"CREATE TABLE "reviewsegment" ("id" VARCHAR(30) NOT NULL PRIMARY KEY, "camera" VARCHAR(20) NOT NULL, "start_time" DATETIME NOT NULL, "end_time" DATETIME, "severity" VARCHAR(30) NOT NULL, "thumb_path" VARCHAR(255) NOT NULL, "data" JSON NOT NULL)"#;
     const RECORDINGS_DDL: &str = r#"CREATE TABLE "recordings" ("id" VARCHAR(30) NOT NULL PRIMARY KEY, "camera" VARCHAR(20) NOT NULL, "path" VARCHAR(255) NOT NULL, "start_time" DATETIME NOT NULL, "end_time" DATETIME NOT NULL, "duration" REAL NOT NULL, "motion" INTEGER)"#;
@@ -471,6 +568,328 @@ mod tests {
             .iter()
             .map(|review| review.id.as_str())
             .collect()
+    }
+
+    fn insert_motion_recording(
+        connection: &Connection,
+        id: &str,
+        camera: &str,
+        start: f64,
+        motion: Option<i64>,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO recordings \
+                 (id, camera, path, start_time, end_time, duration, motion) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    id,
+                    camera,
+                    format!("/{camera}/{start}.mp4"),
+                    start,
+                    start + 30.0,
+                    30.0,
+                    motion
+                ],
+            )
+            .expect("insert motion recording");
+    }
+
+    fn motion_query(after: f64, before: f64) -> ActivityQuery {
+        ActivityQuery {
+            include_motion: true,
+            ..range_query(after, before)
+        }
+    }
+
+    fn full_query(after: f64, before: f64) -> ActivityQuery {
+        ActivityQuery {
+            include_reviews: true,
+            include_motion: true,
+            ..range_query(after, before)
+        }
+    }
+
+    /// A deterministic 32-bit linear congruential generator.
+    struct Lcg(u32);
+
+    impl Lcg {
+        fn next(&mut self) -> u32 {
+            self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            self.0
+        }
+
+        /// A fractional value in `[0, max)`.
+        fn fraction(&mut self, max: f64) -> f64 {
+            f64::from(self.next() >> 8) * max / f64::from(1_u32 << 24)
+        }
+
+        /// An index into `0..len`.
+        fn index(&mut self, len: usize) -> usize {
+            let len = u32::try_from(len).expect("list length fits u32");
+            usize::try_from(self.next() % len).expect("remainder fits usize")
+        }
+    }
+
+    /// Splitting `[a, c)` at `b` must lose or duplicate no motion bucket and
+    /// drop no review.
+    fn assert_split_loses_nothing(
+        connection: &mut Connection,
+        a: f64,
+        b: f64,
+        c: f64,
+        cameras: &[String],
+    ) {
+        let whole = read_activity(connection, &full_query(a, c), cameras).expect("whole range");
+        let first = read_activity(connection, &full_query(a, b), cameras).expect("first half");
+        let second = read_activity(connection, &full_query(b, c), cameras).expect("second half");
+
+        let concatenated: Vec<MotionBucket> =
+            first.motion.into_iter().chain(second.motion).collect();
+        assert_eq!(
+            concatenated, whole.motion,
+            "a={a} b={b} c={c}: bucket lists differ"
+        );
+
+        let half_ids = first
+            .reviews
+            .iter()
+            .chain(&second.reviews)
+            .map(|review| review.id.as_str())
+            .collect::<BTreeSet<&str>>();
+        for review in &whole.reviews {
+            assert!(
+                half_ids.contains(review.id.as_str()),
+                "a={a} b={b} c={c}: review `{}` in the whole range is in neither half",
+                review.id
+            );
+        }
+    }
+
+    #[test]
+    fn motion_rows_group_into_their_bucket_by_start_time() {
+        let mut connection = frigate_database();
+        insert_motion_recording(&connection, "rec-1000", "front", 1_000.0, Some(3));
+        insert_motion_recording(&connection, "rec-1010", "back", 1_010.0, Some(7));
+        insert_motion_recording(&connection, "rec-1031", "front", 1_031.0, Some(2));
+
+        let rows = read_activity(
+            &mut connection,
+            &motion_query(990.0, 1_100.0),
+            &camera_list(&["front", "back"]),
+        )
+        .expect("read");
+        assert_eq!(
+            rows.motion,
+            [
+                MotionBucket {
+                    start: 990,
+                    level: 7,
+                    cameras: camera_list(&["back", "front"]),
+                },
+                MotionBucket {
+                    start: 1_020,
+                    level: 2,
+                    cameras: camera_list(&["front"]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn zero_and_null_motion_are_never_bucketed() {
+        let mut connection = frigate_database();
+        insert_motion_recording(&connection, "rec-zero", "front", 1_000.0, Some(0));
+        insert_motion_recording(&connection, "rec-null", "front", 1_010.0, None);
+
+        let rows = read_activity(
+            &mut connection,
+            &motion_query(990.0, 1_100.0),
+            &camera_list(&["front"]),
+        )
+        .expect("read");
+        assert!(rows.motion.is_empty());
+    }
+
+    #[test]
+    fn partly_covered_end_bucket_keeps_rows_past_the_range() {
+        let mut connection = frigate_database();
+        insert_motion_recording(&connection, "rec-1000", "front", 1_000.0, Some(3));
+        insert_motion_recording(&connection, "rec-1040", "front", 1_040.0, Some(5));
+
+        let rows = read_activity(
+            &mut connection,
+            &motion_query(990.0, 1_025.0),
+            &camera_list(&["front"]),
+        )
+        .expect("read");
+        assert_eq!(
+            rows.motion,
+            [
+                MotionBucket {
+                    start: 990,
+                    level: 3,
+                    cameras: camera_list(&["front"]),
+                },
+                MotionBucket {
+                    start: 1_020,
+                    level: 5,
+                    cameras: camera_list(&["front"]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn bucket_starting_before_the_range_is_excluded() {
+        let mut connection = frigate_database();
+        insert_motion_recording(&connection, "rec-1005", "front", 1_005.0, Some(9));
+        insert_motion_recording(&connection, "rec-1031", "front", 1_031.0, Some(2));
+
+        let rows = read_activity(
+            &mut connection,
+            &motion_query(1_000.0, 1_100.0),
+            &camera_list(&["front"]),
+        )
+        .expect("read");
+        assert_eq!(
+            rows.motion,
+            [MotionBucket {
+                start: 1_020,
+                level: 2,
+                cameras: camera_list(&["front"]),
+            }]
+        );
+    }
+
+    #[test]
+    fn camera_filter_applies_to_motion() {
+        let mut connection = frigate_database();
+        insert_motion_recording(&connection, "rec-front", "front", 1_000.0, Some(4));
+        insert_motion_recording(&connection, "rec-back", "back", 1_010.0, Some(8));
+
+        let rows = read_activity(
+            &mut connection,
+            &motion_query(990.0, 1_100.0),
+            &camera_list(&["front"]),
+        )
+        .expect("read");
+        assert_eq!(
+            rows.motion,
+            [MotionBucket {
+                start: 990,
+                level: 4,
+                cameras: camera_list(&["front"]),
+            }]
+        );
+    }
+
+    #[test]
+    fn include_motion_false_reads_no_motion() {
+        let mut connection = frigate_database();
+        insert_motion_recording(&connection, "rec", "front", 1_500.0, Some(4));
+
+        let rows = read_activity(
+            &mut connection,
+            &range_query(1_000.0, 2_000.0),
+            &camera_list(&["front"]),
+        )
+        .expect("read");
+        assert!(rows.motion.is_empty());
+    }
+
+    #[test]
+    fn including_neither_kind_needs_no_tables() {
+        let mut connection = Connection::open_in_memory().expect("open in-memory database");
+        let query = ActivityQuery {
+            include_reviews: false,
+            include_motion: false,
+            ..range_query(1_000.0, 2_000.0)
+        };
+
+        let rows = read_activity(&mut connection, &query, &camera_list(&["front"])).expect("read");
+        assert_eq!(rows, ActivityRows::default());
+    }
+
+    #[test]
+    fn aligned_and_unaligned_splits_keep_every_activity() {
+        let mut connection = frigate_database();
+        insert_motion_recording(&connection, "rec-before", "front", 1_490.0, Some(3));
+        insert_motion_recording(&connection, "rec-after", "back", 1_510.0, Some(5));
+
+        for (n, boundary) in [1_500.0, 1_515.25].into_iter().enumerate() {
+            insert_review(
+                &connection,
+                &format!("straddles-{n}"),
+                "front",
+                "alert",
+                1_400.0,
+                Some(1_600.0),
+            );
+            insert_review(
+                &connection,
+                &format!("zero-length-at-{n}"),
+                "back",
+                "detection",
+                boundary,
+                Some(boundary),
+            );
+            assert_split_loses_nothing(
+                &mut connection,
+                1_000.0,
+                boundary,
+                2_000.0,
+                &camera_list(&["front", "back"]),
+            );
+        }
+    }
+
+    #[test]
+    fn random_range_splits_lose_no_bucket_and_drop_no_review() {
+        let mut connection = frigate_database();
+        let cameras = camera_list(&["front", "back", "side"]);
+        let mut lcg = Lcg(0x5EED_1234);
+        for n in 0..300 {
+            let camera = cameras[lcg.index(cameras.len())].clone();
+            insert_motion_recording(
+                &connection,
+                &format!("rec-{n}"),
+                &camera,
+                lcg.fraction(20_000.0),
+                Some(i64::from(lcg.next() % 6)),
+            );
+        }
+        for n in 0..100 {
+            let camera = cameras[lcg.index(cameras.len())].clone();
+            let start = lcg.fraction(20_000.0);
+            let end = match lcg.next() % 10 {
+                0 => None,
+                1 => Some(start),
+                _ => Some(start + lcg.fraction(300.0)),
+            };
+            insert_review(
+                &connection,
+                &format!("rev-{n}"),
+                &camera,
+                "detection",
+                start,
+                end,
+            );
+        }
+
+        for _ in 0..2_000 {
+            let mut points: Vec<f64> = (0..3).map(|_| lcg.fraction(20_000.0)).collect();
+            points.sort_by(f64::total_cmp);
+            if points[0] < points[1] && points[1] < points[2] {
+                assert_split_loses_nothing(
+                    &mut connection,
+                    points[0],
+                    points[1],
+                    points[2],
+                    &cameras,
+                );
+            }
+        }
     }
 
     #[test]
