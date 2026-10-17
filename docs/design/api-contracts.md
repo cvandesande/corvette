@@ -394,6 +394,10 @@ None of these four listeners hard-codes its own bind address or port — each ta
 constructor parameter, matching D-3's "configuration point" convention (below) — so the actual
 deployed ports are a provisioning concern (K1), not a fact fixed by this crate.
 
+## The media bridge's serve future never returns, and a listener panic reaches its caller
+
+`crates/corvette-media-bridge` hosts three whole-process listeners, and all three of their `serve` methods return `-> !` (`rtsp_restream::RtspServer`, `ws_repackager::Fmp4WsServer`, `hls::HlsServer`), so the listener future `start` hands its caller never returns on success. A listener panic reaches that caller as an unwinding panic: the RTSP listener is awaited directly, while the fMP4-WebSocket and HLS listeners' join arms `resume_unwind` whatever their spawned tasks return, since a `-> !` task can only ever end by panic; the other spawned listener task keeps running until that unwind ends the process.
+
 ## The MoQ relay is exposed through a NodePort Service, one of three supported mechanisms
 
 Decision of record (D-3, `.agents/issue-12/DESIGN-live-view.md`, human-approved 2026-08-26),
