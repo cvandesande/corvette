@@ -8,8 +8,8 @@ use crate::activity::{
     recent_activity_empty_heading, review_and_motion_events,
 };
 use crate::expanded_view::{ExpandedCamera, ExpandedView};
-use crate::live_view::LiveCameraTile;
 use crate::shell::{NAVIGATION, Status, StatusGlyph};
+use crate::still_tile::StillTile;
 
 #[component]
 pub(crate) fn Dashboard() -> impl IntoView {
@@ -110,6 +110,7 @@ fn CameraCard(camera: Camera, expanded_camera: RwSignal<Option<ExpandedCamera>>)
         name: camera.name.clone(),
         title: player_title.clone(),
     };
+    let still_paused = Signal::derive(move || expanded_camera.get().is_some());
     view! {
         <article class="camera-card">
             <button
@@ -118,7 +119,7 @@ fn CameraCard(camera: Camera, expanded_camera: RwSignal<Option<ExpandedCamera>>)
                 aria-label=format!("Expand {} to full view", camera.display_name)
                 on:click=move |_| expanded_camera.set(Some(expand_camera.clone()))
             >
-                <LiveCameraTile camera_name=camera.name.clone() title=player_title/>
+                <StillTile camera_name=camera.name.clone() title=player_title paused=still_paused/>
                 <h2>{camera.display_name.clone()}</h2>
                 <p>{camera.name}</p>
             </button>

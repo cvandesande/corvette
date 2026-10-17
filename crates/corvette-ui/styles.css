@@ -234,6 +234,63 @@ main {
   outline-offset: -2px;
 }
 
+.still-tile {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background:
+    linear-gradient(135deg, rgb(105 209 186 / 10%), transparent),
+    #0b1011;
+}
+
+.still-tile-image {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  object-fit: cover;
+}
+
+.still-tile-waiting .still-tile-image {
+  display: none;
+}
+
+.still-tile-stale .still-tile-image {
+  opacity: 0.4;
+}
+
+.still-tile-placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #8fa09e;
+  font-size: 0.85rem;
+}
+
+.still-tile-showing .still-tile-placeholder,
+.still-tile-no-picture .still-tile-placeholder {
+  display: none;
+}
+
+.still-tile-age {
+  position: absolute;
+  right: 0.4rem;
+  bottom: 0.4rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 0.45rem;
+  color: #d7e2e0;
+  background: rgb(0 0 0 / 55%);
+  font-size: 0.75rem;
+}
+
+.still-tile-waiting .still-tile-age {
+  display: none;
+}
+
 .expanded-view {
   width: min(64rem, 100%);
   padding: clamp(1rem, 3vw, 2rem);

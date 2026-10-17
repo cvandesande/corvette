@@ -22,6 +22,7 @@ mod monitor;
 mod monitor_layout;
 mod recordings;
 mod shell;
+mod still_tile;
 mod timeline;
 
 use leptos::prelude::*;
