@@ -468,7 +468,7 @@ d8_added_locs() { awk '/^\+\+\+ /{f=substr($0,7);next} /^\+\+\+/{next} /^@@/{spl
 # "gate.sh d8" (this leg's own invocation form) reads as a D-NNN
 # divergence-register ID (D_PAT) to its own pattern; strip it, same as
 # the pre-fold script stripped its own name "d8-gate".
-d8_strip_fmt() { sed 's/{[^{} ;]*}//g; s/d8-gate//g; s/gate\.sh d8\b//g; s/RFC [0-9][0-9]* §[0-9][0-9.]*//g'; }
+d8_strip_fmt() { sed -e 's/{[^{} ;]*}//g; s/d8-gate//g; s/gate\.sh d8\b//g; s/RFC [0-9][0-9]* §[0-9][0-9.]*//g' -e 's/[A-Za-z0-9._-]\{1,\}\/[A-Za-z0-9._-]\{1,\}#[0-9]\{1,\}//g'; }
 d8_code_part()    { sed 's|//.*||'; }
 d8_comment_part() { sed -e 's|^[^/]*//|//|' -e t -e 's/.*//'; }
 
@@ -560,8 +560,47 @@ d8_selftest() {
   printf '// see RFC 9113 §8.3.1 for the definition\n' \
     | d8_check_code_lines "selftest" >/dev/null \
     || { echo "d8-gate: SELF-TEST FAILED (RFC section citation false-flagged)"; exit 2; }
-  n=$(printf 'per plan §B2 this holds\nsee §9.12 for the process cite\n' | d8_strip_fmt | grep -cE "$PAT" || true)
-  [ "$n" = "2" ] || { echo "d8-gate: SELF-TEST FAILED (bare § process cite not caught)"; exit 2; }
+  printf '// the review queue lists rows that need a decision\n' \
+    | d8_check_code_lines "selftest" >/dev/null \
+    || { echo "d8-gate: SELF-TEST FAILED (review as a plain word was flagged)"; exit 2; }
+  printf 'const URL: &str = "/api/review/activity/motion";\n' \
+    | d8_check_code_lines "selftest" >/dev/null \
+    || { echo "d8-gate: SELF-TEST FAILED (review URL path in a string was flagged)"; exit 2; }
+  printf 'assert_eq!(src, "/clips/previews/front/hour.mp4");\n' \
+    | d8_check_code_lines "selftest" >/dev/null \
+    || { echo "d8-gate: SELF-TEST FAILED (previews/ path was flagged)"; exit 2; }
+  printf '// see rust-lang/rust#127909 for the miscompile\n' \
+    | d8_check_code_lines "selftest" >/dev/null \
+    || { echo "d8-gate: SELF-TEST FAILED (upstream owner/repo#N reference was flagged)"; exit 2; }
+  printf 'const MASK: u32 = 0xF000;\n' \
+    | d8_check_code_lines "selftest" >/dev/null \
+    || { echo "d8-gate: SELF-TEST FAILED (F followed by a digit inside a hex literal was flagged)"; exit 2; }
+  printf '// recorded on 2026-10-17\n' \
+    | d8_check_code_lines "selftest" >/dev/null \
+    || { echo "d8-gate: SELF-TEST FAILED (ISO date was flagged)"; exit 2; }
+  printf '// see §4.2 of the spec\n' \
+    | d8_check_code_lines "selftest" >/dev/null \
+    || { echo "d8-gate: SELF-TEST FAILED (bare § spec cite was flagged)"; exit 2; }
+  printf 'let key = "aF3xQ9";\n' \
+    | d8_check_code_lines "selftest" >/dev/null \
+    || { echo "d8-gate: SELF-TEST FAILED (F followed by a digit inside base64 text was flagged)"; exit 2; }
+  printf '// fixes issue #18\n' \
+    | d8_check_code_lines "selftest" >/dev/null \
+    && { echo "d8-gate: SELF-TEST FAILED (issue number not caught)"; exit 2; }
+  printf '// per item A1 of the plan\n' \
+    | d8_check_code_lines "selftest" >/dev/null \
+    && { echo "d8-gate: SELF-TEST FAILED (lettered item label not caught)"; exit 2; }
+  printf '// DP-2 decides this\n' \
+    | d8_check_code_lines "selftest" >/dev/null \
+    && { echo "d8-gate: SELF-TEST FAILED (decision code in a comment not caught)"; exit 2; }
+  printf 'assert!(ok, "see D-5");\n' \
+    | d8_check_code_lines "selftest" >/dev/null \
+    && { echo "d8-gate: SELF-TEST FAILED (register ID in string position not caught)"; exit 2; }
+  printf '// the F1 finding\n' \
+    | d8_check_code_lines "selftest" >/dev/null \
+    && { echo "d8-gate: SELF-TEST FAILED (F label as a word not caught)"; exit 2; }
+  n=$(printf 'per plan §E3 this holds\nsee §9.12 of the spec\n' | d8_strip_fmt | grep -cE "$PAT" || true)
+  [ "$n" = "1" ] || { echo "d8-gate: SELF-TEST FAILED (plan §E cite not caught or bare § cite flagged)"; exit 2; }
   d8_resolve_range "not-a-real-rev..HEAD" >/dev/null 2>&1
   [ "$?" = "1" ] || { echo "d8-gate: SELF-TEST FAILED (resolve_range did not fail closed on an unresolvable revision)"; exit 2; }
   d8_resolve_range "HEAD..HEAD" >/dev/null 2>&1 || { echo "d8-gate: SELF-TEST FAILED (resolve_range rejected a resolvable revision)"; exit 2; }
@@ -644,11 +683,11 @@ leg_obs() {
 
 leg_d8() {
   local ID_PAT_NO_D D_PAT ID_PAT ART_PAT PLAN_PAT PAT D8_SPEC diff locs
-  ID_PAT_NO_D='#\[?[0-9]{2,4}|issue [0-9]|[Nn][0-9]{3}|HG-[0-9]|\bpin [0-9]|F[0-9]|plan item|fix.round|\b[Ss]ub-?pass\b|\bS[0-9][a-d]?(-[0-9])?\b|\bP[0-9]\b|\btest_[abcdefot][0-9]+_|\bDP-?[0-9]\b|\bDQ-?[0-9]\b|\binvariant [0-9]|\bnormative requirement [0-9]|\bplan §?E[0-9]|§[0-9A-Z]|\brung [0-9]|\[E[0-9]+\]|\bE[0-9]+/E[0-9]+\b|\bE[0-9]+-[0-9]+[a-z]?\b|\(E[0-9]+\)|\bI-[0-9]+\b|\bDP-[A-Z]\b|\bE[0-9]{1,2}\b|\b[Vv]erify item [0-9]|\b[Cc]ase [0-9] of the (brief|plan|review)|\b(pre|post)-[A-Z][0-9]{1,3}\b|\b[0-9]{3}-[0-9]\b|\b[Mm]utation[- ][0-9]|\b[Mm]utant[- ]?\(?[0-9]|\bplan M[0-9]{1,2}\b|\bM[0-9]{1,2}'\''s\b|\bM[0-9]{1,2} milestone\b|(\b|_)[Mm][0-9]{1,2}_[a-zA-Z]'
+  ID_PAT_NO_D='#\[?[0-9]{2,4}|issue [0-9]|[Nn][0-9]{3}|HG-[0-9]|\bpin [0-9]|\bF[0-9]{1,2}\b|plan item|fix.round|\b[Ss]ub-?pass\b|\bS[0-9][a-d]?(-[0-9])?\b|\bP[0-9]\b|\btest_[abcdefot][0-9]+_|\bDP-?[0-9]\b|\bDQ-?[0-9]\b|\binvariant [0-9]|\bnormative requirement [0-9]|\bplan §?E[0-9]|\brung [0-9]|\[E[0-9]+\]|\bE[0-9]+/E[0-9]+\b|\bE[0-9]+-[0-9]+[a-z]?\b|\(E[0-9]+\)|\bI-[0-9]+\b|\bDP-[A-Z]\b|\bE[0-9]{1,2}\b|\b[Vv]erify item [0-9]|\b[Cc]ase [0-9] of the (brief|plan|review)|\b(pre|post)-[A-Z][0-9]{1,3}\b|\b[0-9]{3}-[0-9]\b|\b[Mm]utation[- ][0-9]|\b[Mm]utant[- ]?\(?[0-9]|\bplan M[0-9]{1,2}\b|\bM[0-9]{1,2}'\''s\b|\bM[0-9]{1,2} milestone\b|(\b|_)[Mm][0-9]{1,2}_[a-zA-Z]'
   D_PAT='(\b|_)[Dd]-?[0-9]{1,3}[^0-9a-zA-Z]'
   ID_PAT="$ID_PAT_NO_D|$D_PAT"
-  ART_PAT='FINDING|artifacts/|briefs?/|reviews?/|HANDOFF|MAJOR|[Aa]dvisory|\breviews?\b'
-  PLAN_PAT="(this|the) item'?s?\\b|Test \\([a-z]\\)[ :—-]|(design |plan )?item [0-9]{1,2}('s)?[^0-9a-zA-Z]|FIX-NOW"
+  ART_PAT='FINDING|artifacts/|briefs?/|HANDOFF|MAJOR|[Aa]dvisory'
+  PLAN_PAT="(this|the) item'?s?\\b|Test \\([a-z]\\)[ :—-]|(design |plan )?item [A-Za-z]?[0-9]{1,2}('s)?[^0-9a-zA-Z]|FIX-NOW"
   PAT="$ID_PAT|$ART_PAT|$PLAN_PAT"
   # Exempt: evidence/ (append-only logs); gate.sh (its selftest literals and patterns are the identifiers the gate detects);
   # docs/ and docs/standards/ markdown (the divergence register, rule and classification tables cite register and tracker keys as their content).
