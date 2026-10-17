@@ -1,5 +1,18 @@
 # Repository instructions
 
+## What Corvette is
+
+Corvette is a from-scratch Rust replacement for Frigate, not an application built
+on Frigate. Frigate runs today only as the temporary backing for capabilities
+Corvette has not yet built. Specify every capability as a Corvette contract under
+`/corvette/api/v1/` and record it in `docs/design/api-contracts.md`. Name Frigate
+only as the current implementation behind a contract. A design, plan or UI that
+uses a Frigate route or Frigate behaviour as its contract is wrong, however
+convenient. Frigate's source and the deployed Frigate are sources of facts about
+the current backing, not of requirements.
+
+## Working rules
+
 The tool-neutral pipeline, style guide, and role contracts are canonical at
 `/home/cvandesande/.config/ai-agent/standards/` — see
 `docs/standards/AGENTIC_PIPELINE_PLAYBOOK.md` and
@@ -25,9 +38,10 @@ work. Issue #1 is the roadmap index; keep its linked issues current and close
 them when their stated outcome is complete. `docs/design/` owns durable
 architectural decisions and API contracts; it is not a backlog.
 
-Establish upstream API contracts and implementation details by reading Frigate's
-own source at the revision the deployment is running, not from documentation, a
-newer release, or inference. Obtain that source if you do not already have it.
+Establish the current backing's behaviour and implementation details by reading
+Frigate's own source at the revision the deployment is running, not from
+documentation, a newer release, or inference. Obtain that source if you do not
+already have it.
 
 The deployed system defaults to read-only for agents. Reading from it is expected:
 port-forward to the running Frigate, go2rtc, and nginx and verify route behavior and
