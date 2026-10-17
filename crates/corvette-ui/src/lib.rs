@@ -1,17 +1,8 @@
 //! Browser entry point and the client-side routes it mounts.
 
 #![allow(clippy::multiple_crate_versions)]
-// Two lint pairs collide with how this crate is laid out, and neither has a
-// code fix:
-//
-// - Items shared between the private modules below have to be `pub(crate)`,
-//   which clippy calls redundant because the modules are private. Writing
-//   `pub` instead trips the workspace's denied `unreachable_pub`. No
-//   visibility satisfies both lints.
-// - Leptos's `#[component]` macro emits a `pub` shim beside every component,
-//   and `unreachable_pub` reports it against the component's own line.
-//
-// Both are allowed here, once, rather than at each of the modules involved.
+// `redundant_pub_crate` and `unreachable_pub` demand opposite visibility here:
+// shared items need `pub(crate)`, and `#[component]` emits `pub` shims.
 #![allow(clippy::redundant_pub_crate)]
 #![allow(unreachable_pub)]
 
@@ -50,7 +41,6 @@ pub fn mount() {
     leptos::mount::mount_to_body(App);
 }
 
-/// Renders the top-level Corvette application shell.
 #[component]
 #[cfg(not(feature = "split"))]
 fn App() -> impl IntoView {
@@ -84,13 +74,6 @@ fn App() -> impl IntoView {
     }
 }
 
-// Deployed nginx already owns these URL prefixes for its own purposes -- a
-// JSON directory autoindex, proxied auth-gated API routes, static donor
-// assets -- so no client-side route declared above may equal or be prefixed
-// by one of them. Kept verbatim from the deployed
-// configuration (`tests/nginx-parity/vendor/nginx.conf`), trailing slashes
-// preserved exactly as nginx matches them: every entry carries one except
-// `/ws` and `/auth`, which nginx matches without.
 #[cfg(test)]
 const RESERVED_NGINX_PREFIXES: &[&str] = &[
     "/api/",
@@ -108,24 +91,9 @@ const RESERVED_NGINX_PREFIXES: &[&str] = &[
     "/auth",
 ];
 
-// The two `App` components above are the only place this crate declares
-// client-side routes; both cfg branches declare the same three paths. There
-// is no way to introspect a leptos_router `path!()` declaration at test time,
-// so this is a hand-maintained mirror -- keep it in sync with the
-// `<Route path=path!(...)>` list above whenever a route is added, renamed, or
-// removed, and re-confirm the two match at review time.
 #[cfg(test)]
 const CLIENT_ROUTES: &[&str] = &["", "events", "recordings", "monitor"];
 
-// The one route KNOWN to collide with a reserved prefix, and only in its
-// trailing-slash form (verified against the deployed configuration):
-// `/recordings` renders this site's own shell, but `/recordings/` is nginx's
-// JSON autoindex of the
-// recordings directory -- the same path, two unrelated resources. Declared
-// here so the collision is asserted as understood rather than passing
-// silently. Do NOT rename or remove the `recordings` route to make this list
-// empty -- that is a client-route rename, a decision outside this guard's
-// scope.
 #[cfg(test)]
 const KNOWN_TRAILING_SLASH_EXCEPTIONS: &[&str] = &["recordings"];
 
@@ -134,9 +102,6 @@ mod reserved_route_tests {
     use super::{CLIENT_ROUTES, KNOWN_TRAILING_SLASH_EXCEPTIONS, RESERVED_NGINX_PREFIXES};
     use crate::shell::NAVIGATION;
 
-    /// The absolute path a route renders as, with and without a trailing
-    /// slash -- the two forms nginx's location matching treats as different
-    /// resources.
     fn route_forms(route: &str) -> (String, String) {
         let bare = format!("/{route}");
         let with_slash = format!("{bare}/");
@@ -152,12 +117,6 @@ mod reserved_route_tests {
         })
     }
 
-    /// No declared client route may equal or be prefixed by a reserved
-    /// nginx location, except the one collision on record. A new
-    /// route that lands on a reserved prefix fails this test by name; the
-    /// declared exception failing to collide (e.g. because the reserved list
-    /// or the route changed) fails it too, so the exception can never go
-    /// stale silently.
     #[test]
     fn no_client_route_claims_a_reserved_nginx_prefix_except_the_known_one() {
         let mut unexpected = Vec::new();
@@ -188,19 +147,6 @@ mod reserved_route_tests {
         );
     }
 
-    /// `NAVIGATION` (`shell::NAVIGATION`) is the only mechanism this crate
-    /// actually uses to render a self-route navigation link (`PageShell` in
-    /// `shell.rs`, consumed by `events.rs` and `recordings.rs`, and again
-    /// independently in `dashboard.rs`) -- every `href` on screen comes from
-    /// this array, never from a literal string in a `view!` macro. So unlike
-    /// `check_no_trailing_slash_hrefs.sh`, which greps source text for a
-    /// quoted `href="..."` literal and is structurally blind to this, this
-    /// test inspects the actual data feeding those links. A trailing slash
-    /// on a self-route entry would silently misroute a click into nginx's
-    /// own resource for that prefix instead of the SPA (see
-    /// `RESERVED_NGINX_PREFIXES` above); `"/"` and hash-fragment links are
-    /// exempt because neither is a narrower path a trailing slash could
-    /// misroute.
     #[test]
     fn no_navigation_entry_is_a_self_route_with_a_trailing_slash() {
         let offenders: Vec<&str> = NAVIGATION

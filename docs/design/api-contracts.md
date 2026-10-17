@@ -144,6 +144,26 @@ collision class for `/exports/`, `/clips/`, `/stream/`, `/vod/`, `/cache/`,
 `/ws`, `/live/*`, `/api/*`, `/assets/`, `/fonts/`, `/locales/`. These names
 are reserved and must never become client-side routes."
 
+The UI test in `crates/corvette-ui/src/lib.rs` enforces this contract from two
+hand-maintained mirrors: `RESERVED_NGINX_PREFIXES`, copied verbatim from the
+vendored deployed configuration (`tests/nginx-parity/vendor/nginx.conf`) with
+each entry keeping the trailing slash nginx matches it with — all carry one
+except `/ws` and `/auth`, which nginx matches without — and `CLIENT_ROUTES`,
+mirroring the `<Route>` declarations the two `App` cfg branches share; a test
+has no way to introspect those declarations. A new client route or a new nginx
+location goes into both lists in the same change.
+
+The `recordings` exception stays declared until a deliberate client-route
+rename resolves the collision. The test fails when a declared collision stops
+matching the record, so the exception cannot go stale silently.
+
+Every on-screen navigation href comes from `shell::NAVIGATION`, which a
+source-text grep for `href="..."` literals cannot see; the test inspects that
+array instead. A self-route href there ends without a trailing slash because
+one would send a click to nginx's resource for that prefix instead of the SPA;
+`"/"` and hash-fragment links are exempt — neither is a narrower path a
+trailing slash could misroute.
+
 ## The deployed go2rtc surface is one HTML file, not a `/go2rtc/` prefix
 
 There is no `/go2rtc/` location in the deployed nginx config. The only go2rtc

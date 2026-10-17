@@ -102,9 +102,7 @@ pub(crate) fn Dashboard() -> impl IntoView {
     }
 }
 
-/// One grid tile: U1's own live camera player, wrapped in a click/expand
-/// affordance (issue #12 item U2) that opens `expanded_view::ExpandedView`
-/// for this camera. Does not touch `LiveCameraTile` itself (U1's own scope).
+/// One camera tile that opens the expanded view when clicked.
 #[component]
 fn CameraCard(camera: Camera, expanded_camera: RwSignal<Option<ExpandedCamera>>) -> impl IntoView {
     let player_title = format!("{} live video", camera.display_name);
