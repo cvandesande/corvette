@@ -114,9 +114,10 @@ camera or any role for another camera (D-8/DP-3/DP-4):
   `moq-dev/moq`, D-1/D-2) and publishing the camera's frames as a broadcast
   named after the camera, with no container format anywhere in the path
   (D-9);
-- an fMP4-over-WebSocket repackager: the grid tile's own live data source,
-  reusing the shared frame stream to build one WebSocket connection per
-  viewer, matching go2rtc's own previous MSE-tile transport shape;
+- an fMP4-over-WebSocket repackager: the backend behind nginx's
+  `/live/mse/ws/<camera>` location, reusing the shared frame stream to
+  build one WebSocket connection per viewer, matching go2rtc's own
+  previous MSE-tile transport shape;
 - an HLS/LL-HLS packager: the expanded view's fallback backend, likewise
   reusing the shared frame stream, serving N1's `/live/hls/` location when
   the MoQ relay is unreachable or times out.
@@ -145,8 +146,11 @@ component described above is implemented and verified in this repository
 today. See `.agents/issue-12/DESIGN-live-view.md` for the decisions of record
 and `.agents/issue-12/PLAN-live-view.md` for the implementation plan.
 
-Browser-native `MediaSource` performs decode and render for the MSE grid
-tile, the HLS fallback path, and recorded fragments. The relay and `hang`'s
+The dashboard grid shows each camera's latest still picture, refreshed in
+place, read from the current backing's `/api/<camera>/latest.jpg` route, an
+interim source Corvette's own still route replaces. Browser-native
+`MediaSource` performs decode and render for the expanded view's HLS
+fallback, into which `hls.js` appends segments. The relay and `hang`'s
 Web Component, and the HLS/LL-HLS packager, each carry a configured camera's
 H.264/H.265 video track today. Audio follows the same paths once
 `corvette-rtsp-client` resolves a camera's SDP audio section — see API

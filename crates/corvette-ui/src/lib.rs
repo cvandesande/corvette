@@ -15,7 +15,6 @@ mod events;
 mod expanded_view;
 #[cfg(feature = "split")]
 mod lazy_route;
-mod live_view;
 mod local_time;
 mod media;
 mod monitor;

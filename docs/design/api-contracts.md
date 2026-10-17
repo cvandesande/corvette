@@ -316,7 +316,7 @@ confirm the deployed resolver's answer order matches the relay's actual bound ad
 this crate's own direct `web-transport-quinn` dependency does not do that automatically the way
 `moq-native`'s own dial would.
 
-## The fMP4-over-WebSocket grid-tile transport carries no per-viewer timestamp epoch
+## The fMP4-over-WebSocket transport carries no per-viewer timestamp epoch
 
 `crates/corvette-media-bridge`'s fMP4 repackager (issue #12 G2, `fmp4::Fragmenter`) builds one
 `moof`/`mdat` fragment per access unit and broadcasts the identical bytes to every WebSocket
@@ -336,8 +336,8 @@ reach `HAVE_CURRENT_DATA` (confirmed directly: this item's own headless-browser 
 `crates/corvette-media-bridge/tests/browser/g2_fmp4_ws.spec.cjs`, reproduced exactly this symptom
 before switching modes).
 
-Corvette's contract: a consumer of this transport (this item's own browser check today; U1's grid
-tile, a later item, in production) sets `sourceBuffer.mode = "sequence"` before appending
+Corvette's contract: a consumer of this transport (the browser check named above is its only
+consumer today) sets `sourceBuffer.mode = "sequence"` before appending
 anything, so the browser plays appended segments back-to-back on its own timeline starting at 0
 and ignores each segment's own absolute `tfdt` — using only each sample's declared duration to
 advance. This is a client-side integration requirement this transport's own wire format assumes;
@@ -441,8 +441,7 @@ proxies five others anywhere:
   status-only check would not catch that.
 - **`/live/mse/ws/<camera>`** (issue #12 N2, resolving the grid-tile-source question left open by
   the prior draft) proxies to G2's fMP4-over-WebSocket repackager, replacing go2rtc's own
-  `/live/mse/api/ws`. `crates/corvette-ui/src/live_view.rs`'s `MEDIA_BRIDGE_WS_PATH_PREFIX`
-  constant is this exact path.
+  `/live/mse/api/ws`.
 
 Five locations that used to proxy to go2rtc are retired unconditionally, since go2rtc is fully
 removed from the deployed image rather than kept for any remaining role
@@ -606,11 +605,11 @@ top of it, each confirmed directly rather than assumed:
   video-only cleanly when a broadcast announces no audio track, by design, rather than assuming
   one is always present — but has nothing to degrade from today, since no broadcast ever announces
   one.
-- The grid tile's fMP4-over-WebSocket repackager (G2) and the HLS/LL-HLS packager (G3) both
+- The media bridge's fMP4-over-WebSocket repackager (G2) and the HLS/LL-HLS packager (G3) both
   inherit the same video-only scope from the same upstream cause.
 
 Corvette's contract: every live-view transport this document describes — RTSP-restream, MoQ, the
-fMP4/WebSocket grid tile, and HLS/LL-HLS — carries a configured camera's video unconditionally, and
+fMP4/WebSocket transport, and HLS/LL-HLS — carries a configured camera's video unconditionally, and
 its audio only once `corvette-rtsp-client` resolves an SDP audio section, a separate, unscoped
 future item. No component in this list needs to change shape when that fix lands: each already
 dispatches on a frame's own codec generically.
