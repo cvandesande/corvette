@@ -24,6 +24,9 @@ edit Markdown prose and apply wording a human has approved verbatim. Anything
 touching code, tests, scripts, configuration, or build files is delegated to an
 agent that reads the style guide in full — regardless of how small the change is.
 
+In conversation, name a step by what it does; never by a plan code (a step,
+decision or finding label made of letters and digits).
+
 Unless a plan or brief already sets a model or effort level for an item, implementer
 and reviewer agents default to Sonnet, with the effort level chosen per task from its
 presumed difficulty rather than a fixed value. A plan's own per-item cost assignment
