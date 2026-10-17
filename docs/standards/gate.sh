@@ -149,6 +149,12 @@ comment_fail_help() {
   echo "see     docs/standards/STYLE.md D1a (the comment ladder) and AGENTS.md \"Comment gate\""
 }
 
+obs_fail_help() {
+  echo "rule    the project adds no dependency without a recorded decision: every crate name in the Cargo.toml dependency tables and in Cargo.lock is listed in the baseline, and a new name is a new dependency"
+  echo "fix     write the small thing by hand or reuse what the repository has; only if a crate is truly needed, regenerate the baseline in the same commit that justifies it: bash docs/standards/gate.sh obs baseline; not a fix: regenerating the baseline to silence the gate without a reason in the commit message"
+  echo "see     AGENTS.md \"Dependency gate\" and docs/standards/STYLE.md"
+}
+
 leg_comment() {
   local BASELINE="docs/standards/comment-baseline.txt" TARGET="3.0" GRACE=3
   case "${1:-}" in
@@ -627,7 +633,7 @@ d8_scope_selftest() {
 }
 
 obs_deps_gen() {
-  [ -f Cargo.toml ] && awk '/^\[dependencies\]|^\[dev-dependencies\]/{sect=1;next} /^\[/{sect=0} sect && /^[A-Za-z0-9_-]+[ \t]*=/{sub(/[ \t]*=.*/,"");print}' Cargo.toml | sort -u
+  [ -f Cargo.toml ] && awk '/^\[dependencies\]|^\[dev-dependencies\]|^\[workspace\.dependencies\]/{sect=1;next} /^\[/{sect=0} sect && /^[A-Za-z0-9_-]+[ \t]*=/{sub(/[ \t]*=.*/,"");print}' Cargo.toml | sort -u
   [ -f Cargo.lock ] && awk '/^name = /{gsub(/"/,"",$3); print $3}' Cargo.lock | sort -u
 }
 
@@ -640,12 +646,13 @@ leg_obs() {
     deps)
       local FRESH FAIL=0
       FRESH="$(obs_deps_gen)"
-      [ -f "$DEPS_BASELINE" ] || { echo "FAIL missing $DEPS_BASELINE — run: gate.sh obs baseline"; exit 1; }
+      [ -f "$DEPS_BASELINE" ] || { echo "FAIL missing $DEPS_BASELINE — run: gate.sh obs baseline"; obs_fail_help; exit 1; }
       while IFS= read -r key; do
         [ -z "$key" ] && continue
         grep -qxF "$key" "$DEPS_BASELINE" || { echo "FAIL new dependency key '$key' absent from $DEPS_BASELINE"; FAIL=1; }
       done <<< "$FRESH"
       [ "$FAIL" -eq 0 ] && echo "obs-deps: PASS" || echo "obs-deps: FAIL"
+      [ "$FAIL" -ne 0 ] && obs_fail_help
       exit $FAIL ;;
     selftest)
       local REPO HAVE OUT RC
@@ -666,16 +673,35 @@ leg_obs() {
       OUT="$(cd "$REPO" && "$SELF" obs deps 2>&1)"; RC=$?
       { [ "$RC" -ne 0 ] && printf '%s\n' "$OUT" | grep -q "new dependency key 'gamma'" && printf '%s\n' "$OUT" | grep -q "obs-deps: FAIL"; } \
         || { rm -rf "$REPO"; echo "selftest FAIL: case (c) new dependency gamma; rc=$RC: $OUT"; exit 1; }
+      { printf '%s\n' "$OUT" | grep -q '^rule ' && printf '%s\n' "$OUT" | grep -q '^fix ' && printf '%s\n' "$OUT" | grep -q '^see '; } \
+        || { rm -rf "$REPO"; echo "selftest FAIL: case (c2) failing run prints rule, fix and see; rc=$RC: $OUT"; exit 1; }
       rm "$REPO/docs/standards/obs-deps-baseline.txt"
       OUT="$(cd "$REPO" && "$SELF" obs deps 2>&1)"; RC=$?
       { [ "$RC" -ne 0 ] && printf '%s\n' "$OUT" | grep -q "missing"; } \
         || { rm -rf "$REPO"; echo "selftest FAIL: case (d) missing baseline; rc=$RC: $OUT"; exit 1; }
+      { printf '%s\n' "$OUT" | grep -q '^rule ' && printf '%s\n' "$OUT" | grep -q '^fix ' && printf '%s\n' "$OUT" | grep -q '^see '; } \
+        || { rm -rf "$REPO"; echo "selftest FAIL: case (c2) missing-baseline failing run prints rule, fix and see; rc=$RC: $OUT"; exit 1; }
       OUT="$(cd "$REPO" && "$SELF" obs baseline 2>&1)"; RC=$?
       [ "$RC" -eq 0 ] || { rm -rf "$REPO"; echo "selftest FAIL: case (e) baseline rerun; rc=$RC: $OUT"; exit 1; }
       OUT="$(cd "$REPO" && "$SELF" obs deps 2>&1)"; RC=$?
       [ "$RC" -eq 0 ] || { rm -rf "$REPO"; echo "selftest FAIL: case (e) regenerated baseline must clear the new name; rc=$RC: $OUT"; exit 1; }
+      printf '[workspace.dependencies]\nalpha-ws = "1"\n' >> "$REPO/Cargo.toml"
+      OUT="$(cd "$REPO" && "$SELF" obs baseline 2>&1)"; RC=$?
+      [ "$RC" -eq 0 ] || { rm -rf "$REPO"; echo "selftest FAIL: case (f) baseline with workspace key; rc=$RC: $OUT"; exit 1; }
+      OUT="$(cd "$REPO" && "$SELF" obs deps 2>&1)"; RC=$?
+      { [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q "obs-deps: PASS" && grep -qxF alpha-ws "$REPO/docs/standards/obs-deps-baseline.txt"; } \
+        || { rm -rf "$REPO"; echo "selftest FAIL: case (f) workspace key alpha-ws must pass and be listed in the baseline; rc=$RC: $OUT"; exit 1; }
+      printf 'beta-ws = "1"\n' >> "$REPO/Cargo.toml"
+      OUT="$(cd "$REPO" && "$SELF" obs deps 2>&1)"; RC=$?
+      { [ "$RC" -ne 0 ] && printf '%s\n' "$OUT" | grep -q "new dependency key 'beta-ws'" && printf '%s\n' "$OUT" | grep -q "obs-deps: FAIL"; } \
+        || { rm -rf "$REPO"; echo "selftest FAIL: case (g) new workspace key beta-ws fails by name; rc=$RC: $OUT"; exit 1; }
+      sed -i '/^beta-ws = "1"$/d' "$REPO/Cargo.toml"
+      printf '[dependencies]\ngamma-d = "1"\n' >> "$REPO/Cargo.toml"
+      OUT="$(cd "$REPO" && "$SELF" obs deps 2>&1)"; RC=$?
+      { [ "$RC" -ne 0 ] && printf '%s\n' "$OUT" | grep -q "new dependency key 'gamma-d'"; } \
+        || { rm -rf "$REPO"; echo "selftest FAIL: case (h) new [dependencies] key gamma-d fails by name; rc=$RC: $OUT"; exit 1; }
       rm -rf "$REPO"
-      echo "selftest PASS: obs deps — a fresh baseline records the lock names, a clean tree passes, a new dependency name fails by name, a missing baseline fails, and regenerating the baseline clears the new name"
+      echo "selftest PASS: obs deps — a fresh baseline records the lock names, a clean tree passes, a new dependency name fails by name, a missing baseline fails, regenerating the baseline clears the new name, a failing run prints the rule, fix and see help, a workspace.dependencies key passes once baselined, and a new workspace or [dependencies] key fails by name"
       exit 0 ;;
     *) usage; exit 2 ;;
   esac
