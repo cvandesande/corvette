@@ -120,7 +120,8 @@ camera or any role for another camera (D-8/DP-3/DP-4):
   previous MSE-tile transport shape;
 - an HLS/LL-HLS packager: the expanded view's fallback backend, likewise
   reusing the shared frame stream, serving N1's `/live/hls/` location when
-  the MoQ relay is unreachable or times out.
+  the MoQ relay is unreachable or times out, or when the viewer's browser has no video
+  decoder for the MoQ player.
 
 One Corvette-owned OCI image (`docker/Dockerfile.media-bridge`) carries both
 `moq-relay` and `corvette-media-bridge`; a deploying manifest chooses which of
