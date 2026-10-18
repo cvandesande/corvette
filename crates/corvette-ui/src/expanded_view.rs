@@ -232,7 +232,7 @@ fn mount_moq(state: &Rc<RefCell<SessionState>>) {
         if borrowed.stopped {
             return;
         }
-        let Some(relay_url) = moq_relay_url() else {
+        let Some(relay_url) = moq_relay_url().filter(|_| video_decoder_available()) else {
             drop(borrowed);
             mount_hls_fallback(Rc::clone(state));
             return;
@@ -578,6 +578,11 @@ fn moq_relay_url() -> Option<String> {
         .ok()
         .and_then(|value| value.as_string())
         .filter(|value| !value.is_empty())
+}
+
+fn video_decoder_available() -> bool {
+    js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("VideoDecoder"))
+        .is_ok_and(|value| value.is_function())
 }
 
 enum ScriptLoad {
