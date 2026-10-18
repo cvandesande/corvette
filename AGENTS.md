@@ -27,10 +27,10 @@ agent that reads the style guide in full — regardless of how small the change 
 In conversation, name a step by what it does; never by a plan code (a step,
 decision or finding label made of letters and digits).
 
-Unless a plan or brief already sets a model or effort level for an item, implementer
-and reviewer agents default to Sonnet, with the effort level chosen per task from its
-presumed difficulty rather than a fixed value. A plan's own per-item cost assignment
-(as in `.agents/*/PLAN-*.md`) takes precedence over this default.
+Before any non-trivial task, and again after context compaction, read
+`docs/standards/AGENTIC_PIPELINE_PLAYBOOK.md` and record the risk profile with a
+one-sentence rationale. The playbook sets which model does which work. A plan's own
+per-item cost assignment (as in `.agents/*/PLAN-*.md`) takes precedence over it.
 
 GitHub issues are the source of truth for material tracked work: roadmap
 features, defects or investigations that need scheduling, and follow-ups the
