@@ -13,10 +13,10 @@ the current backing, not of requirements.
 
 ## Working rules
 
-The tool-neutral pipeline, style guide, and role contracts are canonical at
-`/home/cvandesande/.config/ai-agent/standards/` — see
+The pipeline, style guide, and role contracts are in `docs/standards/`: read
 `docs/standards/AGENTIC_PIPELINE_PLAYBOOK.md` and
-`docs/standards/HUMAN_REVIEW_STYLE_GUIDE.md` for what each role loads from there.
+`docs/standards/HUMAN_REVIEW_STYLE_GUIDE.md` for what each role loads. Where
+`docs/standards/STYLE.md` and the style guide differ, `STYLE.md` takes precedence.
 This file holds only what is specific to this repository.
 
 The orchestrator does not read the style guide and does not author code. It may
@@ -27,10 +27,11 @@ agent that reads the style guide in full — regardless of how small the change 
 In conversation, name a step by what it does; never by a plan code (a step,
 decision or finding label made of letters and digits).
 
-Before any non-trivial task, and again after context compaction, read
-`docs/standards/AGENTIC_PIPELINE_PLAYBOOK.md` and record the risk profile with a
-one-sentence rationale. The playbook sets which model does which work. A plan's own
-per-item cost assignment (as in `.agents/*/PLAN-*.md`) takes precedence over it.
+The playbook sets which model does which work. A plan's own per-item cost
+assignment (as in `.agents/*/PLAN-*.md`) takes precedence over it.
+
+Detect browser capability or the observed outcome, never the browser name; an
+exception needs a stated reason.
 
 GitHub issues are the source of truth for material tracked work: roadmap
 features, defects or investigations that need scheduling, and follow-ups the
@@ -73,3 +74,19 @@ contract has changed. Otherwise explicitly confirm that both remain accurate.
 Every Clippy bypass, including item-level `allow` attributes and project lint
 configuration changes, requires explicit human review. Use a bypass only when
 there is no reasonable code or design change that resolves the warning.
+
+<!-- seed:begin -->
+## Standards (managed by the project seed; change the seed, not this section)
+
+The pipeline, role contracts and templates are in `docs/standards/`.
+
+Before any non-trivial task, and again after context compaction, read all of `docs/standards/AGENTIC_PIPELINE_PLAYBOOK.md`, every line, never an excerpt. Before changing files, classify the task as Routine, Significant, or Critical using the playbook. Record the profile and one-sentence rationale.
+
+When compacting, preserve the current item and its brief path, the risk profile, the list of modified files, the checks run so far, and any open human gate.
+
+A new process failure changes the standards at the source: fix the rail in the project seed repository, review and commit it there, then run its `bootstrap.sh --update` for this project. Do not edit a seed-owned file or this section in this project.
+<!-- seed:worker:begin -->
+
+Send implementation, research, and independent review to the `local-worker` agent, with a brief compiled from `docs/standards/templates/IMPLEMENTATION_BRIEF.md`. `docs/standards/LOCAL_WORKER_POLICY.md` sets assignment, concurrency, and escalation.
+<!-- seed:worker:end -->
+<!-- seed:end -->
