@@ -13,30 +13,24 @@ pub struct FrigateConfig {
     auth: FrigateAuth,
 }
 
-/// The subset of Frigate's `auth` configuration that decides camera access.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 struct FrigateAuth {
-    /// Frigate's role name to permitted camera names map; an empty list means
-    /// every camera.
+    /// An empty camera list for a role means every camera.
     #[serde(default)]
     roles: BTreeMap<String, Vec<String>>,
 }
 
 impl FrigateConfig {
-    /// Returns enabled cameras in their configured dashboard order, as the
-    /// wire entries served by Corvette's own camera list (issue #4).
+    /// Enabled cameras in their configured dashboard order.
     #[must_use]
     pub fn enabled_camera_entries(self) -> Vec<CameraEntry> {
         Self::camera_entries_in_dashboard_order(self.cameras)
     }
 
-    /// Returns the enabled cameras `role` may see, in the order of
-    /// [`FrigateConfig::enabled_camera_entries`], as the wire entries of
-    /// Corvette's camera list (issue #4 D4).
+    /// Returns the enabled cameras `role` may see, in [`FrigateConfig::enabled_camera_entries`] order.
     ///
     /// A role absent from `auth.roles` sees nothing, as does the empty role of
-    /// a request with no `Remote-Role`. A disabled camera is never returned,
-    /// even when the role lists it.
+    /// a request with no `Remote-Role`; a disabled camera is never returned, even when listed.
     #[must_use]
     pub fn camera_entries_for_role(self, role: &str) -> Vec<CameraEntry> {
         let Self { cameras, auth } = self;
@@ -64,7 +58,6 @@ impl FrigateConfig {
             .collect()
     }
 
-    /// Enabled cameras sorted into dashboard order: `ui.order`, then name.
     fn enabled_in_dashboard_order(
         cameras: BTreeMap<String, FrigateCamera>,
     ) -> Vec<(String, FrigateCamera)> {
@@ -85,29 +78,23 @@ impl FrigateConfig {
 /// A camera available to the Corvette interface.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Camera {
-    /// Stable camera name used in API paths.
     pub name: String,
-    /// Human-readable label supplied by Frigate.
     pub display_name: String,
-    /// Width in pixels of the stream Frigate runs detection on, unscaled.
     pub width: u32,
-    /// Height in pixels of the stream Frigate runs detection on, unscaled.
     pub height: u32,
     order: i32,
 }
 
-/// A camera as returned by Corvette's own camera list API (issue #4).
+/// A camera as returned by Corvette's own camera list API.
+///
+/// Detection sizes are Frigate's own values, verbatim and unscaled.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct CameraEntry {
     /// Stable camera name used in API paths.
     pub name: String,
-    /// Human-readable label supplied by Frigate.
     pub display_name: String,
-    /// Configured dashboard order; lower values sort first.
     pub order: i32,
-    /// Width in pixels of the stream Frigate runs detection on, unscaled.
     pub detect_width: u32,
-    /// Height in pixels of the stream Frigate runs detection on, unscaled.
     pub detect_height: u32,
 }
 
@@ -123,36 +110,32 @@ impl From<CameraEntry> for Camera {
     }
 }
 
-/// The response body of Corvette's camera list route (issue #4).
+/// The response body of Corvette's camera list route.
 ///
-/// An object rather than a bare array so later fields can be added without a
-/// breaking change.
+/// An object rather than a bare array so later fields can be added without a breaking change.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct CameraList {
     /// The cameras the caller's role may see, in dashboard order.
     pub cameras: Vec<CameraEntry>,
 }
 
-/// The response body of Corvette's health route (issue #4 D2).
+/// The response body of Corvette's health route; both probe results are `ok` in a `200` answer.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Health {
-    /// Result of the database probe; always `ok` in a `200` answer.
     pub database: String,
-    /// Result of the configuration check; always `ok` in a `200` answer.
     pub config: String,
 }
 
-/// Error payload returned by Corvette's own API routes (issue #4).
+/// Error payload returned by Corvette's own API routes.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ErrorBody {
     /// Stable machine code for callers to branch on, such as `unauthorized`.
     pub code: String,
-    /// Human-readable description of the failure.
     pub message: String,
 }
 
-/// Returns the camera names `role` may access in `all_cameras` order, following
-/// Frigate's `User.get_allowed_cameras` rule (issue #4).
+/// Returns the camera names `role` may access in `all_cameras` order: an absent
+/// role gets none, an empty role list every camera.
 #[must_use]
 pub fn allowed_cameras<'a>(
     role: &str,
@@ -172,129 +155,82 @@ pub fn allowed_cameras<'a>(
         .collect()
 }
 
-/// An event returned by Frigate's event history endpoint.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Event {
-    /// Stable event identifier used in media API paths.
     pub id: String,
-    /// Camera that observed the event.
     pub camera: String,
-    /// Detected object or audio label.
     pub label: String,
-    /// More specific label assigned by recognition or the user.
     pub sub_label: Option<String>,
-    /// Event start as Unix seconds.
     pub start_time: f64,
-    /// Event end as Unix seconds, or `None` while tracking continues.
     pub end_time: Option<f64>,
-    /// Zones entered during the event.
     pub zones: Vec<String>,
-    /// Whether Frigate can produce a recording clip for this event.
     pub has_clip: bool,
 }
 
-/// A review segment used to summarize activity on the recording calendar.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct ReviewSegment {
-    /// Camera that observed the segment.
     pub camera: String,
-    /// Segment start as Unix seconds.
     pub start_time: f64,
-    /// Segment end as Unix seconds, or `None` while activity continues.
     pub end_time: Option<f64>,
-    /// Highest activity classification reached by the segment.
     pub severity: ReviewSeverity,
 }
 
-/// A review entry displayed in the recent activity feed.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct ReviewEvent {
-    /// Stable review identifier.
     pub id: String,
-    /// Camera that observed the activity.
     pub camera: String,
-    /// Activity start as Unix seconds.
     pub start_time: f64,
-    /// Activity end as Unix seconds, or `None` while activity continues.
     pub end_time: Option<f64>,
-    /// Highest activity classification reached by the review.
     pub severity: ReviewSeverity,
-    /// Frigate media path for the review thumbnail.
     pub thumb_path: String,
-    /// Labels and zones collected during the review.
     pub data: ReviewEventData,
 }
 
-/// Labels and zones attached to a Frigate review entry.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 pub struct ReviewEventData {
-    /// Detected audio labels.
     #[serde(default)]
     pub audio: Vec<String>,
-    /// Identifiers of the tracked-object events this review was built from.
-    ///
-    /// Empty for a review with no tracked object, such as an audio-only one.
     #[serde(default)]
     pub detections: Vec<String>,
-    /// Detected object labels.
     #[serde(default)]
     pub objects: Vec<String>,
-    /// Recognition labels assigned to detected objects.
     #[serde(default)]
     pub sub_labels: Vec<String>,
-    /// Zones entered during the review.
     #[serde(default)]
     pub zones: Vec<String>,
 }
 
-/// A time bucket returned by Frigate's motion-activity endpoint.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct MotionActivity {
-    /// Bucket start as Unix seconds.
     pub start_time: f64,
-    /// Highest motion percentage recorded within the bucket.
     pub motion: f64,
-    /// Comma-separated cameras that recorded motion within the bucket.
     pub camera: String,
 }
 
-/// A retained media segment returned by Frigate's recordings endpoint.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct RecordingSegment {
-    /// Segment start as Unix seconds.
     pub start_time: f64,
-    /// Segment end as Unix seconds.
     pub end_time: f64,
-    /// Amount of motion Frigate measured in the segment.
     #[serde(default)]
     pub motion: Option<f64>,
 }
 
-/// A low-resolution video generated by Frigate for timeline scrubbing.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct PreviewClip {
-    /// Camera that produced the preview.
     pub camera: String,
-    /// Authenticated media path for the preview video.
     pub src: String,
-    /// Preview media MIME type.
     #[serde(rename = "type")]
     pub media_type: String,
-    /// Preview start as Unix seconds.
     pub start: f64,
-    /// Preview end as Unix seconds.
     pub end: f64,
 }
 
-/// Frigate's ordered review activity classifications.
+/// Frigate's review activity classifications, in ascending order of importance.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewSeverity {
-    /// Recorded motion that did not become a detection.
     SignificantMotion,
-    /// A configured object detection that did not become an alert.
     Detection,
-    /// An alert-worthy detection.
     Alert,
 }
 
@@ -318,77 +254,47 @@ impl ReviewSeverity {
     }
 }
 
-/// The body of `GET /corvette/api/v1/activity` (issue #5).
-///
-/// The shape is fixed: every field is always written, absent media as `null`
-/// and empty lists as `[]`.
+/// The body of `GET /corvette/api/v1/activity`: every field is always written.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ActivityResponse {
-    /// The request's `after` echoed back, as Unix seconds.
     pub after: f64,
-    /// The request's `before` echoed back, as Unix seconds.
     pub before: f64,
-    /// Width in seconds of one motion bucket.
     pub motion_bucket_seconds: u32,
-    /// The reviews inside the requested window.
     pub reviews: Vec<ActivityReview>,
-    /// The motion buckets covering the requested window.
     pub motion: Vec<MotionBucket>,
 }
 
-/// One review inside an [`ActivityResponse`] (issue #5).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ActivityReview {
-    /// Stable review identifier.
     pub id: String,
-    /// Camera that observed the activity.
     pub camera: String,
-    /// Highest activity classification reached by the review.
     pub severity: ReviewSeverity,
-    /// Activity start as Unix seconds.
     pub start: f64,
-    /// Activity end as Unix seconds; `None` while the review is ongoing.
     pub end: Option<f64>,
-    /// Sorted detected object labels.
     pub objects: Vec<String>,
-    /// Sorted zones entered during the review.
     pub zones: Vec<String>,
-    /// Sorted identifiers of the tracked-object events this review was built
-    /// from.
     pub detections: Vec<String>,
-    /// Sorted recognition labels assigned to detected objects.
     pub sub_labels: Vec<String>,
-    /// Sorted detected audio labels.
     pub audio: Vec<String>,
-    /// The review's media as available now.
     pub media: ReviewMedia,
 }
 
-/// The media offered with a review; each link is `None` when that media is
-/// not available now (issue #5).
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ReviewMedia {
-    /// Still image of the review.
     pub thumbnail: Option<MediaLink>,
-    /// Video of the review.
     pub clip: Option<MediaLink>,
 }
 
-/// One fetchable piece of review media (issue #5).
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct MediaLink {
-    /// URL the browser requests to fetch the media.
     pub url: String,
 }
 
-/// One motion bucket inside an [`ActivityResponse`] (issue #5).
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct MotionBucket {
     /// Bucket start as Unix seconds, a multiple of `motion_bucket_seconds`.
     pub start: i64,
-    /// Greatest raw motion count recorded within the bucket.
     pub level: i64,
-    /// Sorted cameras that recorded motion within the bucket.
     pub cameras: Vec<String>,
 }
 
@@ -405,12 +311,6 @@ struct FrigateCameraUi {
     order: i32,
 }
 
-/// The subset of Frigate's `detect` sub-config needed for tile aspect ratio.
-///
-/// Frigate resolves both fields from the camera's stream before serving
-/// `/api/config` (`frigate/config/config.py`), so a running deployment's
-/// response always carries concrete values even though Frigate's own model
-/// allows either to be unset in raw user configuration.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 struct FrigateDetect {
     width: u32,
@@ -421,7 +321,6 @@ struct FrigateDetect {
 mod tests {
     use super::*;
 
-    /// One enabled camera with a label, one enabled without, one disabled.
     const MULTI_CAMERA_CONFIG: &str = r#"{
         "version": "0.17",
         "cameras": {
@@ -547,8 +446,6 @@ mod tests {
         );
     }
 
-    /// `MULTI_CAMERA_CONFIG` plus roles: `admin` sees everything, `limited`
-    /// lists a disabled and a nonexistent camera beside a real one.
     const ROLE_CAMERA_CONFIG: &str = r#"{
         "auth": {
             "roles": {
@@ -602,8 +499,6 @@ mod tests {
 
     #[test]
     fn camera_entries_for_role_keeps_dashboard_order_for_a_listed_role() {
-        // The role lists in name order; the entries come back in dashboard
-        // order instead (`ui.order`, then name).
         let config = r#"{
             "auth": { "roles": { "viewer": ["side_door", "east", "west"] } },
             "cameras": {
@@ -913,7 +808,6 @@ mod tests {
         assert_eq!(preview.src, "/clips/previews/front/1785764400.0.mp4");
     }
 
-    /// The documented `GET /corvette/api/v1/activity` body (issue #5).
     /// Whole-number `f64` fields are written with `.0`.
     const ACTIVITY_RESPONSE_JSON: &str = r#"{
         "after": 1760227200.0, "before": 1760313600.0, "motion_bucket_seconds": 30,
@@ -938,7 +832,6 @@ mod tests {
         "motion": [{"start": 1760230020, "level": 14, "cameras": ["back", "front"]}]
     }"#;
 
-    /// The value `ACTIVITY_RESPONSE_JSON` documents.
     fn documented_activity_response() -> ActivityResponse {
         ActivityResponse {
             after: 1_760_227_200.0,
