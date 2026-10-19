@@ -1,7 +1,3 @@
-//! Integration tests for `GET /corvette/api/v1/health` (issue #4 A4 —
-//! invariants I2, I3, I7): the database probe against real `SQLite` files and
-//! the configuration source behind a fixture.
-
 use corvette_api::{ErrorBody, Health};
 use corvette_api_server::config::ConfigSource;
 use corvette_api_server::{ApiServer, CONNECTION_TIMEOUT};
@@ -15,10 +11,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::task::JoinHandle;
 
-/// Frigate's `/api/config` answer, trimmed from the live capture (issue #4 A3).
+/// Frigate's `/api/config` answer, trimmed from a live capture.
 const FRIGATE_CONFIG: &str = include_str!("fixtures/frigate-config.json");
 
-/// A running service plus the temp dir to clean up afterwards.
 struct TestServer {
     socket: PathBuf,
     dir: PathBuf,
@@ -33,7 +28,6 @@ impl TestServer {
     }
 }
 
-/// A fresh temp directory path, unique within this test process.
 fn unique_dir() -> PathBuf {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -44,8 +38,6 @@ fn unique_dir() -> PathBuf {
     ))
 }
 
-/// Binds a service on a temp socket with the given database path and config
-/// address.
 fn start_server(db_path: &Path, config_addr: String) -> TestServer {
     let dir = unique_dir();
     let _ = std::fs::remove_dir_all(&dir);
@@ -62,7 +54,6 @@ fn start_server(db_path: &Path, config_addr: String) -> TestServer {
     }
 }
 
-/// Makes `path` (a directory or file) writable again, ignoring failures.
 fn restore_writable(path: &Path) {
     #[cfg(unix)]
     {
@@ -73,9 +64,8 @@ fn restore_writable(path: &Path) {
     let _ = path;
 }
 
-/// Creates a WAL-mode database at `path` holding one `reviewsegment` row and
-/// returns the writer connection: keeping it open is what leaves `-wal` and
-/// `-shm` present with an uncheckpointed write, as they are while Frigate runs.
+/// Keeping the returned writer open leaves `-wal`/`-shm` present with an
+/// uncheckpointed write, as they are while Frigate runs.
 fn create_wal_database(path: &Path) -> Connection {
     let writer = Connection::open(path).expect("create test database");
     writer
@@ -97,8 +87,7 @@ enum Behavior {
     Refuse,
 }
 
-/// A fixture for Frigate's config HTTP interface: it answers connections with
-/// the queued behaviors (the last one repeats) and counts answered requests.
+/// The config fixture: answers with queued behaviors (the last one repeats).
 struct Fixture {
     behaviors: Mutex<VecDeque<Behavior>>,
     request_count: AtomicUsize,
@@ -153,8 +142,6 @@ impl Fixture {
     }
 }
 
-/// Reads until the request's `\r\n\r\n` terminator; `None` if the peer closes
-/// first.
 async fn read_request(stream: &mut TcpStream) -> Option<Vec<u8>> {
     let mut request = Vec::new();
     let mut chunk = [0_u8; 512];
@@ -178,13 +165,11 @@ fn config_response(body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// A well-formed authenticated `GET` of the health route.
 fn health_request() -> Vec<u8> {
     b"GET /corvette/api/v1/health HTTP/1.0\r\nRemote-User: alice\r\nRemote-Role: admin\r\n\r\n"
         .to_vec()
 }
 
-/// Sends `request` and reads the whole response.
 async fn exchange(socket: &Path, request: &[u8]) -> Vec<u8> {
     let mut stream = UnixStream::connect(socket).await.expect("connect");
     stream.write_all(request).await.expect("write");
@@ -196,8 +181,6 @@ async fn exchange(socket: &Path, request: &[u8]) -> Vec<u8> {
     response
 }
 
-/// Splits a raw response into its status line, header map (lower-cased names),
-/// and body bytes.
 fn http_parts(raw: &[u8]) -> (String, HashMap<String, String>, Vec<u8>) {
     let separator = raw
         .windows(4)
@@ -218,8 +201,7 @@ fn http_parts(raw: &[u8]) -> (String, HashMap<String, String>, Vec<u8>) {
     (status, headers, body)
 }
 
-/// Asserts the framing every response carries (I7): exactly the promised
-/// headers and a `Content-Length` that matches the body.
+/// Asserts the framing every response carries.
 fn assert_framing(headers: &HashMap<String, String>, body: &[u8]) {
     assert_eq!(
         headers.get("content-type").map(String::as_str),
@@ -360,8 +342,8 @@ async fn an_unauthenticated_health_request_touches_no_upstream() {
 
 #[tokio::test]
 async fn health_answers_ok_from_a_read_only_wal_database() {
-    // Reproduces the read-only `frigate-config` mount of issue #4 D5: the
-    // open writer keeps the readable `-wal`/`-shm` files present.
+    // Reproduces the read-only `frigate-config` mount: the open writer keeps
+    // the readable `-wal`/`-shm` files present.
     let (_fixture, addr) =
         Fixture::start(vec![Behavior::Respond(config_response(FRIGATE_CONFIG))]).await;
     let dir = unique_dir();

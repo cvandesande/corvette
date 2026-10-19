@@ -1,5 +1,4 @@
-//! Integration tests: the service over a real Unix socket in a temp directory
-//! (issue #4 A2 — invariants I2, I7, I8).
+//! Integration tests: the service over a real Unix socket in a temp directory.
 
 use corvette_api::ErrorBody;
 use corvette_api_server::config::{ConfigSource, DEFAULT_CACHE_TTL};
@@ -13,7 +12,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
 
-/// A running service plus the temp dir to clean up afterwards.
 struct TestServer {
     socket: PathBuf,
     dir: PathBuf,
@@ -27,15 +25,13 @@ impl TestServer {
     }
 }
 
-/// A fresh temp directory path, unique within this test process.
 fn unique_dir() -> PathBuf {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("corvette-api-test-{}-{}", std::process::id(), id))
 }
 
-/// A source no test here can reach: none of these requests survives the
-/// identity gate, the prefix check, or the parser, so no fetch is ever made.
+/// No request survives the gate, prefix check or parser: no fetch is made.
 fn unreachable_config() -> std::sync::Arc<ConfigSource> {
     std::sync::Arc::new(ConfigSource::new(
         "127.0.0.1:1".to_owned(),
@@ -43,9 +39,7 @@ fn unreachable_config() -> std::sync::Arc<ConfigSource> {
     ))
 }
 
-/// Binds a service on a temp socket and serves it until the test aborts it.
-/// The database path names no file: none of these tests reaches a route that
-/// probes it.
+/// The database path names no file: no test reaches a route that probes it.
 fn start_server(timeout: Duration) -> TestServer {
     let dir = unique_dir();
     let _ = std::fs::remove_dir_all(&dir);
@@ -67,7 +61,6 @@ fn start_server(timeout: Duration) -> TestServer {
     }
 }
 
-/// A well-formed `GET` request line followed by the given header lines.
 fn get(path: &str, headers: &[&str]) -> Vec<u8> {
     let mut request = format!("GET {path} HTTP/1.0\r\n");
     for header in headers {
@@ -78,8 +71,7 @@ fn get(path: &str, headers: &[&str]) -> Vec<u8> {
     request.into_bytes()
 }
 
-/// Sends `request` and reads the whole response. A write error is ignored: a
-/// server that rejects a request early may close before the last byte is sent.
+/// Sends `request`, ignoring write errors: a rejecting server may close early.
 async fn exchange(socket: &Path, request: &[u8]) -> Vec<u8> {
     let mut stream = UnixStream::connect(socket).await.expect("connect");
     let _ = stream.write_all(request).await;
@@ -91,8 +83,6 @@ async fn exchange(socket: &Path, request: &[u8]) -> Vec<u8> {
     response
 }
 
-/// Splits a raw response into its status line, header map (lower-cased names),
-/// and body bytes.
 fn http_parts(raw: &[u8]) -> (String, HashMap<String, String>, Vec<u8>) {
     let separator = raw
         .windows(4)
@@ -113,8 +103,6 @@ fn http_parts(raw: &[u8]) -> (String, HashMap<String, String>, Vec<u8>) {
     (status, headers, body)
 }
 
-/// A well-formed request whose header block totals exactly `total` bytes,
-/// including the terminating `\r\n\r\n`.
 fn sized_request(total: usize) -> Vec<u8> {
     let mut request = b"GET /x HTTP/1.0\r\nRemote-User: alice\r\nX-Pad: ".to_vec();
     let pad = total - request.len() - b"\r\n\r\n".len();
@@ -124,8 +112,6 @@ fn sized_request(total: usize) -> Vec<u8> {
     request
 }
 
-/// Asserts the single error shape: `application/json`, an exact
-/// `Content-Length`, and a body that parses as the expected `ErrorBody` code.
 fn assert_error_shape(raw: &[u8], status_prefix: &str, code: &str) {
     let (status, headers, body) = http_parts(raw);
     let actual = status.split_whitespace().nth(1).unwrap_or_default();
@@ -148,8 +134,7 @@ fn assert_error_shape(raw: &[u8], status_prefix: &str, code: &str) {
 #[tokio::test]
 async fn every_route_requires_remote_user() {
     let server = start_server(CONNECTION_TIMEOUT);
-    // The router's own route table plus one path it does not serve, so a route
-    // added to the table is checked here without touching this test.
+    // Paths come from the table itself, so a new route is checked here.
     let mut paths: Vec<String> = Route::ALL.map(Route::path).to_vec();
     paths.push("/corvette/api/v1/unknown-path".to_owned());
     for path in &paths {
@@ -179,7 +164,6 @@ async fn authenticated_requests_to_unknown_routes_are_not_found() {
     .await;
     assert_error_shape(&with_role, "404", "not_found");
 
-    // `Remote-User` alone passes the gate; the path is unknown either way.
     let without_role = exchange(
         &server.socket,
         &get("/corvette/api/v1/unknown-path", &["Remote-User: alice"]),
@@ -192,8 +176,7 @@ async fn authenticated_requests_to_unknown_routes_are_not_found() {
 #[tokio::test]
 async fn the_remote_user_header_name_is_case_insensitive() {
     let server = start_server(CONNECTION_TIMEOUT);
-    // Any non-401 answer proves the header passed the identity gate; an
-    // unknown path answers without touching any upstream.
+    // A non-401 answer proves the header passed the identity gate.
     let response = exchange(
         &server.socket,
         &get("/corvette/api/v1/unknown-path", &["remote-user: alice"]),
@@ -335,8 +318,7 @@ async fn a_header_block_at_the_limit_split_across_writes_is_accepted() {
     let server = start_server(CONNECTION_TIMEOUT);
     let request = sized_request(8192);
     let mut stream = UnixStream::connect(&server.socket).await.expect("connect");
-    // Pause between writes so the server has consumed the first part; back-to-
-    // back writes would let the kernel deliver both in one read.
+    // Pause so the first part is read alone; the kernel may merge the writes.
     let (head, tail) = request.split_at(request.len() - 1);
     stream.write_all(head).await.expect("first write");
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -363,8 +345,7 @@ async fn an_over_limit_terminator_split_across_writes_is_rejected() {
     let server = start_server(CONNECTION_TIMEOUT);
     let request = sized_request(8193);
     let mut stream = UnixStream::connect(&server.socket).await.expect("connect");
-    // Pause so the server reads the first part alone; an uncapped follow-up
-    // read would then grab the tail and push the terminator past the limit.
+    // Pause so the head is read alone; a cap-free read would grab the tail.
     let (head, tail) = request.split_at(request.len() - 2);
     stream.write_all(head).await.expect("first write");
     tokio::time::sleep(Duration::from_millis(200)).await;
