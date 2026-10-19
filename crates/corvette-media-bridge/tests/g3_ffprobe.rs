@@ -1,23 +1,4 @@
-//! Issue #12 item G3's own Verify step: "a synthetic Annex-B sequence
-//! produces a valid `m3u8` playlist and a sequence of CMAF segments that
-//! `ffprobe` accepts without error" -- a real, independently authored
-//! CMAF/HLS parser, not a hand-rolled one this crate's own code could
-//! coincidentally agree with itself about.
-//!
-//! Drives the same real `hls` worker/server code
-//! `tests/g3_integration.rs` does, over real HTTP, then writes the fetched
-//! playlist and segment bytes to real files on disk (`ffprobe`'s HLS demuxer
-//! resolves a playlist's own relative segment URIs against the directory the
-//! `.m3u8` file itself lives in, so segments must be real files, not bytes
-//! held only in memory) and shells out to the real `ffprobe` binary against
-//! them.
-//!
-//! `ffprobe` ships as part of `ffmpeg`, added to this repository's own
-//! `flake.nix` devShell specifically for this check (see that file's own
-//! comment) -- this test fails loudly, not silently, if it is missing,
-//! naming `nix develop` as the fix, matching this project's existing
-//! precedent for a required external tool
-//! (`scripts/run_g2_fmp4_ws_browser_check.sh`'s own `command -v` checks).
+//! The served playlist and segments, re-parsed by the real `ffprobe`.
 
 use bytes::Bytes;
 use corvette_media_bridge::hls::{HlsServer, MultiCameraHlsStore, run_hls_segment};
@@ -33,19 +14,8 @@ use tokio::sync::broadcast;
 const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const CAMERA_NAME: &str = "cam-ffprobe";
 
-// Deliberately NOT the shorter SPS/PPS/IDR bytes `g1_integration.rs`'s,
-// `g2_integration.rs`'s, and `g3_integration.rs`'s own `cam-synth` all share
-// (reused from `moq-mux`'s own `h264::import` unit tests): those are real and
-// valid enough for a container-level parser to accept without error, which
-// is all this crate's own Rust unit tests and the HTTP-transport integration
-// tests ever needed, but `ffprobe` -- unlike a hand-rolled or MSE-level
-// structural check -- actually attempts to decode a frame while probing
-// stream parameters, and rejected that shorter fixture ("non-existing PPS
-// referenced", "sps_id out of range") for exactly the reason
-// `examples/g2_browser_fixture.rs`'s own doc already names: it lacks real
-// encoded macroblock data. This test instead reuses that same file's real,
-// genuinely decodable H.264 SPS/PPS/IDR triple (a real encoder's own output,
-// see that file's own doc for full provenance) byte-for-byte.
+// ffprobe decodes a frame while probing and rejected the shorter fixture
+// the other bridge tests share; this triple is a real encoder's own output.
 const SPS: &[u8] = &[
     0x67, 0x42, 0xc0, 0x1f, 0xdc, 0x42, 0x6c, 0x04, 0x40, 0x00, 0x00, 0x03, 0x00, 0x40, 0x00, 0x00,
     0x0f, 0x03, 0xc6, 0x0c, 0xe0,
@@ -63,8 +33,6 @@ fn annex_b(nal: &[u8]) -> Bytes {
     Bytes::from(payload)
 }
 
-/// Same shape as `g3_integration.rs`'s own `feed_synthetic_h264` -- see that
-/// file's own doc for why every access unit here is an IDR.
 async fn feed(sender: broadcast::Sender<ClientFrame>) {
     let mut timestamp: u32 = 0;
     loop {
@@ -83,9 +51,6 @@ async fn feed(sender: broadcast::Sender<ClientFrame>) {
     }
 }
 
-/// Same minimal HTTP/1.1 GET helper as `g3_integration.rs`'s own `http_get`
-/// -- see that file's own top-level doc for why this is hand-rolled rather
-/// than a new test-only HTTP client dependency.
 async fn http_get(addr: SocketAddr, path: &str) -> Vec<u8> {
     let mut stream = tokio::time::timeout(WAIT_TIMEOUT, TcpStream::connect(addr))
         .await
@@ -147,9 +112,6 @@ async fn ffprobe_accepts_this_crates_own_playlist_and_segments() {
     let addr = server.local_addr().unwrap();
     tokio::spawn(server.serve(Arc::clone(&store)));
 
-    // Poll until the playlist names at least two segments -- see
-    // `g3_integration.rs`'s own identical wait for why this takes roughly
-    // 2x the 2-second target segment duration in wall time.
     let playlist_path = format!("/{CAMERA_NAME}/playlist.m3u8");
     let playlist = tokio::time::timeout(WAIT_TIMEOUT, async {
         loop {
@@ -174,21 +136,8 @@ async fn ffprobe_accepts_this_crates_own_playlist_and_segments() {
     drop(worker);
     feeder.abort();
 
-    // Write everything to real files in one directory: ffprobe's HLS demuxer
-    // resolves the playlist's own relative segment URIs (and EXT-X-MAP's
-    // "init.mp4") against the directory the .m3u8 file itself lives in.
-    //
-    // `hls::CameraHls::playlist_text` never writes `#EXT-X-ENDLIST` (this is
-    // a genuinely live playlist -- see `hls`'s own module doc), but ffmpeg's
-    // own HLS demuxer takes the absence of that tag to mean the stream is
-    // still being appended to, and will sit waiting for a playlist reload
-    // that never comes against a static on-disk copy like this one,
-    // regardless of how many real segments are already present. Appending it
-    // only to this on-disk copy tells ffprobe the copy itself is complete --
-    // it does not change what this crate's own server ever actually serves a
-    // real player -- so this test can assert against a real, finite parse
-    // rather than hanging on a fixture that, from a VOD parser's point of
-    // view, looks unfinished forever.
+    // ffmpeg's HLS demuxer takes a playlist without #EXT-X-ENDLIST as still
+    // being appended to; the tag is appended to this on-disk copy alone.
     let dir = std::env::temp_dir().join(format!("g3-ffprobe-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("creates the fixture directory");
     let vod_playlist = format!("{playlist}#EXT-X-ENDLIST\n");
@@ -214,10 +163,6 @@ async fn ffprobe_accepts_this_crates_own_playlist_and_segments() {
         "ffprobe reported an error despite exiting successfully: {stderr}"
     );
 
-    // csv output is one line per stream, comma-joined in `-show_entries`'s
-    // own declared field order; checked as two independent substrings rather
-    // than one exact joined string so this assertion does not depend on
-    // memorizing that exact field order.
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("video") && stdout.contains("h264"),
@@ -225,15 +170,7 @@ async fn ffprobe_accepts_this_crates_own_playlist_and_segments() {
     );
 }
 
-/// Runs `ffprobe` against `playlist_file`, waiting at most 30 seconds rather
-/// than trusting `Child::wait`'s own unbounded block -- see this file's own
-/// top-level doc and the `#EXT-X-ENDLIST` comment at this function's own call
-/// site for why a hang here is possible in principle and must fail loudly,
-/// not silently block the whole test suite, if it ever recurs.
-///
-/// `fixture_dir` is only used to clean up on an early failure path (spawn
-/// failure, or the timeout itself); the caller still removes it on the
-/// normal path.
+/// Waits at most 30 seconds for `ffprobe`: a hang must fail loudly, not block.
 fn run_ffprobe_with_timeout(
     playlist_file: &std::path::Path,
     fixture_dir: &std::path::Path,

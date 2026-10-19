@@ -432,6 +432,47 @@ The synthetic camera's feed publishes onto the same broadcast channel shape
 that a real camera client's subscription exposes, so the workers consume it
 exactly as they consume a dialed camera.
 
+## The HLS packager is tested over real HTTP and through a real external parser
+
+`tests/g3_integration.rs` fetches the packager's playlist and segments over real HTTP;
+`tests/g3_ffprobe.rs` hands the same bytes to `ffprobe`, a real, independently authored
+CMAF/HLS parser, so acceptance rests on a parser this repository does not author. The
+packager path needs no relay and no `MoQ` binary, so both tests run under `cargo test`.
+
+Both tests issue raw `TcpStream` GET requests and read each response to its end: the
+workspace has no HTTP client crate, and the packager answers every response with
+`Connection: close`, so the end of input is the end of it.
+
+Both feed one synthetic camera through the broadcast-channel shape the bridge end-to-end
+test establishes ("The end-to-end bridge test supplies its own relay, camera feeds and
+clients"). The HTTP test pairs it with a mock RTSP camera dialed by a real client; the
+mock camera's frames carry no real parameter sets, so its initialization segment never
+resolves, yet its playlist is still served: a registered camera's playlist always exists,
+so before resolution it reads as a valid empty live document (200, no map line, no
+segments) rather than an error -- browser-based validation established the empty document
+as the choice that avoids a player-visible race. Stopping that camera's client and task
+leaves the synthetic camera's served output unchanged; the test checks that directly.
+
+The `ffprobe` test feeds its SPS/PPS/IDR triple byte-for-byte from
+`examples/g2_browser_fixture.rs`, whose own doc records its provenance: a real encoder's
+single-frame baseline output. The shorter fixture the other bridge tests share is valid
+enough for container-level parsing but carries no encoded macroblock data; `ffprobe`
+attempts to decode a frame while probing stream parameters and rejected it ("non-existing
+PPS referenced", "sps_id out of range").
+
+The fetched playlist and segments are written as real files in one directory because
+`ffprobe`'s HLS demuxer resolves relative segment URIs against the directory holding the
+`.m3u8`. The served playlist is live and carries no `#EXT-X-ENDLIST`; the tag is appended
+to the on-disk copy alone, because the demuxer treats its absence as a stream still being
+appended to and would wait for a playlist reload a static copy never provides -- what the
+server serves is unchanged. The run is bounded at 30 seconds so a hung parse fails loudly
+instead of blocking the suite.
+
+`ffprobe` reaches the test through the `flake.nix` devShell (`pkgs.ffmpeg`); when missing,
+the test fails with a message naming `nix develop`. The stream assertion checks two
+independent substrings of its csv output rather than one joined line, so it does not
+depend on that output's field order.
+
 ## One camera name identifies its stream across every live-view transport
 
 `crates/corvette-media-bridge` names a configured camera's `CameraSpec::name` field as that
