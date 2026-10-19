@@ -1,5 +1,4 @@
-//! Integration tests for `GET /corvette/api/v1/cameras` against a fixture
-//! configuration server (issue #4 A3 — D3 cache, D4 role rule, I2, I7).
+//! Tests the cameras route against a fixture configuration server.
 
 use corvette_api::{CameraEntry, CameraList, ErrorBody};
 use corvette_api_server::config::ConfigSource;
@@ -13,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::task::JoinHandle;
 
-/// Frigate's `/api/config` answer, trimmed from the live capture (issue #4 A3).
+/// Frigate's `/api/config` answer, trimmed from the live capture.
 const FRIGATE_CONFIG: &str = include_str!("fixtures/frigate-config.json");
 
 /// Short enough that the refetch path runs in well under a second, long
@@ -21,7 +20,6 @@ const FRIGATE_CONFIG: &str = include_str!("fixtures/frigate-config.json");
 const CACHE_TTL: Duration = Duration::from_secs(1);
 const EXPIRY_SLEEP: Duration = Duration::from_millis(1400);
 
-/// A running service plus the temp dir to clean up afterwards.
 struct TestServer {
     socket: PathBuf,
     dir: PathBuf,
@@ -35,7 +33,6 @@ impl TestServer {
     }
 }
 
-/// A fresh temp directory path, unique within this test process.
 fn unique_dir() -> PathBuf {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -46,7 +43,6 @@ fn unique_dir() -> PathBuf {
     ))
 }
 
-/// Binds a service on a temp socket, reading its configuration from `addr`.
 /// The database path names no file: no test here probes it.
 fn start_server(config_addr: String) -> TestServer {
     let dir = unique_dir();
@@ -65,7 +61,6 @@ fn start_server(config_addr: String) -> TestServer {
     }
 }
 
-/// A well-formed `GET` request line followed by the given header lines.
 fn get(path: &str, headers: &[&str]) -> Vec<u8> {
     let mut request = format!("GET {path} HTTP/1.0\r\n");
     for header in headers {
@@ -76,7 +71,6 @@ fn get(path: &str, headers: &[&str]) -> Vec<u8> {
     request.into_bytes()
 }
 
-/// Sends `request` and reads the whole response.
 async fn exchange(socket: &Path, request: &[u8]) -> Vec<u8> {
     let mut stream = UnixStream::connect(socket).await.expect("connect");
     stream.write_all(request).await.expect("write");
@@ -88,8 +82,6 @@ async fn exchange(socket: &Path, request: &[u8]) -> Vec<u8> {
     response
 }
 
-/// Splits a raw response into its status line, header map (lower-cased names),
-/// and body bytes.
 fn http_parts(raw: &[u8]) -> (String, HashMap<String, String>, Vec<u8>) {
     let separator = raw
         .windows(4)
@@ -110,8 +102,6 @@ fn http_parts(raw: &[u8]) -> (String, HashMap<String, String>, Vec<u8>) {
     (status, headers, body)
 }
 
-/// Asserts I7's framing on every response: exactly the headers the service
-/// promises, and a `Content-Length` that matches the body.
 fn assert_framing(headers: &HashMap<String, String>, body: &[u8]) {
     assert_eq!(
         headers.get("content-type").map(String::as_str),
@@ -131,7 +121,6 @@ fn assert_framing(headers: &HashMap<String, String>, body: &[u8]) {
     assert_eq!(declared, body.len(), "Content-Length must match the body");
 }
 
-/// Asserts the single error shape (I7) and returns nothing further.
 fn assert_error_shape(raw: &[u8], status_prefix: &str, code: &str) {
     let (status, headers, body) = http_parts(raw);
     let actual = status.split_whitespace().nth(1).unwrap_or_default();
@@ -141,7 +130,6 @@ fn assert_error_shape(raw: &[u8], status_prefix: &str, code: &str) {
     assert_eq!(error.code, code);
 }
 
-/// Asserts a `200` camera response and returns the parsed list.
 fn assert_camera_list(raw: &[u8]) -> CameraList {
     let (status, headers, body) = http_parts(raw);
     let actual = status.split_whitespace().nth(1).unwrap_or_default();
@@ -150,20 +138,15 @@ fn assert_camera_list(raw: &[u8]) -> CameraList {
     serde_json::from_slice(&body).expect("body parses as CameraList")
 }
 
-/// How the fixture config server answers a connection.
 #[derive(Clone)]
 enum Behavior {
-    /// Read the request, write these response bytes, close.
     Respond(Vec<u8>),
-    /// Read the request, then keep the connection open without answering.
     Stall,
     /// Close at once, as nothing behind the address would.
     Refuse,
 }
 
-/// A fixture for Frigate's config HTTP interface: it answers connections with
-/// the queued behaviors (the last one repeats), records each request's bytes,
-/// and counts answered requests.
+/// Answers connections with the queued behaviors (the last one repeats).
 struct Fixture {
     behaviors: Mutex<VecDeque<Behavior>>,
     requests: Mutex<Vec<Vec<u8>>>,
@@ -224,7 +207,6 @@ impl Fixture {
     }
 }
 
-/// Notes one request the fixture answered, so tests can count fetches.
 fn record(fixture: &Fixture, request: Option<Vec<u8>>) {
     if let Some(request) = request {
         fixture
@@ -235,8 +217,6 @@ fn record(fixture: &Fixture, request: Option<Vec<u8>>) {
     }
 }
 
-/// Reads until the request's `\r\n\r\n` terminator; `None` if the peer closes
-/// first.
 async fn read_request(stream: &mut TcpStream) -> Option<Vec<u8>> {
     let mut request = Vec::new();
     let mut chunk = [0_u8; 512];
@@ -278,8 +258,7 @@ async fn admin_sees_all_enabled_cameras_in_dashboard_order() {
     assert_eq!(
         list.cameras,
         vec![
-            // Equal `ui.order`, so the name decides: the disabled `living`
-            // is absent and `display_name` falls back to the name.
+            // Equal `ui.order`, so name decides; `display_name` falls back to name.
             CameraEntry {
                 name: "back".to_owned(),
                 display_name: "back".to_owned(),
@@ -315,8 +294,7 @@ async fn the_fetch_sends_the_documented_config_request() {
     server.finish();
 }
 
-/// A config where `keeper` lists one enabled camera, one disabled camera, and
-/// one that does not exist.
+/// `keeper` lists one enabled camera, one disabled camera and one nonexistent.
 fn role_filter_fixture() -> String {
     serde_json::json!({
         "auth": { "roles": {
@@ -345,9 +323,7 @@ async fn the_route_filters_cameras_by_role() {
     let server = start_server(addr);
 
     let cases: &[(&str, &[&str])] = &[
-        // Listed and enabled survives; the disabled and unknown names drop.
         ("keeper", &["front"]),
-        // An empty role list grants every enabled camera.
         ("viewer", &["back", "front"]),
         // A role absent from `auth.roles` sees nothing (fail closed).
         ("auditor", &[]),
@@ -368,7 +344,6 @@ async fn the_route_filters_cameras_by_role() {
         );
     }
 
-    // No `Remote-Role` header at all is the empty role: also nothing.
     let anonymous_role = get("/corvette/api/v1/cameras", &["Remote-User: alice"]);
     let list = assert_camera_list(&exchange(&server.socket, &anonymous_role).await);
     assert!(list.cameras.is_empty());
@@ -427,8 +402,7 @@ async fn an_expired_copy_is_never_served_when_the_refetch_fails() {
     assert_camera_list(&exchange(&server.socket, &admin_request()).await);
     tokio::time::sleep(EXPIRY_SLEEP).await;
 
-    // The upstream accepts the refetch and stops answering, so the fetch hits
-    // its timeout; the held copy is older than the TTL and must not be served.
+    // The refetch stalls to its timeout; the copy older than the TTL must not be served.
     let response = exchange(&server.socket, &admin_request()).await;
     assert_error_shape(&response, "503", "config_unavailable");
     assert_eq!(fixture.request_count(), 2);
@@ -447,8 +421,7 @@ async fn no_cameras_without_any_configuration_copy() {
 
 #[tokio::test]
 async fn each_unacceptable_upstream_answer_is_unavailable() {
-    // The framing-rule cases carry an otherwise-valid config body, so the
-    // framing defect is the only reason the answer can be refused.
+    // These carry an otherwise-valid config body, so framing alone refuses them.
     let bad_responses: Vec<Vec<u8>> = vec![
         b"HTTP/1.0 500 Internal Server Error\r\nContent-Length: 2\r\n\r\n{}".to_vec(),
         format!(

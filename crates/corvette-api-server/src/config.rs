@@ -1,10 +1,5 @@
-//! Frigate's configuration as an HTTP source with a bounded in-memory cache
-//! (issue #4 D3).
-//!
-//! The fetch is a hand-written `HTTP/1.0` GET; this service adds no HTTP
-//! client dependency. The accepted response is deliberately narrow — a plain
-//! `200` whose body matches its `Content-Length` — because a chunked, encoded,
-//! or truncated response cannot be a trustworthy configuration.
+//! Only a plain `200` whose body matches its `Content-Length` is a
+//! trustworthy configuration; chunked, encoded or truncated responses are not.
 
 use crate::{find_header_end, log_event, split_at_byte, split_header_lines, trim_spaces, utf8};
 use corvette_api::FrigateConfig;
@@ -12,26 +7,17 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-/// Environment variable naming the `host:port` Frigate answers `/api/config`
-/// on.
 pub const CONFIG_ADDR_ENV: &str = "CORVETTE_API_CONFIG_ADDR";
 
-/// The configuration source used when `CORVETTE_API_CONFIG_ADDR` is unset:
-/// Frigate's own nginx, in the same pod (issue #4 D3).
 pub const DEFAULT_CONFIG_ADDR: &str = "127.0.0.1:5000";
 
-/// How young a fetched configuration must be to serve from it (issue #4 D3).
 pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(10);
 
-/// Overall budget for one fetch, covering connect, request, and response.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The largest configuration response accepted; anything larger is a broken
-/// upstream, not a configuration worth parsing.
 const MAX_CONFIG_BYTES: usize = 4 * 1024 * 1024;
 
-/// Why one configuration fetch failed. The text names the operation and the
-/// source, so it serves both the log line and the caller's error body.
+/// The same text serves the log line and the caller's error body.
 #[derive(Debug)]
 pub(crate) struct ConfigFetchError(String);
 
@@ -41,28 +27,21 @@ impl std::fmt::Display for ConfigFetchError {
     }
 }
 
-/// A parsed configuration and the moment it arrived.
 #[derive(Debug)]
 struct CachedConfig {
     config: FrigateConfig,
     fetched_at: Instant,
 }
 
-/// Frigate's configuration, fetched on demand and kept in memory for a
-/// bounded time (issue #4 D3). Share through the server with `Arc`; one
-/// instance is meant for the whole process.
 #[derive(Debug)]
 pub struct ConfigSource {
     addr: String,
     ttl: Duration,
-    /// The lock is held across a fetch, so concurrent requests that find the
-    /// copy stale wait and share one fetch instead of starting one each
-    /// (issue #4 D3).
+    /// Held across a fetch, so concurrent stale requests share one fetch.
     cache: tokio::sync::Mutex<Option<CachedConfig>>,
 }
 
 impl ConfigSource {
-    /// A source fetching from `addr` and serving any copy younger than `ttl`.
     #[must_use]
     pub fn new(addr: String, ttl: Duration) -> Self {
         Self {
@@ -72,25 +51,18 @@ impl ConfigSource {
         }
     }
 
-    /// The serialized `{"cameras":[...]}` list for `role`, or the fetch
-    /// failure when no copy younger than the TTL is available.
     pub(crate) async fn camera_list_json(&self, role: &str) -> Result<Vec<u8>, ConfigFetchError> {
         let list = corvette_api::CameraList {
             cameras: self.config().await?.camera_entries_for_role(role),
         };
-        // `CameraList` holds only strings and integers; its derived
-        // serializer cannot fail.
+        // CameraList is only strings and integers; its derived serializer cannot fail.
         Ok(serde_json::to_vec(&list).expect("camera list serializes"))
     }
 
-    /// Reports whether a configuration copy fresh enough to serve exists: a
-    /// fresh cached copy, or a successful fetch (issue #4 D3).
     pub(crate) async fn available(&self) -> Result<(), ConfigFetchError> {
         self.config().await.map(|_config| ())
     }
 
-    /// The enabled cameras `role` may see, as names in dashboard order, or
-    /// the fetch failure when no copy younger than the TTL is available.
     pub(crate) async fn allowed_camera_names(
         &self,
         role: &str,
@@ -104,9 +76,6 @@ impl ConfigSource {
             .collect())
     }
 
-    /// The newest configuration, refetched when the cached copy is older than
-    /// the TTL. A copy older than the TTL is never returned: a failed fetch
-    /// propagates even when a stale copy is held.
     async fn config(&self) -> Result<FrigateConfig, ConfigFetchError> {
         let mut cache = self.cache.lock().await;
         if let Some(cached) = cache.as_ref()
@@ -130,8 +99,6 @@ impl ConfigSource {
     }
 }
 
-/// Fetches and parses one configuration, end to end within [`FETCH_TIMEOUT`]
-/// so a stalled upstream cannot hold a request open longer.
 async fn fetch(addr: &str) -> Result<FrigateConfig, ConfigFetchError> {
     tokio::time::timeout(FETCH_TIMEOUT, fetch_from(addr))
         .await
@@ -146,8 +113,7 @@ async fn fetch_from(addr: &str) -> Result<FrigateConfig, ConfigFetchError> {
     let mut stream = TcpStream::connect(addr)
         .await
         .map_err(|err| ConfigFetchError(format!("could not connect to {addr}: {err}")))?;
-    // Frigate's nginx caches `/api/` responses unless the request sends
-    // `X-Cache-Bypass`, so a fetched copy could otherwise be arbitrarily old.
+    // Frigate's nginx serves `/api/` from cache unless the request sends `X-Cache-Bypass`.
     let request = format!(
         "GET /api/config HTTP/1.0\r\nHost: {addr}\r\nX-Cache-Bypass: 1\r\nConnection: close\r\n\r\n"
     );
@@ -156,8 +122,6 @@ async fn fetch_from(addr: &str) -> Result<FrigateConfig, ConfigFetchError> {
             "could not send the config request to {addr}: {err}"
         ))
     })?;
-    // `Connection: close` makes end of stream the body end, so nothing needs
-    // transfer-encoding decoding; the cap bounds one upstream answer.
     let mut response = Vec::new();
     stream
         .take(MAX_CONFIG_BYTES as u64 + 1)
@@ -177,9 +141,6 @@ async fn fetch_from(addr: &str) -> Result<FrigateConfig, ConfigFetchError> {
     parse_response(&response)
 }
 
-/// Parses one narrowly accepted `HTTP/1.0` or `HTTP/1.1` `200` response into
-/// the configuration. Every other framing is an error rather than something to
-/// decode.
 fn parse_response(response: &[u8]) -> Result<FrigateConfig, ConfigFetchError> {
     let Some(head_end) = find_header_end(response) else {
         return Err(ConfigFetchError(

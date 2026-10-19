@@ -1,6 +1,4 @@
-//! Integration tests for `GET /corvette/api/v1/activity` against a fixture
-//! configuration server and a Frigate-shaped database (issue #5 — I1 role
-//! filtering, I3 media rules, and the error codes).
+//! Tests the activity route against a fixture config server and a Frigate-shaped database.
 
 use corvette_api::{ActivityResponse, ActivityReview, ErrorBody, MediaLink};
 use corvette_api_server::config::ConfigSource;
@@ -18,15 +16,13 @@ use tokio::task::JoinHandle;
 /// Long enough that every request in one test shares a single config fetch.
 const CACHE_TTL: Duration = Duration::from_mins(5);
 
-/// Frigate's own DDL for the two tables the read uses, as `activity.rs`'s
-/// unit tests state them.
+/// Frigate's own DDL for the two tables the read uses.
 const REVIEWSEGMENT_DDL: &str = r#"CREATE TABLE "reviewsegment" ("id" VARCHAR(30) NOT NULL PRIMARY KEY, "camera" VARCHAR(20) NOT NULL, "start_time" DATETIME NOT NULL, "end_time" DATETIME, "severity" VARCHAR(30) NOT NULL, "thumb_path" VARCHAR(255) NOT NULL, "data" JSON NOT NULL)"#;
 const RECORDINGS_DDL: &str = r#"CREATE TABLE "recordings" ("id" VARCHAR(30) NOT NULL PRIMARY KEY, "camera" VARCHAR(20) NOT NULL, "path" VARCHAR(255) NOT NULL, "start_time" DATETIME NOT NULL, "end_time" DATETIME NOT NULL, "duration" REAL NOT NULL, "motion" INTEGER)"#;
 
 /// Every request uses this range; the seeded activity lies inside it.
 const RANGE: &str = "after=1000&before=2000";
 
-/// A running service plus its temp dir and the paths it was bound with.
 struct TestEnv {
     socket: PathBuf,
     dir: PathBuf,
@@ -36,9 +32,6 @@ struct TestEnv {
 }
 
 impl TestEnv {
-    /// A service whose configuration source answers with the fixture config.
-    /// The database file and media root exist as directories only: a test
-    /// calls `seed_database` when it wants rows.
     async fn start(tag: &str) -> Self {
         Self::with_config_behaviors(
             tag,
@@ -47,7 +40,6 @@ impl TestEnv {
         .await
     }
 
-    /// A service whose configuration source refuses every connection.
     async fn refusing(tag: &str) -> Self {
         Self::with_config_behaviors(tag, vec![Behavior::Refuse]).await
     }
@@ -80,7 +72,6 @@ impl TestEnv {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 
-    /// Creates the database file holding the seeded activity rows.
     fn seed_database(&self) {
         let db = Connection::open(&self.db_path).expect("create test database");
         db.execute_batch(REVIEWSEGMENT_DDL)
@@ -89,23 +80,19 @@ impl TestEnv {
         seed_activity(&db);
     }
 
-    /// Writes `rel` under the media root, creating parent directories.
     fn write_media(&self, rel: &str) {
         write_file(&self.media_root, rel);
     }
 
-    /// Writes `name` directly under the temp dir, which is the parent of the
-    /// media root: where `media_root/../name` resolves.
+    /// Writes under the media root's parent, where `media_root/../name` resolves.
     fn write_outside_media(&self, name: &str) {
         write_file(&self.dir, name);
     }
 
-    /// Sends the request and returns the raw response bytes.
     async fn request_raw(&self, role: &str, query: &str) -> Vec<u8> {
         exchange(&self.socket, &activity_request(role, query)).await
     }
 
-    /// Sends the request, asserts the `200` framing, and parses the body.
     async fn activity(&self, role: &str, query: &str) -> ActivityResponse {
         let raw = self.request_raw(role, query).await;
         let (status, headers, body) = http_parts(&raw);
@@ -116,7 +103,6 @@ impl TestEnv {
     }
 }
 
-/// A fresh temp directory path, unique within this test process.
 fn unique_dir(tag: &str) -> PathBuf {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -126,14 +112,12 @@ fn unique_dir(tag: &str) -> PathBuf {
     ))
 }
 
-/// Writes `rel` under `root`, creating parent directories.
 fn write_file(root: &Path, rel: &str) {
     let path = root.join(rel);
     std::fs::create_dir_all(path.parent().expect("file parent")).expect("create dirs");
     std::fs::write(&path, "bytes").expect("write file");
 }
 
-/// A well-formed `GET` request line followed by the given header lines.
 fn get(path: &str, headers: &[&str]) -> Vec<u8> {
     let mut request = format!("GET {path} HTTP/1.0\r\n");
     for header in headers {
@@ -151,7 +135,6 @@ fn activity_request(role: &str, query: &str) -> Vec<u8> {
     )
 }
 
-/// Sends `request` and reads the whole response.
 async fn exchange(socket: &Path, request: &[u8]) -> Vec<u8> {
     let mut stream = UnixStream::connect(socket).await.expect("connect");
     stream.write_all(request).await.expect("write");
@@ -163,8 +146,6 @@ async fn exchange(socket: &Path, request: &[u8]) -> Vec<u8> {
     response
 }
 
-/// Splits a raw response into its status line, header map (lower-cased names),
-/// and body bytes.
 fn http_parts(raw: &[u8]) -> (String, HashMap<String, String>, Vec<u8>) {
     let separator = raw
         .windows(4)
@@ -185,8 +166,6 @@ fn http_parts(raw: &[u8]) -> (String, HashMap<String, String>, Vec<u8>) {
     (status, headers, body)
 }
 
-/// Asserts I7's framing on every response: exactly the headers the service
-/// promises, and a `Content-Length` that matches the body.
 fn assert_framing(headers: &HashMap<String, String>, body: &[u8]) {
     assert_eq!(
         headers.get("content-type").map(String::as_str),
@@ -206,7 +185,6 @@ fn assert_framing(headers: &HashMap<String, String>, body: &[u8]) {
     assert_eq!(declared, body.len(), "Content-Length must match the body");
 }
 
-/// Asserts the single error shape (I7).
 fn assert_error_shape(raw: &[u8], status_prefix: &str, code: &str) {
     let (status, headers, body) = http_parts(raw);
     let actual = status.split_whitespace().nth(1).unwrap_or_default();
@@ -216,17 +194,13 @@ fn assert_error_shape(raw: &[u8], status_prefix: &str, code: &str) {
     assert_eq!(error.code, code);
 }
 
-/// How the fixture config server answers a connection.
 #[derive(Clone)]
 enum Behavior {
-    /// Read the request, write these response bytes, close.
     Respond(Vec<u8>),
     /// Close at once, as nothing behind the address would.
     Refuse,
 }
 
-/// A fixture for Frigate's config HTTP interface: it answers connections with
-/// the queued behaviors (the last one repeats).
 struct Fixture {
     behaviors: Mutex<VecDeque<Behavior>>,
 }
@@ -272,8 +246,6 @@ impl Fixture {
     }
 }
 
-/// Reads until the request's `\r\n\r\n` terminator; `None` if the peer closes
-/// first.
 async fn read_request(stream: &mut TcpStream) -> Option<Vec<u8>> {
     let mut request = Vec::new();
     let mut chunk = [0_u8; 512];
@@ -297,9 +269,7 @@ fn config_response(body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Cameras `front`, `back`, and `side` enabled plus `living` disabled; roles
-/// `admin` (everything), `frontonly` (front), and `ghostonly` (a camera that
-/// does not exist).
+/// Enables `front`, `back`, `side`; disables `living`; `ghostonly` names a nonexistent camera.
 fn fixture_config() -> String {
     serde_json::json!({
         "auth": { "roles": {
@@ -321,14 +291,8 @@ fn fixture_config() -> String {
     .to_string()
 }
 
-/// One review and one motion recording per camera, all inside [`RANGE`],
-/// seeded so the media rules each have a case:
-/// - `r-front` ended with an overlapping recording and a well-formed
-///   `thumb_path` whose file a test may or may not create;
-/// - `r-back` ended without an overlapping recording and its `thumb_path`
-///   sits outside the media prefix;
-/// - `r-side` is ongoing and its `thumb_path` tries to escape the media root;
-/// - `r-living` belongs to the disabled camera.
+/// One review and one motion recording per camera, all inside [`RANGE`], each
+/// review a distinct media-rule case: well-formed, outside the prefix, escaping, disabled.
 fn seed_activity(db: &Connection) {
     let reviews = [
         (
@@ -373,8 +337,7 @@ fn seed_activity(db: &Connection) {
         )
         .expect("insert review");
     }
-    // Each recording only overlaps the review of its own camera whose clip
-    // rule expects `true`.
+    // Each recording overlaps only its own camera's review whose clip rule expects `true`.
     let recordings = [
         ("motion-front", "front", 1_500.0, 1_530.0, Some(3)),
         ("motion-back", "back", 1_800.0, 1_830.0, Some(4)),
@@ -399,7 +362,6 @@ fn seed_activity(db: &Connection) {
     }
 }
 
-/// The camera names across all reviews, in response order.
 fn review_cameras(response: &ActivityResponse) -> Vec<String> {
     response
         .reviews
@@ -408,7 +370,6 @@ fn review_cameras(response: &ActivityResponse) -> Vec<String> {
         .collect()
 }
 
-/// The distinct camera names across all motion buckets, sorted.
 fn motion_cameras(response: &ActivityResponse) -> Vec<String> {
     let mut names: Vec<String> = response
         .motion
@@ -437,8 +398,7 @@ async fn a_frontonly_role_never_sees_another_cameras_activity() {
     assert_eq!(review_cameras(&response), ["front"]);
     assert_eq!(motion_cameras(&response), ["front"]);
 
-    // Asking for a camera the role may not see answers empty, and the
-    // request's list never adds a camera.
+    // A refused camera answers empty; the request's list never adds one.
     let refused = env
         .activity("frontonly", &format!("{RANGE}&cameras=back"))
         .await;
@@ -469,7 +429,6 @@ async fn a_thumbnail_url_appears_only_when_the_file_is_present() {
     let env = TestEnv::start("thumbnail").await;
     env.seed_database();
 
-    // Nothing under the media root yet, so the well-formed path links to nothing.
     let response = env
         .activity("frontonly", &format!("{RANGE}&include=reviews"))
         .await;
@@ -504,8 +463,7 @@ async fn a_stored_path_outside_the_media_prefix_is_not_linked() {
 async fn a_thumbnail_path_escaping_the_media_root_is_not_linked() {
     let env = TestEnv::start("thumb-escape").await;
     env.seed_database();
-    // The file exists where `media_root/../secret.webp` resolves, so only
-    // the component rule can refuse the link.
+    // The file exists at `media_root/../secret.webp`; only the component rule can refuse.
     env.write_outside_media("secret.webp");
 
     let response = env
@@ -529,7 +487,6 @@ async fn a_clip_url_appears_only_for_an_ended_review_with_a_recording() {
             url: "/api/front/start/1500/end/1600/clip.mp4".to_owned()
         })
     );
-    // Ended, but no recording of `back` overlaps it.
     assert_eq!(review(&response, "r-back").media.clip, None);
     // Ongoing reviews have no clip even with recordings present.
     assert_eq!(review(&response, "r-side").media.clip, None);
@@ -581,7 +538,7 @@ async fn a_refusing_config_server_is_config_unavailable() {
 #[tokio::test]
 async fn a_missing_database_file_is_database_unavailable() {
     let env = TestEnv::start("db-missing").await;
-    // No `seed_database`: the file never exists, and cameras are allowed.
+    // No `seed_database`: the file never exists.
 
     let raw = env.request_raw("admin", RANGE).await;
     let (status, headers, body) = http_parts(&raw);
@@ -602,12 +559,10 @@ async fn an_empty_allowed_set_answers_without_touching_the_database() {
     let env = TestEnv::start("empty-set").await;
     // No `seed_database`: any database access would be a `503`.
 
-    // `ghostonly` lists only a camera that does not exist.
     let response = env.activity("ghostonly", RANGE).await;
     assert!(response.reviews.is_empty());
     assert!(response.motion.is_empty());
 
-    // An admin asking for a nameless camera also gets an empty answer.
     let response = env
         .activity("admin", &format!("{RANGE}&cameras=nope"))
         .await;
@@ -620,8 +575,7 @@ async fn an_empty_allowed_set_answers_without_touching_the_database() {
 async fn a_malformed_query_is_reported_before_the_config_fetch() {
     let env = TestEnv::refusing("bad-query-first").await;
 
-    // The config server would answer `503`; the `400` proves the query was
-    // parsed first.
+    // The config server would answer `503`; the `400` proves the query was parsed first.
     let raw = env.request_raw("admin", "after=x&before=2000").await;
     assert_error_shape(&raw, "400", "bad_request");
     env.finish();

@@ -502,7 +502,9 @@ nothing about which routes exist.
 The service bounds the size of a request header block, so one connection cannot grow its
 buffer without bound, and bounds the whole life of a connection, so a peer that stalls
 cannot leak a task and a file descriptor. It stops on SIGTERM, the container stop signal,
-or on Ctrl-C at a terminal.
+or on Ctrl-C at a terminal. The configuration fetch is bounded in time, so a stalled
+upstream cannot hold a request open, and in size, so an oversized response is a broken
+upstream and not a configuration worth parsing.
 
 Every response the service sends — success and error alike — is JSON with
 `Content-Type: application/json`, carries `Cache-Control: no-store`, and closes the
