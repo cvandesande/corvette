@@ -509,6 +509,60 @@ The header-line cap is 64: nginx forwards every header the browser sent plus its
 real request carries two to three times the headers a bare client sends; the earlier limit
 of 16 was too low for real browser traffic, and 64 leaves headroom.
 
+## The fMP4 muxer packages camera video into browser-feedable fragments
+
+`crates/corvette-media-bridge`'s `fmp4` module is the muxer shared by the fMP4-over-WebSocket transport
+and the HLS packager: one initialization segment per camera (`ftyp`/`moov`, rebuilt whenever the camera's
+own parameter sets genuinely change, so a viewer that connects after a resolution change receives the
+current segment and a camera's periodic in-stream re-announcement of unchanged sets changes nothing)
+plus one `moof`/`mdat` fragment per access unit.
+
+Samples are written in AVCC (length-prefixed, four-byte) framing, matching the `avcC`/`hvcC` boxes' own
+`lengthSizeMinusOne = 3` declaration, not the wire's Annex-B framing. The camera's frame stream carries
+one NAL per frame, so an H.264 coded slice (non-IDR 1, IDR 5) is a complete video access unit; for
+H.265 the coded slice segment types 0-31 are VCL and the IRAP keyframe range is 16-23 (RFC 7798 /
+ITU-T H.265 Table 7-1). Parameter-set NALs feed the initialization segment instead, and the remaining
+non-VCL NALs a real stream may carry (SEI, AUD, filler) hold no sample data a decoder needs and are
+dropped -- the shared contract is one fragment per access unit, not full NAL-unit fidelity.
+
+The very first sample of a fragment stream carries a default duration -- 30 fps at the 90 kHz video
+clock -- because no interval has been measured before a second access unit arrives; the second fragment
+replaces it with the real measured interval, and a browser's `SourceBuffer` accepts that approximate
+first-sample duration, so no viewer rejects a first fragment over it.
+
+Each fragment carries the `moof`/`mdat` bytes plus two facts that plain bytes do not expose without
+re-parsing: whether it holds a keyframe (sync) sample, and its own sample duration in the same RTP
+tick units as the frame timestamps. The HLS packager uses both facts to cut a segment on a keyframe,
+once a segment has grown long enough, without re-parsing the `moof` it was just handed.
+
+`trun`'s `data_offset` is relative to the first byte of the containing `moof` box (the
+`default-base-is-moof` flag), so `moof`'s own final size must be known before the field can be patched
+in: the builder builds `moof` once to learn that size, sets `data_offset` to it plus `mdat`'s eight-byte
+header, and patches the field at its fixed byte offset -- the boxes and headers preceding it sum to 84
+bytes (moof header 8, `mfhd` 16, `traf` header 8, `tfhd` 16, `tfdt` 20, `trun` header 8, `trun`
+flags 4, sample count 4).
+
+The initialization segment declares a fixed placeholder width and height (1920x1080): they affect
+rendering geometry only -- a real `SourceBuffer` accepts the segment regardless -- while the true
+dimensions would mean parsing the SPS's exp-Golomb-coded fields for a property no consumer asserts on.
+Sample entries share the 78-byte `VisualSampleEntry` header of ISO/IEC 14496-12 section 12.1.3.
+
+The `ftyp` brands advertise what the writer emits: `iso5` as the major brand signals
+`default-base-is-moof` support; its compatible-brand list names `iso5`, `iso6`, `isom` and `mp41`,
+with `isom` and `mp41` listed as widely, conservatively supported brands.
+
+The `avcC` record copies `AVCProfileIndication`, `profile_compatibility` and `AVCLevelIndication`
+starting at index 1 of the stored SPS bytes: the stored SPS includes its own one-byte NAL header
+(RFC 6184 section 1.3) and those three fields begin immediately after it.
+
+The `hvcC` record (ISO/IEC 14496-15 section 8.3.3.1) takes real values only for the
+`profile_tier_level` fields that sit at fixed bit offsets in the SPS -- general profile, compatibility
+flags, constraint indicators and level, the first 12 bytes of `profile_tier_level` per ITU-T H.265
+section 7.3.3, reachable without exp-Golomb decoding -- and gives every other field a conservative
+common default; an SPS too short to hold these fields yields all-zero bytes, defensive only, never
+expected from a real camera. That yields a structurally valid record; browser-verified evidence covers
+the H.264 path, and no fixture verifies `hvcC` against a real H.265 decoder.
+
 ## The camera-list contract carries Frigate's own detect resolution, unscaled
 
 `corvette_api::Camera` (`crates/corvette-api/src/lib.rs`) carries `width`/`height` fields sourced

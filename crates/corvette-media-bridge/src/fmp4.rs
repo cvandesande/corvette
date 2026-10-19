@@ -1,77 +1,34 @@
-//! A minimal fragmented-MP4 (fMP4) muxer for the grid tile's WebSocket/MSE
-//! transport (issue #12 item G2).
+//! A minimal fragmented-MP4 (fMP4) muxer, video only.
 //!
-//! Builds one initialization segment per camera (`ftyp`/`moov`, from the
-//! stream's own SPS/PPS or VPS/SPS/PPS, re-emitted whenever those parameter
-//! sets change -- see [`InitSegmentTracker`]) plus a continuous stream of
-//! fragments (`moof`/`mdat`), one per access unit (one video sample per
-//! fragment -- see [`Fragmenter`]). Video only: this item inherits the same
-//! audio-track gap G1's own Premise names (see `crate`'s top-level doc), and
-//! does not fix it.
-//!
-//! No frame is ever decoded, scaled, or re-encoded here -- the existing NAL
-//! units are repackaged into ISO/IEC 14496-12 boxes, wire format only.
-//!
-//! This module builds bytes; it performs no I/O and owns no task or
-//! connection -- `crate::ws_repackager` drives it per camera and hosts the
-//! WebSocket transport. Kept free of any WebSocket concern so the HLS/CMAF
-//! packager (`crate::hls`, issue #12 item G3) can reuse the same
-//! fragmentation core through this module's own public API ([`Fragmenter`],
-//! [`InitSegmentTracker`]) rather than through `ws_repackager` -- see
-//! [`Fragment`]'s own doc for exactly what G3 needed added here to make that
-//! reuse possible.
+//! One initialization segment per camera plus one fragment per access unit.
+//! It builds bytes and performs no I/O; both the WebSocket repackager and
+//! the HLS packager drive it through this module's public API.
 
 use crate::parameter_sets::RawParameterSets;
 use crate::rtp_clock::VIDEO_CLOCK_RATE_HZ;
 use bytes::Bytes;
 use corvette_rtsp_client::depacketize::{Codec as ClientCodec, Frame as ClientFrame};
 
-/// H.264 NAL types that are one full video access unit, given that this
-/// crate's `corvette_rtsp_client::depacketize::Frame` stream carries exactly
-/// one NAL per frame (see `crate::parameter_sets`'s own doc): a coded slice
-/// of a non-IDR (1) or IDR (5) picture. Every other type (parameter sets,
-/// SEI, AUD, ...) is not sample data.
+/// One NAL per frame, so these coded slice types are each a full access
+/// unit; all other NAL types carry no sample data.
 const H264_NAL_TYPE_SLICE_NON_IDR: u8 = 1;
 const H264_NAL_TYPE_SLICE_IDR: u8 = 5;
 
-/// H.265 VCL NAL unit types (RFC 7798 / ITU-T H.265 Table 7-1): types 0-31
-/// are coded slice segments; the IRAP (keyframe) range is 16-23.
 const H265_NAL_TYPE_VCL_MAX: u8 = 31;
 const H265_NAL_TYPE_IRAP_MIN: u8 = 16;
 const H265_NAL_TYPE_IRAP_MAX: u8 = 23;
 
-/// A reasonable default sample duration (in [`VIDEO_CLOCK_RATE_HZ`] ticks)
-/// for a fragment's very first sample, before a second access unit has
-/// arrived to measure a real interval from -- 30fps at the 90kHz video clock
-/// rate. Every later fragment uses the real, measured interval between
-/// consecutive access units instead (see [`Fragmenter::next`]); a viewer's
-/// `SourceBuffer` does not reject a segment for an approximate first-sample
-/// duration, and this is corrected by the second fragment either way.
+/// Default first-sample duration; see docs/design/api-contracts.md.
 const DEFAULT_FIRST_SAMPLE_DURATION_TICKS: u32 = VIDEO_CLOCK_RATE_HZ / 30;
 
-/// The one video track ID this muxer ever produces (one video track per
-/// camera; see `crate`'s top-level doc on the audio-track gap).
 const TRACK_ID: u32 = 1;
 
-/// Tracks one camera's parameter sets and rebuilds the initialization
-/// segment (`ftyp`+`moov`) whenever they change.
-///
-/// Unlike `restream_provider::ParameterSetCache` (which resolves once and
-/// never updates again -- see `crate::parameter_sets`'s own doc), this
-/// tracker must re-emit on every genuine change: Do step 2 requires it, and
-/// a viewer that connects after a resolution change needs the current init
-/// segment, not the first one ever produced.
 #[derive(Debug, Default)]
 pub struct InitSegmentTracker {
     raw: RawParameterSets,
     last_emitted: Option<EmittedParameterSets>,
 }
 
-/// The exact parameter-set bytes the currently-held initialization segment
-/// was built from, kept so a later [`InitSegmentTracker::observe`] call can
-/// tell a genuine change (different bytes) from a re-observation of the same
-/// set (a camera's own periodic in-stream repetition, which must not rebuild
-/// and re-emit the segment on every repeat).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EmittedParameterSets {
     H264 { sps: Bytes, pps: Bytes },
@@ -79,10 +36,6 @@ enum EmittedParameterSets {
 }
 
 impl InitSegmentTracker {
-    /// Observes one frame, returning a freshly built initialization segment
-    /// exactly when its codec's complete parameter set is new or has
-    /// changed since the last one this tracker returned (`None` otherwise,
-    /// including for every frame that carries no parameter-set NAL).
     pub fn observe(&mut self, frame: &ClientFrame) -> Option<Bytes> {
         self.raw.observe(frame);
         match frame.codec {
@@ -113,44 +66,20 @@ impl InitSegmentTracker {
                 self.last_emitted = Some(current);
                 Some(segment)
             }
-            // See crate's top-level doc: never actually produced today.
+            // No camera's audio track is published on any live-view transport
+            // yet: docs/design/api-contracts.md.
             ClientCodec::Aac => None,
         }
     }
 }
 
-/// Groups the access-unit frame stream into one `moof`/`mdat` fragment per
-/// access unit.
-///
-/// Each sample is written in AVCC (length-prefixed) framing -- the format
-/// the initialization segment's own `avcC`/`hvcC` box declares
-/// (`lengthSizeMinusOne` = 3, i.e. 4-byte lengths), not the wire's own
-/// Annex-B framing.
-///
-/// A parameter-set NAL (SPS/PPS/VPS) carries no sample data of its own (it is
-/// consumed by [`InitSegmentTracker`] instead) and produces no fragment here.
-/// Any other non-VCL NAL a real stream might carry (SEI, AUD, filler) is
-/// likewise not sample data a decoder needs and is dropped -- a real, stated
-/// simplification of this "minimal" muxer (see this item's own Do step 2:
-/// only "one moof/mdat per access unit" is required, not full NAL-unit
-/// fidelity).
+/// Groups the frame stream into one `moof`/`mdat` fragment per access unit.
 #[derive(Debug, Default)]
 pub struct Fragmenter {
     sequence_number: u32,
     previous_timestamp: Option<u32>,
 }
 
-/// One access-unit fragment [`Fragmenter::next`] produces.
-///
-/// Carries the `moof`+`mdat` bytes themselves, plus the two facts a
-/// segment-boundary policy needs that plain bytes don't expose without
-/// re-parsing them -- whether this fragment carries a keyframe/sync sample,
-/// and its own sample duration in the same RTP tick units
-/// `ClientFrame::timestamp` uses. `ws_repackager` (issue #12 item G2) only
-/// ever needed the bytes themselves; this richer return type exists so
-/// `crate::hls` (issue #12 item G3) can decide where to cut a CMAF media
-/// segment (on a keyframe, once a segment has run long enough -- see that
-/// module's own doc) without re-parsing the `moof` box it was just handed.
 #[derive(Debug, Clone)]
 pub struct Fragment {
     pub bytes: Bytes,
@@ -159,8 +88,7 @@ pub struct Fragment {
 }
 
 impl Fragmenter {
-    /// Consumes one frame, returning a `moof`+`mdat` fragment if it carries
-    /// an access unit (`None` for a parameter-set or other non-sample NAL).
+    /// Returns a fragment only when the frame carries a video access unit.
     pub fn next(&mut self, frame: &ClientFrame) -> Option<Fragment> {
         let (_nal_type, is_keyframe) = classify(frame)?;
 
@@ -187,9 +115,6 @@ impl Fragmenter {
     }
 }
 
-/// Classifies one frame as (NAL type, is a sync/keyframe sample), or `None`
-/// if it carries no video access unit (a parameter set, or -- for a codec
-/// this muxer does not mux -- AAC).
 fn classify(frame: &ClientFrame) -> Option<(u8, bool)> {
     match frame.codec {
         ClientCodec::H264 => {
@@ -213,15 +138,11 @@ fn classify(frame: &ClientFrame) -> Option<(u8, bool)> {
 }
 
 mod boxes {
-    //! ISO/IEC 14496-12/14496-15 box construction, byte level. Pure,
-    //! synchronous, and allocation-only -- no I/O, matching this module's own
-    //! top-level doc.
+    //! ISO/IEC 14496-12/14496-15 box construction, byte level.
 
     use super::{TRACK_ID, VIDEO_CLOCK_RATE_HZ};
     use bytes::{BufMut, Bytes, BytesMut};
 
-    /// Writes one box: a big-endian `u32` size (patched in after `body`
-    /// runs), the four-character type, then whatever `body` appends.
     fn write_box(out: &mut BytesMut, box_type: [u8; 4], body: impl FnOnce(&mut BytesMut)) {
         let start = out.len();
         out.put_u32(0); // placeholder, patched below
@@ -232,10 +153,6 @@ mod boxes {
         out[start..start + 4].copy_from_slice(&size.to_be_bytes());
     }
 
-    /// `ftyp`: declares CMAF-style fragmented-MP4 compatibility. `iso5`
-    /// signals `default-base-is-moof` support (used by every `tfhd` this
-    /// module writes); `mp41` and the major brand `isom` are the widest,
-    /// most conservatively supported compatible brands.
     fn ftyp(out: &mut BytesMut) {
         write_box(out, *b"ftyp", |out| {
             out.put_slice(b"iso5"); // major_brand
@@ -344,13 +261,6 @@ mod boxes {
                 sample_entry_header(out, width, height);
                 write_box(out, *b"avcC", |out| {
                     out.put_u8(1); // configurationVersion
-                    // `sps` (per `parameter_sets::parameter_set_bytes`'s own
-                    // doc) includes its own 1-byte NAL header at index 0
-                    // (RFC 6184 section 1.3), so the SPS payload's own
-                    // profile_idc/constraint_flags/level_idc -- what avcC's
-                    // AVCProfileIndication/profile_compatibility/
-                    // AVCLevelIndication fields actually copy -- start at
-                    // index 1, not index 0.
                     out.put_u8(sps.get(1).copied().unwrap_or(0)); // AVCProfileIndication
                     out.put_u8(sps.get(2).copied().unwrap_or(0)); // profile_compatibility
                     out.put_u8(sps.get(3).copied().unwrap_or(0)); // AVCLevelIndication
@@ -379,8 +289,6 @@ mod boxes {
         });
     }
 
-    /// The 78-byte `VisualSampleEntry` header common to `avc1`/`hvc1` (ISO/IEC
-    /// 14496-12 section 12.1.3), preceding the codec configuration box.
     fn sample_entry_header(out: &mut BytesMut, width: u16, height: u16) {
         out.put_u32(0); // reserved[6] (first 4 of 6 bytes)
         out.put_u16(0); // reserved[6] (remaining 2 bytes)
@@ -400,19 +308,6 @@ mod boxes {
         out.put_i16(-1); // pre_defined
     }
 
-    /// `HEVCDecoderConfigurationRecord` (ISO/IEC 14496-15 section 8.3.3.1).
-    /// Only `general_profile_space`/`tier_flag`/`profile_idc`,
-    /// `general_profile_compatibility_flags`, `general_constraint_indicator_flags`,
-    /// and `general_level_idc` are parsed from the real SPS bitstream (fixed
-    /// bit-offset fields in `profile_tier_level`, no exp-Golomb decoding
-    /// needed for these); every other field this record carries
-    /// (`chroma_format_idc`, bit depths, frame-rate hints, ...) uses a
-    /// conservative common default. This mirrors G1's own AAC-gap precedent:
-    /// written correctly enough to produce a structurally valid record, but
-    /// this item's own evidence exercises only the H.264 path against a real
-    /// browser (see this crate's tests and `.agents/issue-12/evidence/`) --
-    /// no real H.265 fixture exists in this workspace to verify hvcC against
-    /// a real decoder.
     fn write_hvcc_body(out: &mut BytesMut, vps: &[u8], sps: &[u8], pps: &[u8]) {
         let profile_tier_level = h265_profile_tier_level(sps);
         out.put_u8(1); // configurationVersion
@@ -438,17 +333,6 @@ mod boxes {
         }
     }
 
-    /// Reads `general_profile_space`/`general_tier_flag`/`general_profile_idc`
-    /// (1 byte), `general_profile_compatibility_flags` (4 bytes),
-    /// `general_constraint_indicator_flags` (6 bytes), and
-    /// `general_level_idc` (1 byte) -- `profile_tier_level`'s first 12 bytes,
-    /// per ITU-T H.265 section 7.3.3 -- from a raw H.265 SPS NAL (including
-    /// its own 2-byte NAL header). These are fixed-width fields at a fixed
-    /// bit offset (2 bytes NAL header + 1 byte
-    /// `sps_video_parameter_set_id`/`sps_max_sub_layers_minus1`/
-    /// `sps_temporal_id_nesting_flag`), so no exp-Golomb bitstream decoding
-    /// is needed to reach them. Returns all zero bytes if `sps` is too short
-    /// to hold them (defensive only -- never expected from a real camera).
     fn h265_profile_tier_level(sps: &[u8]) -> [u8; 12] {
         let mut out = [0u8; 12];
         let start = 3; // 2-byte NAL header + 1 byte of SPS-level fields
@@ -499,13 +383,6 @@ mod boxes {
         [0x0001_0000, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000]
     }
 
-    /// Builds the `ftyp`+`moov` initialization segment for an H.264 track.
-    /// `width`/`height` are a fixed placeholder: `tkhd`'s and `avc1`'s own
-    /// declared dimensions affect rendering geometry only, not whether a
-    /// real `SourceBuffer` accepts the segment (checked directly by this
-    /// item's own browser-based test) -- parsing the true dimensions out of
-    /// the SPS's exp-Golomb-coded fields would add real complexity for a
-    /// property this item's Verify never asserts on.
     pub(super) fn init_segment_h264(sps: &[u8], pps: &[u8]) -> Bytes {
         let (width, height) = PLACEHOLDER_DIMENSIONS;
         let mut out = BytesMut::new();
@@ -529,10 +406,6 @@ mod boxes {
         out.freeze()
     }
 
-    /// Builds the `ftyp`+`moov` initialization segment for an H.265 track.
-    /// See [`init_segment_h264`] for the `width`/`height` placeholder
-    /// rationale, and [`write_hvcc_body`] for this item's own honest limit on
-    /// `hvcC` field accuracy.
     pub(super) fn init_segment_h265(vps: &[u8], sps: &[u8], pps: &[u8]) -> Bytes {
         let (width, height) = PLACEHOLDER_DIMENSIONS;
         let mut out = BytesMut::new();
@@ -556,18 +429,8 @@ mod boxes {
         out.freeze()
     }
 
-    /// A fixed placeholder resolution -- see [`init_segment_h264`]'s own doc
-    /// for why this item does not parse the real one out of the SPS.
     const PLACEHOLDER_DIMENSIONS: (u16, u16) = (1920, 1080);
 
-    /// One `moof`+`mdat` fragment carrying exactly one video sample.
-    ///
-    /// `data_offset` in `trun` is written relative to the first byte of the
-    /// `moof` box (`tfhd`'s `default-base-is-moof` flag, set below), so the
-    /// `moof` box must be fully built -- and its own final size known --
-    /// before `trun`'s `data_offset` field can be patched in. Built in two
-    /// passes: once to learn `moof`'s size, then `data_offset` is set to
-    /// that size plus `mdat`'s own 8-byte header.
     pub(super) fn fragment(
         sequence_number: u32,
         base_media_decode_time: u64,
@@ -575,11 +438,7 @@ mod boxes {
         sample_payload: &[u8],
         is_keyframe: bool,
     ) -> Bytes {
-        // The fixed byte offset from moof's start to trun's data_offset
-        // field, patched in below once moof's own total size is known: every
-        // box (or box header) preceding it -- moof header:8, mfhd:16, traf
-        // header:8, tfhd:16, tfdt:20, trun header:8, trun's own flags:4,
-        // sample_count:4 -- summing to 84.
+        // docs/design/api-contracts.md explains how this offset is derived.
         const DATA_OFFSET_FIELD_OFFSET: usize = 84;
 
         let sample_flags: u32 = if is_keyframe {
@@ -606,8 +465,7 @@ mod boxes {
                     out.put_u64(base_media_decode_time);
                 });
                 write_box(out, *b"trun", |out| {
-                    // flags: data-offset-present | sample-duration-present |
-                    // sample-size-present | sample-flags-present.
+                    // data-offset | duration | size | sample-flags present.
                     out.put_u32(0x0000_0701);
                     out.put_u32(1); // sample_count
                     out.put_i32(0); // data_offset: patched in below
@@ -618,7 +476,6 @@ mod boxes {
             });
         });
 
-        // Patch trun's data_offset now that moof's own total size is known.
         let moof_len = u32::try_from(moof.len()).expect("a single moof stays well under 4 GiB");
         let data_offset = (moof_len + 8).cast_signed(); // + mdat's own 8-byte header
         moof[DATA_OFFSET_FIELD_OFFSET..DATA_OFFSET_FIELD_OFFSET + 4]
@@ -639,11 +496,7 @@ mod boxes {
 mod tests {
     use super::*;
 
-    // The exact fixture bytes `moq-mux`'s own `h264::import` unit tests
-    // (`avc3_self_initializes_from_first_keyframe`) and this crate's own G1
-    // integration test use -- a real, valid H.264 SPS/PPS/IDR triple, reused
-    // here rather than invented, matching this project's established
-    // precedent for fixture provenance.
+    // A real H.264 SPS/PPS/IDR triple, reused from the moq-mux import tests.
     const SPS: &[u8] = &[
         0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe9, 0xb8, 0x08, 0x08, 0x0a, 0x00, 0x00,
         0x07, 0xd0, 0x00, 0x01, 0xd4, 0xc0, 0x80,
@@ -667,8 +520,6 @@ mod tests {
         }
     }
 
-    /// Reads one big-endian `u32` box size + 4-character type at `offset`,
-    /// returning (`type`, `total box length`).
     fn read_box_header(bytes: &[u8], offset: usize) -> ([u8; 4], usize) {
         let size = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
         let mut box_type = [0u8; 4];
@@ -746,9 +597,6 @@ mod tests {
         assert_eq!(&mdat_type, b"mdat");
         assert_eq!(moof_len + mdat_len, fragment.bytes.len());
 
-        // mdat's payload is length-prefixed (AVCC), not Annex-B
-        // start-code-prefixed: a 4-byte big-endian length, then the NAL
-        // bytes without their own start code.
         let mdat_payload = &fragment.bytes[moof_len + 8..];
         let declared_len = u32::from_be_bytes(mdat_payload[0..4].try_into().unwrap()) as usize;
         assert_eq!(declared_len, IDR.len());
@@ -784,8 +632,7 @@ mod tests {
             .unwrap();
 
         let sequence_number = |fragment: &[u8]| {
-            // moof(8) + mfhd header(8) -> mfhd's own version/flags(4) precede
-            // sequence_number.
+            // moof(8) + mfhd header(8) + version/flags(4) precede sequence_number.
             u32::from_be_bytes(fragment[8 + 8 + 4..8 + 8 + 8].try_into().unwrap())
         };
         assert_eq!(sequence_number(&first.bytes), 1);
@@ -802,11 +649,7 @@ mod tests {
 
         assert_eq!(second.duration_ticks, 3000);
 
-        // sample_duration sits right after trun's own data_offset field,
-        // which the fragment builder itself documents at byte 84 (see
-        // boxes::fragment's DATA_OFFSET_FIELD_OFFSET) -- so 88. Confirms the
-        // box's own encoded bytes agree with the field above, not just the
-        // returned struct.
+        // sample_duration sits at byte 88: trun's data_offset field ends at 84.
         let sample_duration = u32::from_be_bytes(second.bytes[88..92].try_into().unwrap());
         assert_eq!(sample_duration, 3000);
     }
