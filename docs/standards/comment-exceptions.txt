@@ -1,3 +1,3 @@
 # Exception caps for files whose comments are their content; only the always-comment cases fill them over the 3.0% target. A cap may go down (gate.sh comment baseline ratchets it) but never up.
-clippy.toml | 91.0% | external-constraint and invariant justification for the single disallowed-methods setting: ten justification lines, one setting
+clippy.toml | 90.9% | external-constraint and invariant justification for the single disallowed-methods setting: ten justification lines, one setting
 crates/rtsp-restream/Cargo.toml | 53.5% | the license key states the crate's dual MIT/Apache-2.0 obligation and most of its dependency keys carry their own justification comment
