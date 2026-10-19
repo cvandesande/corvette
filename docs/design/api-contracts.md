@@ -454,6 +454,61 @@ Frigate's own broader `/api/` location instead, since no more specific location 
 anymore. `/live/jsmpeg/` proxies to Frigate's own `jsmpeg` upstream, confirmed not go2rtc, and is
 unaffected by any of this.
 
+## The HLS packager serves a sliding-window CMAF playlist
+
+The HLS packager (`crates/corvette-media-bridge`, `hls`) cuts each camera's fragmented-MP4
+stream into CMAF media segments of a 2-second target duration. The duration trades live-view
+latency against request volume: shorter segments keep a viewer closer to live, and each
+segment boundary costs the viewer one more segment request, so the chosen target keeps
+segment-request overhead to about one request every two seconds per viewer. The 2-second
+target sits inside the 1 to 6 second range real HLS deployments commonly use; Apple's HLS
+authoring guidance recommends around 6 seconds for broad compatibility, while a LAN-local
+expanded-view fallback favors the low end of that range for lower glass-to-glass latency.
+
+A segment is cut only on a keyframe, so every segment after the first is independently
+decodable from its own first sample. The very first segment of a camera begins with whatever
+access unit the fragmenter emits first; a real camera conventionally emits its parameter sets
+immediately followed by an IDR, so that first segment is expected, not guaranteed, to start
+at a keyframe.
+
+Each playlist is a sliding window of the 6 most recent segments (12 seconds at the chosen
+target duration): a live playlist is not an ever-growing manifest, so the window bounds the
+packager's per-camera memory while covering the few-segment buffer a live player keeps.
+
+The packager's own listener serves these per-camera paths behind the `/live/hls/` prefix that
+the nginx proxy strips, so the packager itself never sees that prefix; the paths are listed
+under "One camera name identifies its stream across every live-view transport".
+
+The playlist is standard segmented HLS: no partial segments, no preload hints, no blocking
+playlist reload. Every response carries `Connection: close`, so each playlist or segment
+poll costs a fresh TCP handshake — one request per connection keeps the packager minimal,
+and a player's periodic polling simply opens the next connection.
+
+A camera's served state — the resolved initialization segment, the live segment window and
+the next sequence number — is a plain mutex-guarded snapshot rather than the
+`watch`/`broadcast` pair `ws_repackager` uses: an HTTP client pulls a snapshot on its own
+schedule instead of being pushed updates over a held-open connection, so there is no
+"no receivers yet" race to solve, and every write simply replaces the snapshot.
+
+Every accepted connection carries a five-second bound covering both reading its request and
+writing its response. Without it, a peer that opens a connection and never finishes sending
+would leave the read loop parked forever, leaking one task and one file descriptor per
+connection — a live deployment showed roughly seventy such stuck connections after less
+than an hour. Five seconds is a generous bound because nginx is this listener's only real
+client, one LAN-local hop away, and every request resolves in microseconds once its bytes
+arrive: a few in-memory lookups and no I/O.
+
+Every response carries `Access-Control-Allow-Origin: *` unconditionally. The listener serves
+no per-viewer state and no credentialed request, so an unrestricted origin costs nothing and
+lets a browser-hosted player on another origin fetch the playlist and segments; behind the
+nginx proxy every real request is same-origin, so the header is inert in a real deployment.
+
+The listener bounds what one connection may make it read. A request header block is capped
+at 8192 bytes so that one misbehaving connection cannot grow the read buffer without bound.
+The header-line cap is 64: nginx forwards every header the browser sent plus its own, so a
+real request carries two to three times the headers a bare client sends; the earlier limit
+of 16 was too low for real browser traffic, and 64 leaves headroom.
+
 ## The camera-list contract carries Frigate's own detect resolution, unscaled
 
 `corvette_api::Camera` (`crates/corvette-api/src/lib.rs`) carries `width`/`height` fields sourced

@@ -9,7 +9,6 @@
 25.2 27 107 crates/corvette-media-bridge/examples/g3_browser_fixture.rs
 24.0 52 217 crates/corvette-media-bridge/src/config.rs
 21.0 169 805 crates/corvette-media-bridge/src/fmp4.rs
-32.9 371 1129 crates/corvette-media-bridge/src/hls.rs
 17.2 5 29 crates/corvette-media-bridge/src/main.rs
 14.2 50 353 crates/corvette-media-bridge/src/moq_publish.rs
 24.2 51 211 crates/corvette-media-bridge/src/parameter_sets.rs
