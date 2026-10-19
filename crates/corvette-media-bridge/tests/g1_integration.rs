@@ -1,38 +1,10 @@
-//! Integration test for issue #12 item G1: a real, locally-run `moq-relay`
-//! (pinned per R1) plus issue #18's own mock camera server
-//! (`corvette_rtsp_client::mock_camera`, reused directly) standing in for
-//! one camera, exercising this crate's own `restream_provider`/`moq_publish`
-//! modules end to end.
+//! End-to-end test of this crate's restream feed and `MoQ` publish workers.
 //!
-//! **Why two cameras, only one backed by a real RTSP dial.** Issue #18's own
-//! `mock_camera` fabricates RTP payloads containing no real SPS/PPS and
-//! declares no `sprop-parameter-sets` in its SDP (confirmed by direct source
-//! read of `corvette-rtsp-client/src/mock_camera/{rtp.rs,rtsp_message.rs}`):
-//! it was built to test issue #18's own depacketizer's NAL/FU-A framing, not
-//! to produce decodable video. `cam-mock` below still dials it through a
-//! real `corvette_rtsp_client::client::Client`, proving the real RTSP
-//! handshake/reconnect/task-wiring path holds and that this crate's own
-//! frame-error handling (a keyframe with no SPS) degrades gracefully rather
-//! than panicking -- but its `DESCRIBE`/MoQ-catalog can never resolve, so it
-//! cannot exercise the catalog-resolution or content-correctness assertions.
-//! `cam-synth` supplies a second, independent
-//! `corvette_rtsp_client::depacketize::Frame` broadcast, fed directly (not
-//! via any RTSP dial) with a real, valid H.264 SPS/PPS/IDR triple -- the
-//! same fixture bytes `moq-mux`'s own `h264::import` unit tests
-//! (`avc3_self_initializes_from_first_keyframe`) and this project's own R1
-//! evidence use. This is not a second RTSP mock server: no RTSP protocol
-//! code is duplicated here, only this crate's own public
-//! `restream_provider`/`moq_publish` worker functions are driven directly,
-//! exactly the way `crate::start` already wires a real `Client`'s
-//! subscriptions to them. This mirrors this same plan's own X2 precedent
-//! (a small fixture written for a test only, since the shipped depacketizer
-//! it would otherwise reuse "is not wired into any shipped consumer") and
-//! R1's own precedent (a synthetic Annex-B SPS/PPS/IDR sequence to prove the
-//! codec-level `Split`/`Import` API).
+//! Two cameras: `cam-mock` dials the RTSP mock camera, which fabricates RTP
+//! payloads with no real SPS/PPS and declares no `sprop-parameter-sets`, so
+//! its catalog can never resolve; `cam-synth` is fed a real H.264 triple.
 //!
-//! Ignored by default (`cargo test --workspace` skips it): it needs a real
-//! `moq-relay` binary, which is not a workspace-managed build artifact. Run
-//! it with:
+//! Ignored by default: needs a real `moq-relay` binary. Run it with:
 //!
 //! ```text
 //! MOQ_RELAY_BIN=/path/to/moq-relay cargo test -p corvette-media-bridge \
@@ -60,10 +32,8 @@ use tokio::sync::broadcast;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
-// A real, valid H.264 SPS/PPS/IDR triple -- the exact fixture bytes
-// moq-mux's own `codec::h264::import::tests::avc3_self_initializes_from_first_keyframe`
-// uses (read directly from the pinned commit's source), reused here rather
-// than invented, since the whole point is a byte-real, decodable keyframe.
+// Exact fixture bytes from `moq-mux`'s own
+// `avc3_self_initializes_from_first_keyframe` unit test: a real, decodable triple.
 const SPS: &[u8] = &[
     0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe9, 0xb8, 0x08, 0x08, 0x0a, 0x00, 0x00, 0x07,
     0xd0, 0x00, 0x01, 0xd4, 0xc0, 0x80,
@@ -78,8 +48,7 @@ fn annex_b(nal: &[u8]) -> bytes::Bytes {
     bytes::Bytes::from(payload)
 }
 
-/// Feeds `sender` a repeating SPS/PPS/IDR cycle at roughly 30fps (90 kHz RTP
-/// clock, 3000 ticks/frame) until the receiver side goes away.
+/// Cycle at 3000 timestamp ticks per frame: 90 kHz clock, so 30 fps of RTP time.
 async fn feed_synthetic_h264(sender: broadcast::Sender<ClientFrame>) {
     let mut timestamp: u32 = 0;
     loop {
@@ -98,10 +67,6 @@ async fn feed_synthetic_h264(sender: broadcast::Sender<ClientFrame>) {
     }
 }
 
-/// Spawns a real `moq-relay` subprocess (pinned per R1), bound to an
-/// ephemeral loopback port with an ephemeral self-signed certificate and
-/// public (unauthenticated) access -- the exact CLI shape R1's own evidence
-/// confirmed works.
 struct RelayProcess {
     child: Child,
     port: u16,
@@ -131,15 +96,6 @@ impl RelayProcess {
     }
 
     fn relay_url(&self, path: &str) -> url::Url {
-        // A literal IP, not the hostname `--tls-generate` minted the cert
-        // for: `web_transport_quinn::Client::connect` takes only the FIRST
-        // address `lookup_host` resolves for a domain, with no IPv4/IPv6
-        // Happy-Eyeballs racing (unlike moq-native's own dial, which does
-        // race both). A literal IP skips DNS entirely, avoiding a
-        // resolver-order-dependent connect timeout if "localhost" resolves
-        // to `::1` first while the relay only bound `127.0.0.1`. TLS
-        // hostname verification is irrelevant here since this test always
-        // sets `tls_disable_verify` (see `MoqConfig`'s own doc).
         format!("https://127.0.0.1:{}/{path}", self.port)
             .parse()
             .unwrap()
@@ -160,13 +116,6 @@ fn pick_ephemeral_port() -> u16 {
         .unwrap()
         .port()
 }
-
-// ---------------------------------------------------------------------
-// A hand-rolled RTSP/RTP client, built directly against `rtsp-types` --
-// not against `corvette-rtsp-client`, matching X3's own test convention
-// (using a CLIENT crate to test a SERVER would risk a self-referential
-// oracle).
-// ---------------------------------------------------------------------
 
 struct TestClient {
     stream: TcpStream,
@@ -262,9 +211,6 @@ impl TestClient {
         self.buffer.extend_from_slice(&chunk[..read]);
     }
 
-    /// Retries `DESCRIBE` until it succeeds or the test timeout elapses --
-    /// `cam-synth`'s own `StreamInfo` resolves asynchronously, the moment
-    /// its feed task has observed a full SPS+PPS pair.
     async fn describe_until_ready(&mut self, stream_name: &str) -> Response<Vec<u8>> {
         tokio::time::timeout(WAIT_TIMEOUT, async {
             loop {
@@ -326,7 +272,6 @@ fn mock_camera_config(addr: SocketAddr) -> CameraConfig {
 #[tokio::test]
 #[ignore = "needs a real moq-relay binary; set MOQ_RELAY_BIN and pass --ignored (see this file's own doc)"]
 async fn g1_end_to_end_against_a_real_relay_and_mock_camera() {
-    // ---- Wiring: two cameras, one whole-process RtspServer, a real relay ----
     let relay = RelayProcess::spawn();
     // Give the relay a moment to bind before anything dials it.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -341,8 +286,6 @@ async fn g1_end_to_end_against_a_real_relay_and_mock_camera() {
     provider.register("cam-synth");
     let provider = Arc::new(provider);
 
-    // cam-mock: a real corvette_rtsp_client::Client dialing issue #18's own
-    // mock camera server, unmodified.
     let mock_camera = MockCamera::spawn(MockCameraConfig::new())
         .await
         .expect("binds the mock camera");
@@ -370,9 +313,6 @@ async fn g1_end_to_end_against_a_real_relay_and_mock_camera() {
         }
     });
 
-    // cam-synth: a real, valid H.264 SPS/PPS/IDR triple, fed directly onto a
-    // broadcast channel standing in for what `Client::subscribe()` returns
-    // (see this file's own top-level doc for why).
     let (synth_sender, _first_receiver) = broadcast::channel::<ClientFrame>(64);
     let synth_feeder = tokio::spawn(feed_synthetic_h264(synth_sender.clone()));
     let synth_restream_feed = spawn_supervised_with("cam-synth/restream-feed".to_string(), {
@@ -404,18 +344,12 @@ async fn g1_end_to_end_against_a_real_relay_and_mock_camera() {
     let rtsp_addr = server.local_addr().unwrap();
     tokio::spawn(server.serve(provider as Arc<dyn rtsp_restream::StreamProvider>));
 
-    // ---- Verify (b): a hand-rolled RTSP client DESCRIBEs/SETUPs/PLAYs
-    // cam-synth and receives the same underlying video, byte-for-byte. ----
     let mut rtsp_client = TestClient::connect(rtsp_addr).await;
     verify_b_rtsp_client_receives_real_video(&mut rtsp_client).await;
 
-    // ---- Verify (a): a moq_net subscriber sees cam-synth's catalog and
-    // receives real frames. ----
     let (broadcast, _sub_session_handle) =
         verify_a_moq_subscriber_receives_catalog_and_frames(&moq_config).await;
 
-    // ---- Verify (c): killing cam-mock's Client/publish tasks does not
-    // affect cam-synth's outputs on either path. ----
     mock_restream_feed_drop_and_assert_isolated(
         mock_restream_feed,
         mock_moq_publish,
@@ -425,7 +359,6 @@ async fn g1_end_to_end_against_a_real_relay_and_mock_camera() {
     )
     .await;
 
-    // Cleanup: nothing further to assert; dropping these ends the tasks.
     drop(synth_restream_feed);
     drop(synth_moq_publish);
     synth_feeder.abort();
@@ -453,8 +386,6 @@ async fn dial_relay_as(config: &MoqConfig) -> web_transport_quinn::Session {
         .expect("dials the real local moq-relay")
 }
 
-/// Verify (b): a hand-rolled RTSP client `DESCRIBE`/`SETUP`/`PLAY`s
-/// `cam-synth` and receives the same underlying video, byte-for-byte.
 async fn verify_b_rtsp_client_receives_real_video(rtsp_client: &mut TestClient) {
     rtsp_client.play("cam-synth").await;
 
@@ -481,9 +412,6 @@ async fn verify_b_rtsp_client_receives_real_video(rtsp_client: &mut TestClient) 
     );
 }
 
-/// Verify (a): a `moq_net` subscriber sees `cam-synth`'s catalog and
-/// receives real frames. Returns the broadcast consumer so the caller (the
-/// verify(c) step) can keep reading from it after `cam-mock` is killed.
 async fn verify_a_moq_subscriber_receives_catalog_and_frames(
     moq_config: &MoqConfig,
 ) -> (moq_net::broadcast::Consumer, moq_net::Session) {
@@ -492,12 +420,8 @@ async fn verify_a_moq_subscriber_receives_catalog_and_frames(
     let moq_sub_client = moq_net::Client::new()
         .with_versions(moq_net::Versions::all())
         .with_subscriber(sub_origin.clone());
-    // The returned `Session` handle must outlive this function: per
-    // `moq_net`'s own doc, "the transport still closes when the last
-    // Session clone drops" -- dropping it here (as this function's own
-    // temporary earlier did, a real regression this fix corrects) would
-    // close the subscriber's own QUIC connection the moment this function
-    // returns, well before the caller is done reading from `broadcast`.
+    // `moq_net` closes the transport when the last `Session` clone drops, so
+    // this handle must live until the caller has finished reading.
     let (sub_session_handle, sub_driver) = moq_sub_client
         .connect(sub_session)
         .await
@@ -553,10 +477,6 @@ async fn verify_a_moq_subscriber_receives_catalog_and_frames(
     (broadcast, sub_session_handle)
 }
 
-/// Kills `cam-mock`'s real `Client` and both of its supervised tasks, then
-/// asserts `cam-synth`'s own RTSP output (a fresh `PLAY`) and `MoQ` output (a
-/// fresh frame read on the already-open subscription) both continue
-/// completely unaffected.
 async fn mock_restream_feed_drop_and_assert_isolated(
     mock_restream_feed: corvette_media_bridge::supervise::Supervised,
     mock_moq_publish: corvette_media_bridge::supervise::Supervised,
@@ -567,12 +487,8 @@ async fn mock_restream_feed_drop_and_assert_isolated(
     drop(mock_restream_feed);
     drop(mock_moq_publish);
     drop(mock_client);
-    // Task abort() only requests cancellation; give the runtime a moment to
-    // actually drop the aborted tasks' state (including their own Arc<Client>
-    // clones) before asserting the kill took effect.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // cam-synth's RTSP output: a brand-new connection can still PLAY it.
     let mut second_rtsp_client = TestClient::connect(rtsp_client.stream.peer_addr().unwrap()).await;
     second_rtsp_client.play("cam-synth").await;
     let packet = second_rtsp_client.read_data_frame().await;
@@ -581,7 +497,6 @@ async fn mock_restream_feed_drop_and_assert_isolated(
         "cam-synth's RTSP output must survive cam-mock's Client being killed"
     );
 
-    // cam-synth's MoQ output: the already-open subscription keeps producing.
     let video_track = broadcast.track("video").expect("video track still exists");
     let mut video_subscriber = video_track
         .subscribe(None)

@@ -408,6 +408,30 @@ per-camera task uses. Each feed task runs under the bridge's supervisor until it
 camera's client is dropped -- which happens only during process shutdown, so the
 supervisor's restart loop spinning on a closed channel from then on is acceptable.
 
+## The end-to-end bridge test supplies its own relay, camera feeds and clients
+
+The `corvette-media-bridge` end-to-end test drives the restream feed and MoQ
+publish workers against a local relay and reads the result back over both the
+RTSP and MoQ paths, so each fixture choice below keeps one of those reads
+honest.
+
+Stopping a camera's supervised tasks only requests cancellation; the test
+pauses after the stop until the runtime has released the aborted tasks' state
+-- including their client clones -- before reading on the still-open
+subscription to assert that the other camera's outputs continue.
+
+The RTSP client that reads the restream server back is hand-rolled against
+`rtsp-types` instead of reusing `corvette-rtsp-client`: the project's own
+camera client driving the project's own restream server would be a
+self-referential oracle. The mock-camera leg exists for the real-RTSP path it
+exercises -- handshake, reconnect and task wiring -- and for the graceful
+degradation of its frame-error handling: a keyframe without a matching SPS
+must degrade without a panic.
+
+The synthetic camera's feed publishes onto the same broadcast channel shape
+that a real camera client's subscription exposes, so the workers consume it
+exactly as they consume a dialed camera.
+
 ## One camera name identifies its stream across every live-view transport
 
 `crates/corvette-media-bridge` names a configured camera's `CameraSpec::name` field as that
