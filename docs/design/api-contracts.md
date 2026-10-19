@@ -499,6 +499,11 @@ Identity is required before routing: a request that reaches the service with a m
 empty `Remote-User` gets `401` whatever the path, so an unauthenticated caller learns
 nothing about which routes exist.
 
+The service bounds the size of a request header block, so one connection cannot grow its
+buffer without bound, and bounds the whole life of a connection, so a peer that stalls
+cannot leak a task and a file descriptor. It stops on SIGTERM, the container stop signal,
+or on Ctrl-C at a terminal.
+
 Every response the service sends — success and error alike — is JSON with
 `Content-Type: application/json`, carries `Cache-Control: no-store`, and closes the
 connection. Responses nginx generates itself — `401` from a failed identity check, `403`

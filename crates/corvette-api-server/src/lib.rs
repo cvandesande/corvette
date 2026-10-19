@@ -1,16 +1,5 @@
-//! The read-only Corvette API service (issue #4 A2, A3; issue #5 phase A).
-//!
-//! Serves [`corvette_api`] wire types over a Unix domain socket with a
-//! hand-written `HTTP/1.0` request parser and an identity-gated router under
-//! `/corvette/api/v1/`. nginx is the only client: it forwards `GET` requests
-//! with no body and sets `Remote-User`/`Remote-Role` from Frigate's auth
-//! response, so the parser accepts exactly that narrow form and rejects
-//! everything else. The service listens on a Unix socket only (no TCP) because
-//! that is what keeps the identity headers unspoofable (issue #4 D4). The
-//! routes are `cameras`, `health`, and `activity`: `cameras` answers from
-//! [`config::ConfigSource`], `health` also probes [`database`] read-only, and
-//! `activity` also reads that database and links each review to media under
-//! the media root.
+//! The identity-gated, read-only API over a Unix socket nginx alone can reach,
+//! so `Remote-User`/`Remote-Role` cannot be spoofed from outside it.
 
 use corvette_api::{ActivityResponse, ErrorBody, Health};
 use std::future::Future;
@@ -28,51 +17,36 @@ pub mod database;
 use crate::activity::{ActivityQuery, ActivityRows};
 use crate::config::ConfigSource;
 
-/// Every Corvette route lives under this prefix (issue #4 D6).
 const API_PREFIX: &str = "/corvette/api/v1/";
 
-/// Environment variable naming the Unix socket to listen on.
 pub const SOCKET_PATH_ENV: &str = "CORVETTE_API_SOCKET";
 
-/// Largest accepted header block, so one connection cannot grow this server's
-/// read buffer without bound.
 const MAX_REQUEST_HEADER_BYTES: usize = 8192;
 
-/// Overall budget for reading one request and writing its response, so a peer
-/// that stalls cannot leak a task and a file descriptor forever.
 pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Writes one structured log line, matching `corvette-media-bridge`'s own
-/// `eprintln!`-based convention: no logging framework exists in this workspace.
+/// One structured log line; this workspace has no logging framework.
 pub(crate) fn log_event(unit: &str, event: &str, detail: impl std::fmt::Display) {
     eprintln!("corvette-api-server unit=\"{unit}\" event={event} detail=\"{detail}\"");
 }
 
-/// A request that passed the parser: the fields the identity gate and router
-/// need, with the identity headers already validated and case-folded.
 struct Request {
     path: String,
-    /// The text after the first `?` in the request target, empty when the
-    /// request carries no query.
     query: String,
     remote_user: Option<String>,
     remote_role: String,
 }
 
-/// A JSON error response: the status line and the serialized [`ErrorBody`].
 struct Response {
     status: &'static str,
     body: Vec<u8>,
 }
 
-/// The outcome of one connection's read/route/respond body, so the caller can
-/// tell a silently-dropped connection from one that got a response.
 enum Outcome {
     Responded,
     ClosedEarly,
 }
 
-/// The whole-process socket listener (issue #4 D4).
 #[derive(Debug)]
 pub struct ApiServer {
     listener: UnixListener,
@@ -84,29 +58,25 @@ pub struct ApiServer {
 }
 
 impl ApiServer {
-    /// Binds a Unix socket at `socket_path`, first removing any stale file a
-    /// previous run left behind. Accepts nothing until [`Self::serve_until`].
-    /// `db_path` is Frigate's database file, opened read-only per request
-    /// (issue #4 D5).
+    /// Binds the socket at `socket_path`, removing a stale file first; accepts
+    /// nothing until [`Self::serve_until`]. `db_path` is opened read-only.
     ///
     /// # Errors
     ///
-    /// Returns an error if removing a stale file, binding the socket, or
-    /// making the socket file world-writable fails.
+    /// Returns an error if removing a stale file, binding, or setting permissions fails.
     pub fn bind(
         socket_path: &Path,
         connection_timeout: Duration,
         config: Arc<ConfigSource>,
         db_path: &Path,
     ) -> std::io::Result<Self> {
-        // A socket file left by a crashed run makes `bind` fail `EADDRINUSE`;
-        // the private `emptyDir` volume keeps it across a container restart.
+        // A crashed run can leave the socket file here; bind would fail on it.
         if socket_path.exists() {
             std::fs::remove_file(socket_path)?;
         }
         let listener = UnixListener::bind(socket_path)?;
-        // nginx runs without CAP_DAC_OVERRIDE, so it needs write permission on
-        // the socket file itself; its directory is the access boundary (D4).
+        // nginx lacks CAP_DAC_OVERRIDE, so it needs write access to the socket
+        // file itself; the socket's directory is the access boundary.
         std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))?;
         Ok(Self {
             listener,
@@ -118,23 +88,17 @@ impl ApiServer {
         })
     }
 
-    /// Serves review media from `media_root`, the directory Frigate's
-    /// `/media/frigate/` paths are relative to, instead of
-    /// [`DEFAULT_MEDIA_ROOT`](activity::DEFAULT_MEDIA_ROOT).
     #[must_use]
     pub fn with_media_root(mut self, media_root: &Path) -> Self {
         self.media_root = media_root.to_path_buf();
         self
     }
 
-    /// The socket path this server is listening on.
     #[must_use]
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
 
-    /// Accepts connections until `shutdown` resolves, then stops accepting and
-    /// removes the socket file so the next run can bind the same path.
     pub async fn serve_until(self, shutdown: impl Future<Output = ()> + Send) {
         let Self {
             listener,
@@ -174,8 +138,6 @@ impl ApiServer {
     }
 }
 
-/// Resolves when the process is asked to terminate: `SIGTERM` (the container
-/// stop signal) or Ctrl-C at a terminal.
 pub async fn shutdown_signal() {
     match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
         Ok(mut terminate) => {
@@ -184,15 +146,13 @@ pub async fn shutdown_signal() {
                 _ = terminate.recv() => {}
             }
         }
-        // A platform without `SIGTERM` still stops on Ctrl-C.
         Err(_) => {
+            // No SIGTERM on this platform: stop on Ctrl-C alone.
             let _ = tokio::signal::ctrl_c().await;
         }
     }
 }
 
-/// Handles one connection within `timeout`: read, route, respond, close. A
-/// timeout or an early peer close ends the connection with no response.
 async fn handle_connection(
     mut stream: UnixStream,
     timeout: Duration,
@@ -225,7 +185,6 @@ async fn handle_connection(
     }
 }
 
-/// Reads one request from `stream`, routes it, and writes the response.
 async fn read_route_respond(
     stream: &mut UnixStream,
     config: &ConfigSource,
@@ -237,8 +196,6 @@ async fn read_route_respond(
         HeaderRead::TooLarge => {
             let response = bad_request("request header block exceeded the size limit");
             write_response(stream, &response).await?;
-            // Consuming the unread bytes lets the close send a FIN instead of
-            // an RST that would discard the unread response.
             drain_buffered(stream);
             return Ok(Outcome::Responded);
         }
@@ -252,30 +209,21 @@ async fn read_route_respond(
     Ok(Outcome::Responded)
 }
 
-/// What reading a request header block produced.
 enum HeaderRead {
-    /// The bytes up to (not including) the terminating `\r\n\r\n`.
     Complete(Vec<u8>),
-    /// More than [`MAX_REQUEST_HEADER_BYTES`] arrived before the terminator.
     TooLarge,
-    /// The peer closed (or errored) before a complete header block arrived.
     Closed,
 }
 
-/// Reads the header block, whose bytes INCLUDING its `\r\n\r\n` terminator must
-/// total at most [`MAX_REQUEST_HEADER_BYTES`].
 async fn read_header_block(stream: &mut UnixStream) -> HeaderRead {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; MAX_REQUEST_HEADER_BYTES];
     loop {
-        // A terminator found here ends within the buffer, which is capped at the
-        // limit below, so its block plus terminator is always within the limit.
         if let Some(end) = find_header_end(&buffer) {
             buffer.truncate(end);
             return HeaderRead::Complete(buffer);
         }
-        // Size each read to what remains, so a terminator that would land past
-        // the limit can never be observed: the buffer fills to the limit first.
+        // Reads are sized to the room left, so a terminator past the limit is never seen.
         let remaining = MAX_REQUEST_HEADER_BYTES - buffer.len();
         if remaining == 0 {
             return HeaderRead::TooLarge;
@@ -291,13 +239,10 @@ async fn read_header_block(stream: &mut UnixStream) -> HeaderRead {
     }
 }
 
-/// Byte index of the first `\r\n\r\n`, which ends the header block.
 pub(crate) fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-/// Splits `block` (already free of the terminating `\r\n\r\n`) into the
-/// request line and header lines, on each `\r\n`.
 pub(crate) fn split_header_lines(block: &[u8]) -> Vec<&[u8]> {
     let mut lines = Vec::new();
     let mut start = 0;
@@ -315,8 +260,6 @@ pub(crate) fn split_header_lines(block: &[u8]) -> Vec<&[u8]> {
     lines
 }
 
-/// Parses the request line and header block into a [`Request`], or a
-/// human-readable reason for the `400` to return.
 fn parse_request(block: &[u8]) -> Result<Request, String> {
     let mut lines = split_header_lines(block).into_iter();
     let request_line = lines
@@ -331,8 +274,7 @@ fn parse_request(block: &[u8]) -> Result<Request, String> {
     let mut role_count = 0_u32;
 
     for line in lines {
-        // A leading space or tab is an obs-fold continuation, which this
-        // narrow parser never accepts.
+        // A leading space or tab is an obs-fold continuation; never accepted.
         if line
             .first()
             .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
@@ -388,9 +330,6 @@ fn parse_request(block: &[u8]) -> Result<Request, String> {
     })
 }
 
-/// Validates `GET <target> HTTP/1.0`/`HTTP/1.1` (single spaces, target starts
-/// with `/`) and returns the path (the target up to any `?`) and the query
-/// (the text after that `?`, empty when the target has none).
 fn parse_request_line(line: &[u8]) -> Result<(&str, &str), String> {
     let line =
         std::str::from_utf8(line).map_err(|_| "request line is not valid UTF-8".to_owned())?;
@@ -414,7 +353,6 @@ fn parse_request_line(line: &[u8]) -> Result<(&str, &str), String> {
     })
 }
 
-/// Splits `bytes` at the first `byte`, returning the parts either side of it.
 pub(crate) fn split_at_byte(bytes: &[u8], byte: u8) -> Option<(&[u8], &[u8])> {
     bytes
         .iter()
@@ -422,7 +360,6 @@ pub(crate) fn split_at_byte(bytes: &[u8], byte: u8) -> Option<(&[u8], &[u8])> {
         .map(|index| (&bytes[..index], &bytes[index + 1..]))
 }
 
-/// A header name is a non-empty token with no spaces and no control characters.
 fn is_valid_header_name(name: &[u8]) -> bool {
     !name.is_empty()
         && !name
@@ -430,7 +367,6 @@ fn is_valid_header_name(name: &[u8]) -> bool {
             .any(|byte| *byte < 0x20 || *byte == 0x7F || *byte == b' ')
 }
 
-/// Trims leading and trailing ASCII spaces from a header value.
 pub(crate) fn trim_spaces(value: &[u8]) -> &[u8] {
     let start = value
         .iter()
@@ -443,12 +379,11 @@ pub(crate) fn trim_spaces(value: &[u8]) -> &[u8] {
     &value[start..end]
 }
 
-/// Interprets `bytes` as UTF-8 text, or `None`.
 pub(crate) fn utf8(bytes: &[u8]) -> Option<&str> {
     std::str::from_utf8(bytes).ok()
 }
 
-/// Every route the service serves; the router matches nothing else (issue #4 I2).
+/// Every route the service serves; the router matches nothing else.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Route {
     Activity,
@@ -459,7 +394,6 @@ pub enum Route {
 impl Route {
     pub const ALL: [Self; 3] = [Self::Activity, Self::Cameras, Self::Health];
 
-    /// Full request path, including `API_PREFIX`.
     #[must_use]
     pub fn path(self) -> String {
         match self {
@@ -470,18 +404,12 @@ impl Route {
     }
 }
 
-/// The identity gate and router: a missing or empty `Remote-User` is `401`
-/// whatever the path (issue #4 D4). A data route may fetch, so routing is
-/// async; the gate still runs first, so an anonymous request never reaches a
-/// fetch.
 async fn route(
     request: &Request,
     config: &ConfigSource,
     db_path: &Path,
     media_root: &Path,
 ) -> Response {
-    // Identity gate runs before any routing decision, so an anonymous caller
-    // learns nothing about which paths exist (issue #4 D4).
     let Some(_user) = request
         .remote_user
         .as_deref()
@@ -489,8 +417,6 @@ async fn route(
     else {
         return unauthorized();
     };
-    // A path is served exactly when it equals a route-table path; those carry
-    // the API prefix, so nothing outside it can match (issue #4 D6).
     let Some(route) = Route::ALL
         .into_iter()
         .find(|candidate| candidate.path() == request.path)
@@ -504,9 +430,6 @@ async fn route(
     }
 }
 
-/// `GET /corvette/api/v1/cameras` (issue #4 D3): the caller's role sees the
-/// cameras it may access, or the route reports `503` when no configuration
-/// copy fresh enough to serve exists.
 async fn cameras(config: &ConfigSource, role: &str) -> Response {
     match config.camera_list_json(role).await {
         Ok(body) => Response {
@@ -521,10 +444,6 @@ async fn cameras(config: &ConfigSource, role: &str) -> Response {
     }
 }
 
-/// `GET /corvette/api/v1/activity` (issue #5 D-4..D-10): the role picks the
-/// cameras, the query picks the range and kinds, and each review is linked to
-/// the media available now. A malformed query is `400`; a source that cannot
-/// be read is `503`. The underlying database error is logged, never sent.
 async fn activity(
     request: &Request,
     config: &ConfigSource,
@@ -535,7 +454,6 @@ async fn activity(
         Ok(query) => query,
         Err(reason) => return bad_request(&reason),
     };
-    // A fetch failure is already logged with unit `config` where it happens.
     let mut cameras = match config.allowed_camera_names(&request.remote_role).await {
         Ok(cameras) => cameras,
         Err(err) => {
@@ -549,13 +467,10 @@ async fn activity(
     if let Some(requested) = &query.cameras {
         cameras.retain(|name| requested.contains(name));
     }
-    // With no readable camera left, the answer is empty and the database is
-    // never opened.
     let response = if cameras.is_empty() {
         activity::activity_response(&query, ActivityRows::default(), media_root)
     } else {
-        // rusqlite and the media `stat` calls are synchronous; the links are
-        // built only after the read transaction has ended (issue #5 I4).
+        // rusqlite and the media `stat` calls are synchronous: off the async worker.
         let db_path = db_path.to_path_buf();
         let media_root = media_root.to_path_buf();
         let read = tokio::task::spawn_blocking(move || -> rusqlite::Result<ActivityResponse> {
@@ -577,25 +492,19 @@ async fn activity(
             }
         }
     };
-    // ActivityResponse holds only strings and numbers; its derived Serialize
-    // never fails.
+    // ActivityResponse is strings and numbers only; this cannot fail to serialize.
     Response {
         status: "200 OK",
         body: serde_json::to_vec(&response).expect("activity body serializes"),
     }
 }
 
-/// `GET /corvette/api/v1/health` (issue #4 D2): `200` when Frigate's database
-/// answers the read-only probe and a configuration copy fresh enough to serve
-/// exists; `503` naming the failing parts otherwise. The underlying errors
-/// are logged, never sent to the caller.
 async fn health(config: &ConfigSource, db_path: &Path) -> Response {
     let mut failing = Vec::new();
     if let Err(err) = probe_database(db_path).await {
         log_event("database", "probe-error", err);
         failing.push("database unreadable");
     }
-    // A fetch failure is already logged with unit `config` where it happens.
     if config.available().await.is_err() {
         failing.push("config unavailable");
     }
@@ -613,8 +522,6 @@ async fn health(config: &ConfigSource, db_path: &Path) -> Response {
     }
 }
 
-/// Runs the read-only database probe on a blocking thread; rusqlite is
-/// synchronous and must not run on an async worker (issue #4 D5).
 async fn probe_database(db_path: &Path) -> Result<(), String> {
     let db_path = db_path.to_path_buf();
     match tokio::task::spawn_blocking(move || database::probe(&db_path)).await {
@@ -659,14 +566,12 @@ fn not_found() -> Response {
     error_response("404 Not Found", "not_found", "no such route")
 }
 
-/// Non-blockingly consumes whatever the peer already sent, so closing sends a
-/// clean FIN rather than an RST that would discard an unwritten response.
+/// Drains buffered bytes so the close sends a FIN, not an RST that drops the response.
 fn drain_buffered(stream: &UnixStream) {
     let mut scratch = [0_u8; 4096];
     while stream.try_read(&mut scratch).is_ok_and(|read| read > 0) {}
 }
 
-/// Writes `response` as an `HTTP/1.0` response and closes the connection.
 async fn write_response(stream: &mut UnixStream, response: &Response) -> std::io::Result<()> {
     let header = format!(
         "HTTP/1.0 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
