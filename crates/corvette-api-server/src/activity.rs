@@ -1,4 +1,4 @@
-//! Parsing and reads for `GET /corvette/api/v1/activity` (issue #5).
+//! Parsing and reads for `GET /corvette/api/v1/activity`.
 
 use corvette_api::{
     ActivityResponse, ActivityReview, MediaLink, MotionBucket, ReviewMedia, ReviewSeverity,
@@ -8,32 +8,21 @@ use rusqlite::{Connection, params, params_from_iter};
 use std::collections::BTreeMap;
 use std::path::{Component, Path};
 
-/// Longest accepted range: 31 days in seconds (issue #5 D-4).
+/// Longest accepted range: 31 days in seconds.
 pub const MAX_RANGE_SECONDS: f64 = 2_678_400.0;
 
-/// Width of one motion bucket in seconds (issue #5 D-8).
 pub const MOTION_BUCKET_SECONDS: u32 = 30;
 
-/// Environment variable naming the directory the media tree is served from.
 pub const MEDIA_ROOT_ENV: &str = "CORVETTE_API_MEDIA_ROOT";
 
-/// The media root used when `CORVETTE_API_MEDIA_ROOT` is unset: Frigate's
-/// media mount path as Corvette sees it (issue #5).
 pub const DEFAULT_MEDIA_ROOT: &str = "/media/frigate";
 
-/// Validated parameters of one activity query.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActivityQuery {
-    /// Lower end of the requested half-open time range, in epoch seconds.
     pub after: f64,
-    /// Upper end of the range; strictly greater than `after` and at most
-    /// [`MAX_RANGE_SECONDS`] seconds after it.
     pub before: f64,
-    /// Camera identifiers to restrict to; `None` when the request named none.
     pub cameras: Option<Vec<String>>,
-    /// Whether reviews are requested.
     pub include_reviews: bool,
-    /// Whether motion buckets are requested.
     pub include_motion: bool,
 }
 
@@ -43,10 +32,7 @@ impl ActivityQuery {
     ///
     /// # Errors
     ///
-    /// Returns a message naming the offending parameter when a parameter is
-    /// empty, unknown, repeated, missing its value, missing, or outside its
-    /// rules, and quotes the failing text when a percent escape is malformed
-    /// or decodes to invalid UTF-8.
+    /// Returns a message naming the offending parameter or the failing text.
     pub fn parse(query: &str) -> Result<Self, String> {
         let params = parse_parameters(query)?;
         let after = params
@@ -104,8 +90,6 @@ impl ActivityQuery {
     }
 }
 
-/// Splits the query on `&`, decodes each name and value, and rejects empty,
-/// unknown, value-less, or repeated parameters.
 fn parse_parameters(query: &str) -> Result<BTreeMap<String, String>, String> {
     let mut params = BTreeMap::new();
     if query.is_empty() {
@@ -131,7 +115,6 @@ fn parse_parameters(query: &str) -> Result<BTreeMap<String, String>, String> {
     Ok(params)
 }
 
-/// Parses one timestamp parameter: a finite, non-negative number of seconds.
 fn parse_timestamp(name: &str, value: &str) -> Result<f64, String> {
     value
         .parse::<f64>()
@@ -140,9 +123,7 @@ fn parse_timestamp(name: &str, value: &str) -> Result<f64, String> {
         .ok_or_else(|| format!("`{name}` must be a finite number of seconds, at least 0"))
 }
 
-/// Expands `%XX` escapes (hex digits in either case) to their bytes and
-/// requires the result to be UTF-8. `+` stays `+`: this grammar has no
-/// plus-as-space convention.
+/// `+` stays `+`: this grammar has no plus-as-space convention.
 fn percent_decode(text: &str) -> Result<String, String> {
     let mut decoded = Vec::with_capacity(text.len());
     let mut bytes = text.as_bytes().iter();
@@ -173,58 +154,29 @@ const fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
-/// One review row as read from Frigate, before media URLs are built.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReviewRow {
-    /// Frigate's review segment identifier.
     pub id: String,
-    /// The camera the review belongs to.
     pub camera: String,
-    /// The review's activity classification.
     pub severity: ReviewSeverity,
-    /// Review start in Unix seconds.
     pub start: f64,
-    /// Review end in Unix seconds, `None` while the review is ongoing.
     pub end: Option<f64>,
-    /// The thumbnail path as Frigate stores it.
     pub thumb_path: String,
-    /// Sorted object classes recorded in the review.
     pub objects: Vec<String>,
-    /// Sorted zone names recorded in the review.
     pub zones: Vec<String>,
-    /// Sorted identifiers of the tracked-object events recorded in the review.
     pub detections: Vec<String>,
-    /// Sorted sub-labels recorded in the review.
     pub sub_labels: Vec<String>,
-    /// Sorted audio labels recorded in the review.
     pub audio: Vec<String>,
-    /// An ended review with at least one recording of its camera overlapping it.
     pub has_recording: bool,
 }
 
-/// Everything one activity request reads from the database.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ActivityRows {
-    /// Reviews ordered by start time, then id.
     pub reviews: Vec<ReviewRow>,
-    /// Motion buckets ordered by start.
     pub motion: Vec<MotionBucket>,
 }
 
-/// Reads from one transaction the reviews of `cameras` that overlap the
-/// query's range, each with its clip availability, and the motion buckets
-/// whose start lies in the range.
-///
-/// A review overlaps the half-open range `[after, before)` when it starts
-/// before `before` and either has no end yet, ends after `after`, or starts
-/// at or after `after`. A motion bucket starts at a multiple of
-/// [`MOTION_BUCKET_SECONDS`] since the epoch, contains every positive-motion
-/// recording whose `start_time` falls inside it, and is returned when its
-/// start lies in the range.
-///
-/// An empty `cameras` list, or a query that includes neither kind, reads
-/// nothing and runs no SQL; a query including one kind runs only that kind's
-/// query.
+/// Reads the reviews and motion of `query`'s range for `cameras`.
 ///
 /// # Errors
 ///
@@ -254,7 +206,7 @@ pub fn read_activity(
     Ok(ActivityRows { reviews, motion })
 }
 
-/// One `?` per camera, for a `camera IN (...)` list.
+/// One bound `?` per camera: camera names never enter the SQL text.
 fn camera_placeholders(cameras: &[String]) -> String {
     cameras
         .iter()
@@ -263,10 +215,6 @@ fn camera_placeholders(cameras: &[String]) -> String {
         .join(", ")
 }
 
-/// Reads the motion buckets whose start lies in the query's range, ordered
-/// by start. The rows selected are those with `start_time` in
-/// `[ceil30(after), ceil30(before))`, so a partly covered bucket keeps the
-/// level and cameras of all of its rows, including ones past `before`.
 fn read_motion(
     transaction: &rusqlite::Transaction<'_>,
     query: &ActivityQuery,
@@ -320,14 +268,11 @@ fn read_motion(
     Ok(buckets)
 }
 
-/// The smallest multiple of [`MOTION_BUCKET_SECONDS`] that is at or after
-/// `x`.
 fn ceil30(x: f64) -> f64 {
     let width = f64::from(MOTION_BUCKET_SECONDS);
     (x / width).ceil() * width
 }
 
-/// An open bucket with its cameras sorted and deduplicated.
 fn sorted_cameras(mut bucket: MotionBucket) -> MotionBucket {
     bucket.cameras.sort_unstable();
     bucket.cameras.dedup();
@@ -418,9 +363,7 @@ fn review_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewRow> {
     })
 }
 
-/// The five string lists of a review's `data` JSON. A key absent from the
-/// JSON gives an empty list, a present key must hold a list of strings, and
-/// any other key is ignored.
+/// The five string lists of a review's `data` JSON; any other key is ignored.
 struct ReviewData {
     objects: Vec<String>,
     zones: Vec<String>,
@@ -431,9 +374,7 @@ struct ReviewData {
 
 /// # Errors
 ///
-/// Returns a message when `text` is not valid JSON or is not a JSON
-/// object, and a message naming the key when a known key is not a list
-/// of strings.
+/// Returns a message on invalid or non-object JSON, or a non-string-list key.
 fn parse_review_data(text: &str) -> Result<ReviewData, String> {
     let parsed: serde_json::Value = serde_json::from_str(text).map_err(|err| err.to_string())?;
     if !parsed.is_object() {
@@ -448,8 +389,8 @@ fn parse_review_data(text: &str) -> Result<ReviewData, String> {
     })
 }
 
-/// One `data` list as sorted strings; an absent key gives an empty list
-/// because older rows may lack it.
+/// Sorted strings; an absent key gives an empty list because older rows
+/// may lack it.
 ///
 /// # Errors
 ///
@@ -481,13 +422,7 @@ fn text_conversion_error(column_index: usize, column_name: &str, reason: &str) -
     )
 }
 
-/// Builds the `GET /corvette/api/v1/activity` body from rows read under
-/// `query`: the range echoed back, each review carrying media links only for
-/// media available now.
-///
-/// `media_root` is the directory Frigate's stored `/media/frigate/` paths are
-/// relative to; checking a file's presence there must happen after the read
-/// transaction has ended (issue #5 I4).
+/// Builds the `GET /corvette/api/v1/activity` body from `rows`.
 #[must_use]
 pub fn activity_response(
     query: &ActivityQuery,
@@ -522,13 +457,9 @@ pub fn activity_response(
     }
 }
 
-/// The path prefix Frigate stores in `reviewsegment.thumb_path`: Frigate's
-/// own media mount as Frigate sees it.
+/// The prefix Frigate stores in `reviewsegment.thumb_path`, its own mount.
 const THUMB_PATH_PREFIX: &str = "/media/frigate/";
 
-/// The link to fetch a review's thumbnail, or `None` when the stored path is
-/// outside the media prefix, escapes `media_root` through `.` or `..` or an
-/// empty remainder, or names no regular file there.
 fn thumbnail_link(thumb_path: &str, media_root: &Path) -> Option<MediaLink> {
     let rel = thumb_path.strip_prefix(THUMB_PATH_PREFIX)?;
     let escaped = rel.is_empty()
@@ -549,8 +480,6 @@ fn thumbnail_link(thumb_path: &str, media_root: &Path) -> Option<MediaLink> {
     })
 }
 
-/// The clip URL for a review, present only when the review ended and a
-/// recording of its camera overlaps it; an ongoing review has no clip.
 fn clip_link(camera: &str, start: f64, end: Option<f64>, has_recording: bool) -> Option<MediaLink> {
     let end = end?;
     if !has_recording {
@@ -568,8 +497,7 @@ fn clip_link(camera: &str, start: f64, end: Option<f64>, has_recording: bool) ->
     })
 }
 
-/// Percent-encodes every byte outside the unreserved set
-/// (`A-Z a-z 0-9 - . _ ~`) as an upper-case `%XX` escape.
+/// Percent-encodes every byte outside the unreserved set as upper-case `%XX`.
 fn percent_encode_segment(segment: &str) -> String {
     const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = String::with_capacity(segment.len());
@@ -724,7 +652,6 @@ mod tests {
         }
     }
 
-    /// A deterministic 32-bit linear congruential generator.
     struct Lcg(u32);
 
     impl Lcg {
@@ -738,7 +665,6 @@ mod tests {
             f64::from(self.next() >> 8) * max / f64::from(1_u32 << 24)
         }
 
-        /// An index into `0..len`.
         fn index(&mut self, len: usize) -> usize {
             let len = u32::try_from(len).expect("list length fits u32");
             usize::try_from(self.next() % len).expect("remainder fits usize")
@@ -1620,7 +1546,6 @@ mod tests {
         dir
     }
 
-    /// Writes `rel` under `root`, creating parent directories.
     fn write_file(root: &Path, rel: &str) {
         let path = root.join(rel);
         std::fs::create_dir_all(path.parent().expect("file parent")).expect("create dirs");
@@ -1685,8 +1610,6 @@ mod tests {
 
     #[test]
     fn a_clip_url_appears_only_for_an_ended_review_with_a_recording() {
-        // `{}` on `1.5` and `2.0` renders `1.5` and `2`: shortest
-        // round-trip, so whole seconds carry no decimal point.
         assert_eq!(
             clip_link("front door", 1.5, Some(2.0), true).expect("clip link"),
             MediaLink {

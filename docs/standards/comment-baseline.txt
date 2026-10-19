@@ -1,6 +1,5 @@
 28.2 24 85 Cargo.toml
 90.9 10 11 clippy.toml
-6.2 108 1750 crates/corvette-api-server/src/activity.rs
 16.3 27 166 crates/corvette-api-server/src/database.rs
 7.4 30 405 crates/corvette-api-server/tests/api_server.rs
 7.0 28 402 crates/corvette-api-server/tests/health.rs
