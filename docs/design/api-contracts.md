@@ -369,6 +369,45 @@ go2rtc's own restream documentation names Home Assistant as a precedent for this
 and that this deployment's `frigate` Service already exposes the port outside the pod today —
 though DP-3 in the same document leaves open whether anything currently dials it.
 
+## The restream feed resolves each camera's parameter sets once, from its own frames
+
+`crates/corvette-media-bridge`'s restream provider adapts `corvette-rtsp-client`'s frame
+stream to the RTSP-restream server's frame and stream-provider shapes, dispatching by
+stream name across every configured camera's own adapter. The parameter-set scan is the
+one piece of plumbing this pairing needs: the restream server needs a camera's parameter
+sets up front to answer `DESCRIBE`, and the `Client` type this module uses exposes only
+the frame stream; the SDP-resolved track description that also carries them is a separate
+public type in the client crate's `session` module, which this module does not use, so
+the parameter sets are scanned out of the frame stream itself. The scan
+itself lives in the bridge's `parameter_sets` module, shared with the fMP4 muxer.
+
+The provider's own policy on top of that scan is to resolve once: the first complete set
+for a codec (SPS/PPS, or VPS/SPS/PPS for H.265) resolves the camera's `StreamInfo`, and
+it is never updated again even if the underlying bytes later change; until a camera has
+resolved, `DESCRIBE` reports it as no such stream. An AAC track never resolves here even
+after the upstream audio gap is fixed: an AAC stream's configuration is an
+`AudioSpecificConfig`, not an in-band parameter-set NAL, so the audio branch is a
+permanent no-op -- written generically over the frame's own codec so the upstream fix
+needs no change in this module.
+
+The camera set is fixed at startup: every configured camera is registered before any feed
+task spawns, and the registry is never mutated afterwards, so only each camera's own
+state needs synchronization. A duplicate registration is a caller bug, not a runtime
+condition to recover from. The internal channel carrying adapted frames from a camera's
+feed task to the restream server is buffered at 64 frames, matching the documented
+default capacity of `corvette_rtsp_client::CameraConfig`.
+
+The restream server hands frames to viewers through a synchronous receiver, so the
+bridge's receiver drives its async channel with `block_on` -- sound because the server
+calls it from a blocking play-task context. A subscriber that lags behind skips forward:
+the server's per-connection play task has no resync concept, so a lag is treated like a
+bad packetize rather than a stream end. When the feed task ends, the receiver reports no
+further frames, matching `FrameReceiver::recv`'s contract; a send with no current PLAY
+session is ignored, the same no-listeners convention `corvette-rtsp-client`'s own
+per-camera task uses. Each feed task runs under the bridge's supervisor until its
+camera's client is dropped -- which happens only during process shutdown, so the
+supervisor's restart loop spinning on a closed channel from then on is acceptable.
+
 ## One camera name identifies its stream across every live-view transport
 
 `crates/corvette-media-bridge` names a configured camera's `CameraSpec::name` field as that
