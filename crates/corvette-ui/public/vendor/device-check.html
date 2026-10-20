@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Corvette device-check</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 1rem auto; max-width: 44rem; }
+  fieldset { margin-bottom: .8rem; }
+  input[type="text"] { width: 9rem; }
+  video { width: 100%; background: #000; }
+  pre { background: #eee; padding: .6rem; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Corvette device-check</h1>
+
+<fieldset>
+  <legend>clip</legend>
+  <label>camera <input type="text" id="camera"></label>
+  <label>start <input type="text" id="start"></label>
+  <label>end <input type="text" id="end"></label>
+</fieldset>
+
+<fieldset>
+  <legend>player order</legend>
+  <label><input type="radio" name="order" value="hls" checked> hls.js first</label>
+  <label><input type="radio" name="order" value="native"> native first</label>
+</fieldset>
+
+<p>
+  <button id="play" type="button">Play</button>
+  <button id="seek" type="button">Seek test</button>
+</p>
+
+<video id="video" controls playsinline></video>
+<pre id="result"></pre>
+
+<script>
+(function () {
+  'use strict';
+  const video = document.getElementById('video');
+  const resultBox = document.getElementById('result');
+  const clearGapSeconds = 0.5;
+  const seekTimeoutMs = 10000;
+  const fields = {
+    player_used: '-',
+    first_picture_s: '-',
+    scrub_works: '-',
+    started_before_whole_clip: '-',
+    buffered_at_first_picture_s: '-',
+    duration_s: '-',
+    error: 'none'
+  };
+  let hls = null;
+  let pressedAt = 0;
+  let firstPictureSeen = false;
+  let seekPending = false;
+
+  function render() {
+    const lines = Object.keys(fields).map(function (name) {
+      return name + ': ' + fields[name];
+    });
+    resultBox.textContent = lines.join('\n');
+  }
+
+  function setError(text) {
+    fields.error = text;
+    render();
+  }
+
+  function fieldInput(name) {
+    return document.getElementById(name).value.trim();
+  }
+
+  function playlistUrl() {
+    const camera = fieldInput('camera');
+    const start = fieldInput('start');
+    const end = fieldInput('end');
+    if (!camera || !start || !end) { return ''; }
+    return '/vod/' + encodeURIComponent(camera) + '/start/' + start +
+      '/end/' + end + '/master.m3u8';
+  }
+
+  function prefersNative() {
+    return document.querySelector('input[name="order"]:checked').value === 'native';
+  }
+
+  function nativeCanPlay() {
+    return video.canPlayType('application/vnd.apple.mpegurl') !== '';
+  }
+
+  function bufferedEndSeconds() {
+    let end = 0;
+    for (let i = 0; i < video.buffered.length; i++) {
+      end = Math.max(end, video.buffered.end(i));
+    }
+    return end;
+  }
+
+  function markFirstPicture() {
+    if (firstPictureSeen) { return; }
+    firstPictureSeen = true;
+    const duration = video.duration;
+    const bufferedEnd = bufferedEndSeconds();
+    fields.first_picture_s = ((performance.now() - pressedAt) / 1000).toFixed(2);
+    fields.duration_s = isFinite(duration) ? duration.toFixed(2) : 'unknown';
+    fields.buffered_at_first_picture_s = bufferedEnd.toFixed(2);
+    fields.started_before_whole_clip =
+      isFinite(duration) && duration - bufferedEnd >= clearGapSeconds ? 'yes' : 'no';
+    render();
+  }
+
+  function watchFirstPicture() {
+    if ('requestVideoFrameCallback' in video) {
+      video.requestVideoFrameCallback(markFirstPicture);
+    } else {
+      video.addEventListener('loadeddata', markFirstPicture, { once: true });
+    }
+  }
+
+  function resetForNewPlay() {
+    if (hls) { hls.destroy(); hls = null; }
+    video.removeAttribute('src');
+    video.load();
+    firstPictureSeen = false;
+    seekPending = false;
+    Object.keys(fields).forEach(function (name) {
+      fields[name] = name === 'error' ? 'none' : '-';
+    });
+    render();
+  }
+
+  function playNative(url) {
+    fields.player_used = 'native';
+    video.src = url;
+    video.play().catch(function (err) { setError('native play: ' + err.name); });
+    render();
+  }
+
+  function playWithHls(url) {
+    fields.player_used = 'hls.js';
+    hls = new Hls({ preferManagedMediaSource: true });
+    hls.on(Hls.Events.ERROR, function (event, data) {
+      if (data.fatal) { setError('hls.js: ' + data.details); }
+    });
+    hls.attachMedia(video);
+    hls.loadSource(url);
+    video.play().catch(function (err) { setError('hls.js play: ' + err.name); });
+    render();
+  }
+
+  function startWithHlsOrFallback(url, unavailableWhy) {
+    if (window.Hls && Hls.isSupported()) { playWithHls(url); return; }
+    if (nativeCanPlay()) { playNative(url); return; }
+    setError((unavailableWhy || '') + 'no player available');
+  }
+
+  function loadHlsScript(url) {
+    if (window.Hls) { startWithHlsOrFallback(url, ''); return; }
+    const script = document.createElement('script');
+    script.src = '/vendor/hls.min.js';
+    script.onload = function () { startWithHlsOrFallback(url, ''); };
+    script.onerror = function () {
+      startWithHlsOrFallback(url, 'could not load /vendor/hls.min.js; ');
+    };
+    document.head.appendChild(script);
+  }
+
+  function startPlayback() {
+    const url = playlistUrl();
+    if (!url) { setError('enter camera, start and end'); return; }
+    resetForNewPlay();
+    video.autoplay = true;
+    pressedAt = performance.now();
+    watchFirstPicture();
+    if (prefersNative() && nativeCanPlay()) { playNative(url); return; }
+    loadHlsScript(url);
+  }
+
+  function seekToMiddle() {
+    const duration = video.duration;
+    if (!isFinite(duration) || duration <= 0) {
+      setError('seek test: duration is not known yet');
+      return;
+    }
+    seekPending = true;
+    setTimeout(function () {
+      if (!seekPending) { return; }
+      seekPending = false;
+      fields.scrub_works = 'no';
+      render();
+    }, seekTimeoutMs);
+    video.currentTime = duration / 2;
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  ['camera', 'start', 'end'].forEach(function (name) {
+    const value = params.get(name);
+    if (value) { document.getElementById(name).value = value; }
+  });
+
+  video.addEventListener('error', function () {
+    if (video.error) { setError('video error code ' + video.error.code); }
+  });
+  video.addEventListener('seeked', function () {
+    if (!seekPending) { return; }
+    seekPending = false;
+    fields.scrub_works = 'yes';
+    render();
+  });
+  document.getElementById('play').addEventListener('click', startPlayback);
+  document.getElementById('seek').addEventListener('click', seekToMiddle);
+  render();
+})();
+</script>
+</body>
+</html>
