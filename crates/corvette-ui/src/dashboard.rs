@@ -1,6 +1,6 @@
 //! The landing page: the live camera grid and the last few hours of activity.
 
-use corvette_api::Camera;
+use corvette_api::CameraEntry;
 use leptos::prelude::*;
 
 use crate::activity::{
@@ -13,7 +13,7 @@ use crate::still_tile::StillTile;
 
 #[component]
 pub(crate) fn Dashboard() -> impl IntoView {
-    let cameras = LocalResource::new(crate::api::fetch_cameras);
+    let cameras = LocalResource::new(crate::api::fetch_camera_entries);
     let recent_activity = LocalResource::new(|| {
         let before = js_sys::Date::now() / 1_000.0;
         let after = f64::from(RECENT_ACTIVITY_HOURS).mul_add(-3_600.0, before);
@@ -102,27 +102,42 @@ pub(crate) fn Dashboard() -> impl IntoView {
     }
 }
 
-/// One camera tile that opens the expanded view when clicked.
+/// One camera tile: a live view that opens the expanded view when the camera is on,
+/// or a plain off line when the camera is off.
 #[component]
-fn CameraCard(camera: Camera, expanded_camera: RwSignal<Option<ExpandedCamera>>) -> impl IntoView {
-    let player_title = format!("{} live video", camera.display_name);
-    let expand_camera = ExpandedCamera {
-        name: camera.name.clone(),
-        title: player_title.clone(),
-    };
-    let still_paused = Signal::derive(move || expanded_camera.get().is_some());
-    view! {
-        <article class="camera-card">
-            <button
-                class="camera-card-link"
-                type="button"
-                aria-label=format!("Expand {} to full view", camera.display_name)
-                on:click=move |_| expanded_camera.set(Some(expand_camera.clone()))
-            >
-                <StillTile camera_name=camera.name.clone() title=player_title paused=still_paused/>
+fn CameraCard(
+    camera: CameraEntry,
+    expanded_camera: RwSignal<Option<ExpandedCamera>>,
+) -> impl IntoView {
+    if camera.enabled {
+        let player_title = format!("{} live video", camera.display_name);
+        let expand_camera = ExpandedCamera {
+            name: camera.name.clone(),
+            title: player_title.clone(),
+        };
+        let still_paused = Signal::derive(move || expanded_camera.get().is_some());
+        view! {
+            <article class="camera-card">
+                <button
+                    class="camera-card-link"
+                    type="button"
+                    aria-label=format!("Expand {} to full view", camera.display_name)
+                    on:click=move |_| expanded_camera.set(Some(expand_camera.clone()))
+                >
+                    <StillTile camera_name=camera.name.clone() title=player_title paused=still_paused/>
+                    <h2>{camera.display_name.clone()}</h2>
+                    <p>{camera.name}</p>
+                </button>
+            </article>
+        }
+        .into_any()
+    } else {
+        view! {
+            <article class="camera-card">
                 <h2>{camera.display_name.clone()}</h2>
-                <p>{camera.name}</p>
-            </button>
-        </article>
+                <p class="camera-card-off">{format!("{}: off", camera.display_name)}</p>
+            </article>
+        }
+        .into_any()
     }
 }

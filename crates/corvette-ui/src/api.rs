@@ -5,8 +5,8 @@
 
 use crate::activity::MOTION_BUCKET_SECONDS;
 use corvette_api::{
-    Camera, CameraList, Event, MotionActivity, PreviewClip, RecordingSegment, ReviewEvent,
-    ReviewSegment,
+    Camera, CameraEntry, CameraList, Event, MotionActivity, PreviewClip, RecordingSegment,
+    ReviewEvent, ReviewSegment,
 };
 use gloo_net::http::{Request, RequestBuilder};
 use serde::de::DeserializeOwned;
@@ -49,9 +49,17 @@ async fn fetch_json<T: DeserializeOwned>(request: RequestBuilder, path: &str) ->
         .ok_or_else(|| format!("request {path}: server returned HTTP 404"))
 }
 
-pub(super) async fn fetch_cameras() -> Result<Vec<Camera>, String> {
+pub(super) async fn fetch_camera_entries() -> Result<Vec<CameraEntry>, String> {
     let list: CameraList = fetch_json(Request::get(CAMERAS_PATH), CAMERAS_PATH).await?;
-    Ok(list.cameras.into_iter().map(Camera::from).collect())
+    Ok(list.cameras)
+}
+
+pub(super) async fn fetch_cameras() -> Result<Vec<Camera>, String> {
+    Ok(fetch_camera_entries()
+        .await?
+        .into_iter()
+        .map(Camera::from)
+        .collect())
 }
 
 pub(super) async fn fetch_events() -> Result<Vec<Event>, String> {

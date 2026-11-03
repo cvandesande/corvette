@@ -989,6 +989,10 @@ main {
   font-size: 0.85rem;
 }
 
+.camera-card .camera-card-off {
+  color: #d7e2e0;
+}
+
 @media (max-width: 44rem) {
   .site-header {
     padding: 0 1rem;
