@@ -37,7 +37,6 @@
 18.7 50 268 crates/corvette-rtsp-client/tests/session.rs
 3.3 19 569 crates/corvette-ui/src/activity.rs
 32.0 212 663 crates/corvette-ui/src/all_cameras.rs
-16.9 25 148 crates/corvette-ui/src/api.rs
 8.6 23 269 crates/corvette-ui/src/local_time.rs
 9.0 35 391 crates/corvette-ui/src/media.rs
 22.9 78 341 crates/corvette-ui/src/monitor_layout.rs

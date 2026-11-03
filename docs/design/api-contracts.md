@@ -834,6 +834,15 @@ reviews, so a review's `media` carries only its thumbnail and its clip. Each lin
 When Corvette owns login (issue #30), and later its own camera configuration, these
 response shapes stay the same; only their sources change.
 
+## The page's request helpers report failures as text and treat two absences as empty results
+
+Every request through the page's request helpers reports failure as a `String`
+naming the path and what went wrong, for display to the reader. Exactly two
+absences are reported as an empty result rather than as an error, and only
+these two: a camera that has not been chosen yet, and a preview range the
+backing answers `404` for because it has no preview videos. Every other
+unsuccessful status is an error.
+
 ## A recorded range plays through one playlist route
 
 Corvette serves a recorded camera range to a browser as one playlist route,

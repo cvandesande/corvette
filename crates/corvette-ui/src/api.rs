@@ -1,12 +1,6 @@
-//! Browser access to Corvette's own API and the Frigate API boundary.
-//!
-//! Every request reports failure as a `String` naming the path and what went
-//! wrong, for display to the reader. Two absences are reported as an empty
-//! result instead of an error, and only these two: a camera that has not been
-//! chosen yet, and Frigate's `404` for a range it has generated no preview
-//! videos for. Every other unsuccessful status is an error.
+//! Failure and empty-result rules: `docs/design/api-contracts.md`.
 
-// Browser fetch futures are confined to the WASM thread and cannot implement Send.
+// Browser fetch futures live on the WASM thread and cannot implement `Send`.
 #![allow(clippy::future_not_send)]
 
 use crate::activity::MOTION_BUCKET_SECONDS;
@@ -22,11 +16,7 @@ const CAMERAS_PATH: &str = "/corvette/api/v1/cameras";
 const EVENTS_PATH: &str = "/api/events?limit=10&sort=date_desc&has_clip=1";
 const REVIEW_LIMIT: u32 = 1_000;
 
-/// Sends `request` and decodes its JSON body, reporting `404` as an absent
-/// resource and naming `path` in any failure.
-///
-/// `path` is the request's own path; it is passed separately because the
-/// builder does not expose the URL it was created with.
+// The request builder exposes no URL; callers pass the path separately.
 async fn fetch_json_or_absent<T: DeserializeOwned>(
     request: RequestBuilder,
     path: &str,
@@ -53,33 +43,27 @@ async fn fetch_json_or_absent<T: DeserializeOwned>(
         .map_err(|error| format!("decode {path} response: {error}"))
 }
 
-/// Sends `request` and decodes its JSON body, naming `path` in any failure.
 async fn fetch_json<T: DeserializeOwned>(request: RequestBuilder, path: &str) -> Result<T, String> {
     fetch_json_or_absent(request, path)
         .await?
         .ok_or_else(|| format!("request {path}: server returned HTTP 404"))
 }
 
-/// Fetches the cameras Corvette's camera list route grants to this caller, in
-/// the order the route returned them.
 pub(super) async fn fetch_cameras() -> Result<Vec<Camera>, String> {
     let list: CameraList = fetch_json(Request::get(CAMERAS_PATH), CAMERAS_PATH).await?;
     Ok(list.cameras.into_iter().map(Camera::from).collect())
 }
 
-/// Fetches the 10 most recent playable events in descending start-time order.
 pub(super) async fn fetch_events() -> Result<Vec<Event>, String> {
     fetch_json(Request::get(EVENTS_PATH), EVENTS_PATH).await
 }
 
-/// Fetches review activity across every camera within a timestamp range.
 pub(super) async fn fetch_reviews(after: f64, before: f64) -> Result<Vec<ReviewEvent>, String> {
     let path =
         format!("/api/review?cameras=all&after={after}&before={before}&limit={REVIEW_LIMIT}");
     fetch_json(Request::get(&path), &path).await
 }
 
-/// Fetches significant recording motion within a timestamp range.
 pub(super) async fn fetch_motion_activity(
     after: f64,
     before: f64,
@@ -90,8 +74,6 @@ pub(super) async fn fetch_motion_activity(
     fetch_json(Request::get(&path), &path).await
 }
 
-/// Fetches review activity for one camera and timestamp range, or nothing when
-/// no camera has been chosen.
 pub(super) async fn fetch_review_activity(
     camera: &str,
     after: f64,
@@ -107,8 +89,6 @@ pub(super) async fn fetch_review_activity(
     fetch_json(Request::get(&path), &path).await
 }
 
-/// Fetches the local dates with retained recordings for one camera, or nothing
-/// when no camera has been chosen.
 pub(super) async fn fetch_recording_days(
     camera: &str,
     timezone: &str,
@@ -123,7 +103,6 @@ pub(super) async fn fetch_recording_days(
     fetch_json(Request::get(&path), &path).await
 }
 
-/// Fetches retained media segments for one camera and timestamp range.
 pub(super) async fn fetch_recording_segments(
     camera: &str,
     after: f64,
@@ -134,10 +113,6 @@ pub(super) async fn fetch_recording_segments(
     fetch_json(Request::get(&path), &path).await
 }
 
-/// Fetches Frigate's low-resolution preview videos for timeline scrubbing.
-///
-/// A range Frigate has generated no previews for answers `404`, which is
-/// reported as no previews rather than as a failure.
 pub(super) async fn fetch_preview_clips(
     camera: &str,
     after: f64,
