@@ -25,6 +25,9 @@ impl FrigateConfig {
     #[must_use]
     pub fn enabled_camera_entries(self) -> Vec<CameraEntry> {
         Self::camera_entries_in_dashboard_order(self.cameras)
+            .into_iter()
+            .filter(|entry| entry.enabled)
+            .collect()
     }
 
     /// Returns the enabled cameras `role` may see, in [`FrigateConfig::enabled_camera_entries`] order.
@@ -33,10 +36,20 @@ impl FrigateConfig {
     /// a request with no `Remote-Role`; a disabled camera is never returned, even when listed.
     #[must_use]
     pub fn camera_entries_for_role(self, role: &str) -> Vec<CameraEntry> {
+        self.camera_entries_for_role_including_off(role)
+            .into_iter()
+            .filter(|entry| entry.enabled)
+            .collect()
+    }
+
+    /// Returns every camera `role` may see, cameras that are off included, in
+    /// the same dashboard order as [`FrigateConfig::camera_entries_for_role`].
+    #[must_use]
+    pub fn camera_entries_for_role_including_off(self, role: &str) -> Vec<CameraEntry> {
         let Self { cameras, auth } = self;
         let entries = Self::camera_entries_in_dashboard_order(cameras);
-        let enabled_names: Vec<String> = entries.iter().map(|entry| entry.name.clone()).collect();
-        let allowed = allowed_cameras(role, &auth.roles, &enabled_names);
+        let names: Vec<String> = entries.iter().map(|entry| entry.name.clone()).collect();
+        let allowed = allowed_cameras(role, &auth.roles, &names);
         entries
             .into_iter()
             .filter(|entry| allowed.contains(&entry.name.as_str()))
@@ -46,25 +59,7 @@ impl FrigateConfig {
     fn camera_entries_in_dashboard_order(
         cameras: BTreeMap<String, FrigateCamera>,
     ) -> Vec<CameraEntry> {
-        Self::enabled_in_dashboard_order(cameras)
-            .into_iter()
-            .map(|(name, camera)| CameraEntry {
-                display_name: camera.friendly_name.unwrap_or_else(|| name.clone()),
-                name,
-                order: camera.ui.order,
-                detect_width: camera.detect.width,
-                detect_height: camera.detect.height,
-            })
-            .collect()
-    }
-
-    fn enabled_in_dashboard_order(
-        cameras: BTreeMap<String, FrigateCamera>,
-    ) -> Vec<(String, FrigateCamera)> {
-        let mut cameras = cameras
-            .into_iter()
-            .filter(|(_, camera)| camera.enabled)
-            .collect::<Vec<_>>();
+        let mut cameras = cameras.into_iter().collect::<Vec<_>>();
         cameras.sort_by(|(left_name, left), (right_name, right)| {
             left.ui
                 .order
@@ -72,6 +67,16 @@ impl FrigateConfig {
                 .then_with(|| left_name.cmp(right_name))
         });
         cameras
+            .into_iter()
+            .map(|(name, camera)| CameraEntry {
+                display_name: camera.friendly_name.unwrap_or_else(|| name.clone()),
+                enabled: camera.enabled,
+                name,
+                order: camera.ui.order,
+                detect_width: camera.detect.width,
+                detect_height: camera.detect.height,
+            })
+            .collect()
     }
 }
 
@@ -96,6 +101,13 @@ pub struct CameraEntry {
     pub order: i32,
     pub detect_width: u32,
     pub detect_height: u32,
+    /// Whether the camera is switched on; an entry written without this field reads as `true`.
+    #[serde(default = "enabled_when_absent")]
+    pub enabled: bool,
+}
+
+const fn enabled_when_absent() -> bool {
+    true
 }
 
 impl From<CameraEntry> for Camera {
@@ -391,6 +403,7 @@ mod tests {
                     order: 10,
                     detect_width: 640,
                     detect_height: 480,
+                    enabled: true,
                 },
                 CameraEntry {
                     name: "side_door".to_owned(),
@@ -398,6 +411,7 @@ mod tests {
                     order: 20,
                     detect_width: 1920,
                     detect_height: 1080,
+                    enabled: true,
                 },
             ]
         );
@@ -411,17 +425,28 @@ mod tests {
             order: 10,
             detect_width: 640,
             detect_height: 480,
+            enabled: true,
         };
 
         let json = serde_json::to_string(&entry).expect("camera entry should serialize");
         assert_eq!(
             json,
-            r#"{"name":"front_door","display_name":"Front door","order":10,"detect_width":640,"detect_height":480}"#
+            r#"{"name":"front_door","display_name":"Front door","order":10,"detect_width":640,"detect_height":480,"enabled":true}"#
         );
         assert_eq!(
             serde_json::from_str::<CameraEntry>(&json).expect("camera entry should deserialize"),
             entry
         );
+    }
+
+    #[test]
+    fn camera_entry_json_without_enabled_reads_as_enabled_true() {
+        let entry: CameraEntry = serde_json::from_str(
+            r#"{"name":"front_door","display_name":"Front door","order":10,"detect_width":640,"detect_height":480}"#,
+        )
+        .expect("camera entry without enabled should deserialize");
+
+        assert!(entry.enabled);
     }
 
     #[test]
@@ -432,6 +457,7 @@ mod tests {
             order: 10,
             detect_width: 640,
             detect_height: 480,
+            enabled: true,
         });
 
         assert_eq!(
@@ -479,6 +505,12 @@ mod tests {
         serde_json::from_str::<FrigateConfig>(config)
             .expect("Frigate config should deserialize")
             .camera_entries_for_role(role)
+    }
+
+    fn role_entries_including_off(config: &str, role: &str) -> Vec<CameraEntry> {
+        serde_json::from_str::<FrigateConfig>(config)
+            .expect("Frigate config should deserialize")
+            .camera_entries_for_role_including_off(role)
     }
 
     #[test]
@@ -567,6 +599,61 @@ mod tests {
         .expect("Frigate config should deserialize")
         .camera_entries_for_role("admin");
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn camera_entries_for_role_including_off_lists_off_cameras_in_dashboard_order() {
+        let entries = role_entries_including_off(ROLE_CAMERA_CONFIG, "admin");
+
+        assert_eq!(
+            entries,
+            vec![
+                CameraEntry {
+                    name: "garage".to_owned(),
+                    display_name: "Garage".to_owned(),
+                    order: 0,
+                    detect_width: 1280,
+                    detect_height: 720,
+                    enabled: false,
+                },
+                CameraEntry {
+                    name: "front_door".to_owned(),
+                    display_name: "front_door".to_owned(),
+                    order: 10,
+                    detect_width: 640,
+                    detect_height: 480,
+                    enabled: true,
+                },
+                CameraEntry {
+                    name: "side_door".to_owned(),
+                    display_name: "Side door".to_owned(),
+                    order: 20,
+                    detect_width: 1920,
+                    detect_height: 1080,
+                    enabled: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn camera_entries_for_role_including_off_keeps_a_listed_off_camera_and_drops_unknown_names() {
+        let entries = role_entries_including_off(ROLE_CAMERA_CONFIG, "limited");
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.enabled))
+                .collect::<Vec<_>>(),
+            [("garage", false), ("front_door", true)],
+        );
+    }
+
+    #[test]
+    fn camera_entries_for_role_including_off_grants_nothing_to_a_role_that_sees_no_camera() {
+        assert!(role_entries_including_off(ROLE_CAMERA_CONFIG, "auditor").is_empty());
+        assert!(role_entries_including_off(MULTI_CAMERA_CONFIG, "admin").is_empty());
+        assert!(role_entries_including_off(MULTI_CAMERA_CONFIG, "").is_empty());
     }
 
     #[test]

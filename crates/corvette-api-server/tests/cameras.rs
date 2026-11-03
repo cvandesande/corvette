@@ -248,7 +248,7 @@ fn admin_request() -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn admin_sees_all_enabled_cameras_in_dashboard_order() {
+async fn admin_sees_all_cameras_in_dashboard_order() {
     let (_fixture, addr) =
         Fixture::start(vec![Behavior::Respond(config_response(FRIGATE_CONFIG))]).await;
     let server = start_server(addr);
@@ -265,6 +265,7 @@ async fn admin_sees_all_enabled_cameras_in_dashboard_order() {
                 order: 0,
                 detect_width: 704,
                 detect_height: 576,
+                enabled: true,
             },
             CameraEntry {
                 name: "front".to_owned(),
@@ -272,6 +273,15 @@ async fn admin_sees_all_enabled_cameras_in_dashboard_order() {
                 order: 0,
                 detect_width: 704,
                 detect_height: 576,
+                enabled: true,
+            },
+            CameraEntry {
+                name: "living".to_owned(),
+                display_name: "living".to_owned(),
+                order: 0,
+                detect_width: 640,
+                detect_height: 480,
+                enabled: false,
             },
         ]
     );
@@ -294,13 +304,15 @@ async fn the_fetch_sends_the_documented_config_request() {
     server.finish();
 }
 
-/// `keeper` lists one enabled camera, one disabled camera and one nonexistent.
+/// `keeper` lists one enabled camera, one disabled camera and one nonexistent;
+/// `front_only` lists a single enabled camera.
 fn role_filter_fixture() -> String {
     serde_json::json!({
         "auth": { "roles": {
             "admin": [],
             "viewer": [],
-            "keeper": ["front", "garage", "living"]
+            "keeper": ["front", "garage", "living"],
+            "front_only": ["front"]
         } },
         "cameras": {
             "front": { "enabled": true, "friendly_name": null, "ui": { "order": 0 },
@@ -323,8 +335,8 @@ async fn the_route_filters_cameras_by_role() {
     let server = start_server(addr);
 
     let cases: &[(&str, &[&str])] = &[
-        ("keeper", &["front"]),
-        ("viewer", &["back", "front"]),
+        ("keeper", &["front", "living"]),
+        ("viewer", &["back", "front", "living"]),
         // A role absent from `auth.roles` sees nothing (fail closed).
         ("auditor", &[]),
     ];
@@ -347,6 +359,47 @@ async fn the_route_filters_cameras_by_role() {
     let anonymous_role = get("/corvette/api/v1/cameras", &["Remote-User: alice"]);
     let list = assert_camera_list(&exchange(&server.socket, &anonymous_role).await);
     assert!(list.cameras.is_empty());
+    server.finish();
+}
+
+#[tokio::test]
+async fn a_camera_that_is_off_is_listed_with_enabled_false() {
+    let (_fixture, addr) =
+        Fixture::start(vec![Behavior::Respond(config_response(FRIGATE_CONFIG))]).await;
+    let server = start_server(addr);
+
+    let list = assert_camera_list(&exchange(&server.socket, &admin_request()).await);
+    assert_eq!(
+        list.cameras
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.enabled))
+            .collect::<Vec<_>>(),
+        [("back", true), ("front", true), ("living", false)],
+    );
+    server.finish();
+}
+
+#[tokio::test]
+async fn a_role_that_may_not_see_a_camera_is_not_listed() {
+    let (_fixture, addr) = Fixture::start(vec![Behavior::Respond(config_response(
+        &role_filter_fixture(),
+    ))])
+    .await;
+    let server = start_server(addr);
+
+    let request = get(
+        "/corvette/api/v1/cameras",
+        &["Remote-User: alice", "Remote-Role: front_only"],
+    );
+    let list = assert_camera_list(&exchange(&server.socket, &request).await);
+    assert_eq!(
+        list.cameras
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["front"],
+        "the role names only `front`; neither `back` nor the off `living` may be listed"
+    );
     server.finish();
 }
 

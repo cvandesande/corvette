@@ -741,16 +741,21 @@ opens Frigate's SQLite database strictly read-only — the service never writes 
 consists of one short read proving a Frigate table is queryable.
 
 `GET /corvette/api/v1/cameras` answers `200` `{"cameras":[...]}`, one entry per camera the
-caller's role may see, each carrying `name`, `display_name`, `order`, `detect_width`, and
-`detect_height`. The entries are the enabled cameras in dashboard order: `ui.order`, then
-camera name. The list is filtered by role, so a role limited to one camera receives only
-that camera's entry; Frigate's `/api/config` returns every camera to every user, which
-is the reason the route exists. The role rule: a role absent from the configured
-`auth.roles` — including the empty role of a request that carries no `Remote-Role` —
-sees no cameras, and a configuration with no `auth.roles` at all grants nothing; a role
-with an empty camera list sees every enabled camera; otherwise the role sees exactly the
-listed cameras that exist, and a listed name that is disabled or unknown is dropped. The route answers `503`
-`config_unavailable` when no Frigate configuration copy younger than 10 s can be served.
+caller's role may see, cameras that are off included, in dashboard order: `ui.order`, then
+camera name. Each entry carries `name`, `display_name`, `order`, `detect_width`,
+`detect_height` and `enabled` (`true` when the camera is switched on, `false` when it is
+switched off by choice); for a consumer, an entry that lacks `enabled` reads as `true`.
+The list is filtered by role, so a role limited to one camera receives only that camera's
+entry; Frigate's `/api/config` returns every camera to every user, which is the reason
+the route exists. The role rule: a role absent from the configured `auth.roles` —
+including the empty role of a request that carries no `Remote-Role` — sees no cameras,
+and a configuration with no `auth.roles` at all grants nothing; a role with an empty
+camera list sees every camera that exists; otherwise the role sees exactly the listed
+cameras that exist — off cameras kept — and a listed name that no camera has is dropped.
+**Current backing**: `enabled` is the camera's runtime `enabled` flag in the backing's
+configuration copy, the flag the backing's enable/disable command sets. The route
+answers `503` `config_unavailable` when no Frigate configuration copy younger than 10 s
+can be served.
 
 `GET /corvette/api/v1/activity?after=&before=&cameras=&include=` answers the reviews and
 motion of a time range for the cameras the caller's role may see:
@@ -759,8 +764,8 @@ motion of a time range for the cameras the caller's role may see:
   negative, with `after < before` and a range of at most 31 days (2678400 s).
 - `cameras` is an optional comma-separated list of camera names. Absent, it means every
   camera the role may see; present, it narrows that set. A name that is unknown, disabled,
-  or not allowed for the role is dropped without an error, the same way the cameras route
-  drops it, so the route reveals nothing about cameras the caller cannot see.
+  or not allowed for the role is dropped without an error, so the route reveals nothing
+  about cameras the caller cannot see.
 - `include` is an optional comma-separated subset of `reviews,motion`; absent means both,
   and an omitted kind is returned as an empty array.
 - Names and values are percent-decoded (`+` stays `+`). An unknown, repeated, or

@@ -53,7 +53,10 @@ impl ConfigSource {
 
     pub(crate) async fn camera_list_json(&self, role: &str) -> Result<Vec<u8>, ConfigFetchError> {
         let list = corvette_api::CameraList {
-            cameras: self.config().await?.camera_entries_for_role(role),
+            cameras: self
+                .config()
+                .await?
+                .camera_entries_for_role_including_off(role),
         };
         // CameraList is only strings and integers; its derived serializer cannot fail.
         Ok(serde_json::to_vec(&list).expect("camera list serializes"))
