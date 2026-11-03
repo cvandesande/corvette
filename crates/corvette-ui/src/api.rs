@@ -5,8 +5,8 @@
 
 use crate::activity::MOTION_BUCKET_SECONDS;
 use corvette_api::{
-    Camera, CameraEntry, CameraList, Event, MotionActivity, PreviewClip, RecordingSegment,
-    ReviewEvent, ReviewSegment,
+    ActivityResponse, ActivityReview, Camera, CameraEntry, CameraList, Event, MotionActivity,
+    PreviewClip, RecordingSegment, ReviewEvent, ReviewSegment,
 };
 use gloo_net::http::{Request, RequestBuilder};
 use serde::de::DeserializeOwned;
@@ -95,6 +95,19 @@ pub(super) async fn fetch_review_activity(
     let path =
         format!("/api/review?cameras={camera}&after={after}&before={before}&limit={REVIEW_LIMIT}");
     fetch_json(Request::get(&path), &path).await
+}
+
+pub(super) async fn fetch_activity_reviews(
+    camera: &str,
+    after: f64,
+    before: f64,
+) -> Result<Vec<ActivityReview>, String> {
+    let camera = js_sys::encode_uri_component(camera);
+    let path = format!(
+        "/corvette/api/v1/activity?cameras={camera}&after={after}&before={before}&include=reviews"
+    );
+    let response: ActivityResponse = fetch_json(Request::get(&path), &path).await?;
+    Ok(response.reviews)
 }
 
 pub(super) async fn fetch_recording_days(

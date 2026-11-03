@@ -1,6 +1,6 @@
 //! The activity model built from Frigate's review records and sampled motion.
 
-use corvette_api::{MotionActivity, ReviewEvent, ReviewSegment, ReviewSeverity};
+use corvette_api::{ActivityReview, MotionActivity, ReviewEvent, ReviewSegment, ReviewSeverity};
 use leptos::prelude::*;
 
 use crate::local_time::format_event_time;
@@ -53,7 +53,7 @@ pub(crate) fn ReviewEventList(
         if events.is_empty() {
             return view! { <Status
                 heading=empty_heading.clone()
-                detail="Frigate reported no matching review activity during this period."
+                detail="No matching review activity during this period."
                 glyph=StatusGlyph::Event
             /> }
             .into_any();
@@ -152,20 +152,15 @@ fn ReviewPlayback(
             _ = button.focus();
         }
     });
-    let range = RecordingRange {
-        camera: review.camera.clone(),
-        start_time: review.start_time,
-        end_time: review
-            .end_time
-            .unwrap_or_else(|| js_sys::Date::now() / 1_000.0),
-    };
-    let clip_url = StoredValue::new(range.clip_url());
-    // A review outlives its footage: Frigate answers an expired clip range
-    // with a JSON 400, which a <video> reports as an unsupported type.
-    let retained_segments = LocalResource::new(move || {
-        let camera = range.camera.clone();
-        let (start_time, end_time) = (range.start_time, range.end_time);
-        async move { crate::api::fetch_recording_segments(&camera, start_time, end_time).await }
+    let camera = review.camera.clone();
+    let start_time = review.start_time;
+    let end_time = review
+        .end_time
+        .unwrap_or_else(|| js_sys::Date::now() / 1_000.0);
+    let review_id = review.id.clone();
+    let clip = LocalResource::new(move || {
+        let camera = camera.clone();
+        async move { crate::api::fetch_activity_reviews(&camera, start_time, end_time).await }
     });
     let heading = review_event_title(&review);
     view! {
@@ -193,24 +188,17 @@ fn ReviewPlayback(
                         on:click=move |_| selected_review.set(None)
                     >"Close"</button>
                 </div>
-                {move || match retained_segments.get() {
+                {move || match clip.get().map(|reviews| clip_outcome(&reviews, &review_id)) {
                     None => view! { <Status
                         heading="Checking availability"
-                        detail="Asking Frigate whether this activity still has retained footage."
+                        detail="Asking the server for this alert's clip."
                         glyph=StatusGlyph::Recording
                     /> }.into_any(),
-                    Some(Err(error)) => view! {
-                        <p class="recording-error" role="alert">{error}</p>
-                    }.into_any(),
-                    Some(Ok(segments)) if segments.is_empty() => view! {
-                        <p class="recording-error" role="alert">
-                            "Frigate has no retained recording for this activity."
-                        </p>
-                    }.into_any(),
-                    Some(Ok(_)) => view! {
+                    Some(ClipOutcome::Playable(url)) => view! {
                         <video
                             class="recording-player"
-                            src=clip_url.get_value()
+                            src=url.clone()
+                            data-clip-url=url
                             controls
                             autoplay
                             playsinline
@@ -222,10 +210,56 @@ fn ReviewPlayback(
                             </p>
                         })}
                     }.into_any(),
+                    Some(outcome) => view! {
+                        <>
+                            <p class="recording-error" role="alert">{outcome.message()}</p>
+                            <button
+                                type="button"
+                                on:click=move |_| clip.refetch()
+                            >"Retry"</button>
+                        </>
+                    }.into_any(),
                 }}
             </section>
         </div>
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ClipOutcome {
+    Playable(String),
+    NoRecording,
+    NotReturned,
+    InProgress,
+    LoadFailed,
+}
+
+impl ClipOutcome {
+    const fn message(&self) -> &'static str {
+        match self {
+            Self::Playable(_) => "",
+            Self::NoRecording => "There is no recording available for this alert.",
+            Self::NotReturned => "The server did not return this alert.",
+            Self::InProgress => "This alert is still in progress.",
+            Self::LoadFailed => "Could not load this alert's clip.",
+        }
+    }
+}
+
+fn clip_outcome(reviews: &Result<Vec<ActivityReview>, String>, review_id: &str) -> ClipOutcome {
+    let Ok(reviews) = reviews else {
+        return ClipOutcome::LoadFailed;
+    };
+    let Some(review) = reviews.iter().find(|review| review.id == review_id) else {
+        return ClipOutcome::NotReturned;
+    };
+    if let Some(clip) = &review.media.clip {
+        return ClipOutcome::Playable(clip.url.clone());
+    }
+    if review.end.is_none() {
+        return ClipOutcome::InProgress;
+    }
+    ClipOutcome::NoRecording
 }
 
 fn review_events_for_filter(events: Vec<ReviewEvent>, filter: ActivityFilter) -> Vec<ReviewEvent> {
@@ -429,6 +463,7 @@ pub(crate) const fn severity_label(severity: ReviewSeverity) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use corvette_api::{MediaLink, ReviewMedia};
 
     #[test]
     fn day_uses_the_highest_overlapping_review_severity() {
@@ -554,6 +589,83 @@ mod tests {
                     end_time: 220.0,
                 },
             ]
+        );
+    }
+
+    fn activity_review(id: &str, end: Option<f64>, clip: Option<&str>) -> ActivityReview {
+        ActivityReview {
+            id: id.to_owned(),
+            camera: "front".to_owned(),
+            severity: ReviewSeverity::Alert,
+            start: 100.0,
+            end,
+            objects: Vec::new(),
+            zones: Vec::new(),
+            detections: Vec::new(),
+            sub_labels: Vec::new(),
+            audio: Vec::new(),
+            media: ReviewMedia {
+                thumbnail: None,
+                clip: clip.map(|url| MediaLink {
+                    url: url.to_owned(),
+                }),
+            },
+        }
+    }
+
+    type Reviews = Result<Vec<ActivityReview>, String>;
+
+    #[test]
+    fn clip_outcome_gives_the_matching_review_its_link() {
+        let reviews: Reviews = Ok(vec![activity_review("alert", Some(110.0), Some("/a.m3u8"))]);
+        assert_eq!(
+            clip_outcome(&reviews, "alert"),
+            ClipOutcome::Playable("/a.m3u8".to_owned())
+        );
+    }
+
+    #[test]
+    fn clip_outcome_of_an_ended_review_without_a_link_is_no_recording() {
+        let reviews: Reviews = Ok(vec![activity_review("alert", Some(110.0), None)]);
+        assert_eq!(clip_outcome(&reviews, "alert"), ClipOutcome::NoRecording);
+    }
+
+    #[test]
+    fn clip_outcome_of_a_review_absent_from_the_answer_is_not_returned() {
+        let other_review: Reviews = Ok(vec![activity_review(
+            "other",
+            Some(110.0),
+            Some("/other.m3u8"),
+        )]);
+        assert_eq!(
+            clip_outcome(&other_review, "alert"),
+            ClipOutcome::NotReturned
+        );
+        let empty: Reviews = Ok(Vec::new());
+        assert_eq!(clip_outcome(&empty, "alert"), ClipOutcome::NotReturned);
+    }
+
+    #[test]
+    fn clip_outcome_of_an_in_progress_review_is_in_progress() {
+        let reviews: Reviews = Ok(vec![activity_review("alert", None, None)]);
+        assert_eq!(clip_outcome(&reviews, "alert"), ClipOutcome::InProgress);
+    }
+
+    #[test]
+    fn clip_outcome_of_a_failed_request_is_load_failed() {
+        let failed: Reviews = Err("request /corvette/api/v1/activity: no route".to_owned());
+        assert_eq!(clip_outcome(&failed, "alert"), ClipOutcome::LoadFailed);
+    }
+
+    #[test]
+    fn clip_outcome_uses_the_link_of_the_review_whose_id_matches() {
+        let reviews: Reviews = Ok(vec![
+            activity_review("other", Some(110.0), Some("/other.m3u8")),
+            activity_review("alert", Some(110.0), Some("/alert.m3u8")),
+        ]);
+        assert_eq!(
+            clip_outcome(&reviews, "alert"),
+            ClipOutcome::Playable("/alert.m3u8".to_owned())
         );
     }
 }

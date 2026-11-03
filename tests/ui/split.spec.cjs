@@ -33,21 +33,6 @@ const DECODABLE_IMAGE = Buffer.from(
   "base64",
 );
 
-// Answers the recording-availability preflight with the whole requested range
-// retained, so a review's clip URL is reached rather than reported as expired.
-const retainRequestedRange = (route) => {
-  const params = new URL(route.request().url()).searchParams;
-  return route.fulfill({
-    json: [
-      {
-        start_time: Number(params.get("after")),
-        end_time: Number(params.get("before")),
-        motion: 1,
-      },
-    ],
-  });
-};
-
 const calendarDayLabel = (date) =>
   `${new Intl.DateTimeFormat("en-IE", { timeZone: "UTC" }).format(
     new Date(`${date}T00:00:00Z`),
@@ -486,7 +471,8 @@ test.describe("recording timeline", () => {
 });
 
 test("recent events are filtered review activity from the last six hours", async ({ page }) => {
-  let alertClipPath;
+  const activityRequests = [];
+  let alertBounds;
   let mergedMotionPreviewPath;
   await page.route("**/corvette/api/v1/cameras", (route) => route.fulfill({ json: { cameras: [] } }));
   await page.route("**/api/review?*", (route) => {
@@ -494,7 +480,7 @@ test("recent events are filtered review activity from the last six hours", async
     const after = Number(url.searchParams.get("after"));
     const before = Number(url.searchParams.get("before"));
     expect(before - after).toBeCloseTo(6 * 60 * 60, 0);
-    alertClipPath = `/api/front/start/${before - 60}/end/${before - 50}/clip.mp4`;
+    alertBounds = { start: before - 60, end: before - 50 };
     return route.fulfill({
       json: [
         {
@@ -522,15 +508,48 @@ test("recent events are filtered review activity from the last six hours", async
       ],
     });
   });
-  await page.route("**/api/front/recordings?*", retainRequestedRange);
+  await page.route("**/corvette/api/v1/activity?*", (route) => {
+    activityRequests.push(route.request().url());
+    const params = new URL(route.request().url()).searchParams;
+    return route.fulfill({
+      json: {
+        after: Number(params.get("after")),
+        before: Number(params.get("before")),
+        motion_bucket_seconds: 30,
+        reviews: [
+          {
+            id: "alert-review",
+            camera: "front",
+            severity: "alert",
+            start: alertBounds.start,
+            end: alertBounds.end,
+            objects: ["person"],
+            zones: ["drive"],
+            detections: [],
+            sub_labels: [],
+            audio: [],
+            media: {
+              thumbnail: null,
+              clip: {
+                url:
+                  `/corvette/api/v1/media/front/start/${alertBounds.start}` +
+                  `/end/${alertBounds.end}/master.m3u8`,
+              },
+            },
+          },
+        ],
+        motion: [],
+      },
+    });
+  });
+  await page.route("**/corvette/api/v1/media/**", (route) =>
+    route.fulfill({ contentType: "application/vnd.apple.mpegurl", body: "" }),
+  );
   await page.route("**/clips/review/*.webp", (route) =>
     route.fulfill({ contentType: "image/webp", body: Buffer.alloc(0) }),
   );
   await page.route("**/api/*/start/*/end/*/preview.gif", (route) =>
     route.fulfill({ contentType: "image/gif", body: Buffer.alloc(0) }),
-  );
-  await page.route("**/api/front/start/*/end/*/clip.mp4", (route) =>
-    route.fulfill({ contentType: "video/mp4", body: Buffer.alloc(0) }),
   );
 
   await page.goto("/");
@@ -549,10 +568,20 @@ test("recent events are filtered review activity from the last six hours", async
   await cards.getByRole("button").click();
   await expect(page.getByRole("dialog", { name: "Selected event playback" })).toBeVisible();
   await expect(page.locator(".playback-modal")).toHaveCSS("position", "fixed");
+  const alertClipUrl =
+    `/corvette/api/v1/media/front/start/${alertBounds.start}` +
+    `/end/${alertBounds.end}/master.m3u8`;
+  await expect(page.locator(".review-playback video")).toHaveAttribute("src", alertClipUrl);
   await expect(page.locator(".review-playback video")).toHaveAttribute(
-    "src",
-    alertClipPath,
+    "data-clip-url",
+    alertClipUrl,
   );
+  const activityUrl = new URL(activityRequests[0]);
+  expect(activityUrl.pathname).toBe("/corvette/api/v1/activity");
+  expect(activityUrl.searchParams.get("cameras")).toBe("front");
+  expect(Number(activityUrl.searchParams.get("after"))).toBe(alertBounds.start);
+  expect(Number(activityUrl.searchParams.get("before"))).toBe(alertBounds.end);
+  expect(activityUrl.searchParams.get("include")).toBe("reviews");
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog", { name: "Selected event playback" })).toHaveCount(0);
   await page.getByRole("button", { name: "Detections", exact: true }).click();
@@ -631,6 +660,7 @@ test("event cards show the detection snapshot, falling back to the review crop",
 test("a review whose footage expired reports the absence, not a media error", async ({
   page,
 }) => {
+  let activityRequestCount = 0;
   await page.route("**/corvette/api/v1/cameras", (route) => route.fulfill({ json: { cameras: [] } }));
   await page.route("**/api/review?*", (route) => {
     const before = Number(new URL(route.request().url()).searchParams.get("before"));
@@ -649,15 +679,33 @@ test("a review whose footage expired reports the absence, not a media error", as
     });
   });
   await page.route("**/api/review/activity/motion?*", (route) => route.fulfill({ json: [] }));
-  // The review outlived its recording: Frigate answers a clip request for this
-  // range with a JSON 400 that a <video> element would call an unplayable file.
-  await page.route("**/api/front/recordings?*", (route) => route.fulfill({ json: [] }));
-  await page.route("**/api/front/start/*/end/*/clip.mp4", (route) =>
-    route.fulfill({
-      status: 400,
-      json: { success: false, message: "No recordings found for the specified time range" },
-    }),
-  );
+  await page.route("**/corvette/api/v1/activity?*", (route) => {
+    activityRequestCount += 1;
+    const params = new URL(route.request().url()).searchParams;
+    return route.fulfill({
+      json: {
+        after: Number(params.get("after")),
+        before: Number(params.get("before")),
+        motion_bucket_seconds: 30,
+        reviews: [
+          {
+            id: "expired-review",
+            camera: "front",
+            severity: "alert",
+            start: Number(params.get("after")),
+            end: Number(params.get("before")),
+            objects: ["person"],
+            zones: [],
+            detections: [],
+            sub_labels: [],
+            audio: [],
+            media: { thumbnail: null, clip: null },
+          },
+        ],
+        motion: [],
+      },
+    });
+  });
   await page.route("**/clips/review/*.webp", (route) =>
     route.fulfill({ contentType: "image/webp", body: Buffer.alloc(0) }),
   );
@@ -667,13 +715,17 @@ test("a review whose footage expired reports the absence, not a media error", as
   const playback = page.getByRole("dialog", { name: "Selected event playback" });
   await expect(playback).toBeVisible();
   await expect(playback.getByRole("alert")).toHaveText(
-    "Frigate has no retained recording for this activity.",
+    "There is no recording available for this alert.",
   );
+  await expect(playback.getByRole("button", { name: "Retry" })).toBeVisible();
   await expect(playback.locator("video")).toHaveCount(0);
+  await playback.getByRole("button", { name: "Retry" }).click();
+  await expect.poll(() => activityRequestCount).toBe(2);
 });
 
 test("events route browses a selected day and filters severity", async ({ page }) => {
-  let alertClipPath;
+  const activityRequests = [];
+  let alertBounds;
   await page.setViewportSize({ width: 390, height: 844 });
   await page.route("**/api/recordings/summary?*", (route) =>
     route.fulfill({ json: recentRecordingDays(20) }),
@@ -687,7 +739,7 @@ test("events route browses a selected day and filters severity", async ({ page }
       expect(rangeDuration).toBeGreaterThanOrEqual(23 * 60 * 60);
       expect(rangeDuration).toBeLessThanOrEqual(25 * 60 * 60);
     }
-    alertClipPath = `/api/front/start/${after + 60}/end/${after + 70}/clip.mp4`;
+    alertBounds = { start: after + 60, end: after + 70 };
     return route.fulfill({
       json: [
         {
@@ -717,15 +769,48 @@ test("events route browses a selected day and filters severity", async ({ page }
       json: [{ start_time: after + 180, motion: 25, camera: "front" }],
     });
   });
-  await page.route("**/api/front/recordings?*", retainRequestedRange);
+  await page.route("**/corvette/api/v1/activity?*", (route) => {
+    activityRequests.push(route.request().url());
+    const params = new URL(route.request().url()).searchParams;
+    return route.fulfill({
+      json: {
+        after: Number(params.get("after")),
+        before: Number(params.get("before")),
+        motion_bucket_seconds: 30,
+        reviews: [
+          {
+            id: "alert-review",
+            camera: "front",
+            severity: "alert",
+            start: alertBounds.start,
+            end: alertBounds.end,
+            objects: ["person"],
+            zones: ["drive"],
+            detections: [],
+            sub_labels: [],
+            audio: [],
+            media: {
+              thumbnail: null,
+              clip: {
+                url:
+                  `/corvette/api/v1/media/front/start/${alertBounds.start}` +
+                  `/end/${alertBounds.end}/master.m3u8`,
+              },
+            },
+          },
+        ],
+        motion: [],
+      },
+    });
+  });
+  await page.route("**/corvette/api/v1/media/**", (route) =>
+    route.fulfill({ contentType: "application/vnd.apple.mpegurl", body: "" }),
+  );
   await page.route("**/clips/review/*.webp", (route) =>
     route.fulfill({ contentType: "image/webp", body: Buffer.alloc(0) }),
   );
   await page.route("**/api/*/start/*/end/*/preview.gif", (route) =>
     route.fulfill({ contentType: "image/gif", body: Buffer.alloc(0) }),
-  );
-  await page.route("**/api/front/start/*/end/*/clip.mp4", (route) =>
-    route.fulfill({ contentType: "video/mp4", body: Buffer.alloc(0) }),
   );
 
   await page.goto("/events");
@@ -750,10 +835,20 @@ test("events route browses a selected day and filters severity", async ({ page }
   await expect(cards).toHaveCount(3);
   await cards.filter({ hasText: "person" }).getByRole("button").click();
   await expect(page.getByRole("dialog", { name: "Selected event playback" })).toBeVisible();
+  const alertClipUrl =
+    `/corvette/api/v1/media/front/start/${alertBounds.start}` +
+    `/end/${alertBounds.end}/master.m3u8`;
+  await expect(page.locator(".review-playback video")).toHaveAttribute("src", alertClipUrl);
   await expect(page.locator(".review-playback video")).toHaveAttribute(
-    "src",
-    alertClipPath,
+    "data-clip-url",
+    alertClipUrl,
   );
+  const activityUrl = new URL(activityRequests[0]);
+  expect(activityUrl.pathname).toBe("/corvette/api/v1/activity");
+  expect(activityUrl.searchParams.get("cameras")).toBe("front");
+  expect(Number(activityUrl.searchParams.get("after"))).toBe(alertBounds.start);
+  expect(Number(activityUrl.searchParams.get("before"))).toBe(alertBounds.end);
+  expect(activityUrl.searchParams.get("include")).toBe("reviews");
   await page.getByRole("button", { name: "Close" }).click();
   await page.getByRole("button", { name: "Detections", exact: true }).click();
   await expect(cards).toHaveCount(1);
