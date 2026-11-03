@@ -520,7 +520,7 @@ async fn a_clip_url_appears_only_for_an_ended_review_with_a_recording() {
     assert_eq!(
         review(&response, "r-front").media.clip,
         Some(MediaLink {
-            url: "/api/front/start/1500/end/1600/clip.mp4".to_owned()
+            url: "/corvette/api/v1/media/front/start/1500/end/1600/master.m3u8".to_owned()
         })
     );
     assert_eq!(review(&response, "r-back").media.clip, None);

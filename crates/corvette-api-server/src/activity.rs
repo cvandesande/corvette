@@ -489,7 +489,7 @@ fn clip_link(camera: &str, start: f64, end: Option<f64>, has_recording: bool) ->
     // seconds come back as `1500`, not `1500.0`.
     Some(MediaLink {
         url: format!(
-            "/api/{}/start/{}/end/{}/clip.mp4",
+            "/corvette/api/v1/media/{}/start/{}/end/{}/master.m3u8",
             percent_encode_segment(camera),
             start,
             end
@@ -1613,7 +1613,7 @@ mod tests {
         assert_eq!(
             clip_link("front door", 1.5, Some(2.0), true).expect("clip link"),
             MediaLink {
-                url: "/api/front%20door/start/1.5/end/2/clip.mp4".to_owned()
+                url: "/corvette/api/v1/media/front%20door/start/1.5/end/2/master.m3u8".to_owned()
             }
         );
         assert_eq!(clip_link("front", 1.5, Some(2.0), false), None);
@@ -1667,7 +1667,8 @@ mod tests {
                             url: "/thumb.webp".to_owned()
                         }),
                         clip: Some(MediaLink {
-                            url: "/api/front/start/1500/end/1600/clip.mp4".to_owned()
+                            url: "/corvette/api/v1/media/front/start/1500/end/1600/master.m3u8"
+                                .to_owned()
                         }),
                     },
                 }],

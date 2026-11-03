@@ -824,11 +824,12 @@ reviews, so a review's `media` carries only its thumbnail and its clip. Each lin
   `/media/frigate` prefix removed, each segment percent-encoded, which nginx serves under
   `/clips/` (see "Thumbnails under `/clips/` carry no usable content type").
 - `clip` is present when the review has ended and at least one recording row of its camera
-  overlaps `[start, end)`. The URL is Frigate's `/api/{camera}/start/{start}/end/{end}/clip.mp4`
-  with the review's own bounds; Frigate's query for that URL selects every row Corvette's
-  check selects, so Frigate serves every clip URL Corvette returns while those recordings
-  remain. A recording file deleted outside Frigate while its row remains is not detected,
-  as Frigate does not detect it.
+  overlaps `[start, end)`. The URL is the address of "A recorded range plays through one
+  playlist route", `/corvette/api/v1/media/{camera}/start/{start}/end/{end}/master.m3u8`,
+  with the camera percent-encoded and the review's own bounds. The answers that route gives
+  for a range it cannot serve are those of that section. **Current backing**: a recording
+  file deleted outside Frigate while its row remains is not detected, as Frigate does not
+  detect it.
 
 When Corvette owns login (issue #30), and later its own camera configuration, these
 response shapes stay the same; only their sources change.
