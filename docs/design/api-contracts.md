@@ -776,9 +776,12 @@ motion of a time range for the cameras the caller's role may see:
 - `after` and `before` are required Unix seconds, decimal fractions allowed, finite and not
   negative, with `after < before` and a range of at most 31 days (2678400 s).
 - `cameras` is an optional comma-separated list of camera names. Absent, it means every
-  camera the role may see; present, it narrows that set. A name that is unknown, disabled,
-  or not allowed for the role is dropped without an error, so the route reveals nothing
-  about cameras the caller cannot see.
+  camera the role may see, the set the cameras route lists, off included: a camera that
+  is off now returns the reviews and motion recorded for it while it was on. Present,
+  it narrows that set. A name that is unknown or not allowed for the role is dropped
+  without an error, so the route reveals nothing about cameras the caller cannot see.
+  **Current backing**: the backing selects its database rows by camera name, so the
+  rows of a camera that is off are returned like any other camera's.
 - `include` is an optional comma-separated subset of `reviews,motion`; absent means both,
   and an omitted kind is returned as an empty array.
 - Names and values are percent-decoded (`+` stays `+`). An unknown, repeated, or
@@ -786,6 +789,9 @@ motion of a time range for the cameras the caller's role may see:
   that decodes to invalid UTF-8, or a value outside these rules answers `400` `bad_request`
   with a message naming the reason. An empty `cameras` value names no camera and answers
   empty arrays.
+
+Decision of record (DP-3, `.agents/issue-12/DESIGN-main-page.md`, human-approved
+2026-10-17), quoted verbatim: "yes, keep those events visible".
 
 The query is checked before the configuration is fetched, so a malformed request answers
 `400` even while Frigate's configuration is unavailable. When the role's cameras leave

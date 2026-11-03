@@ -275,6 +275,7 @@ fn fixture_config() -> String {
         "auth": { "roles": {
             "admin": [],
             "frontonly": ["front"],
+            "livingonly": ["living"],
             "ghostonly": ["ghost"]
         } },
         "cameras": {
@@ -414,13 +415,48 @@ async fn a_frontonly_role_never_sees_another_cameras_activity() {
 }
 
 #[tokio::test]
-async fn admin_sees_every_enabled_camera_and_never_the_disabled_one() {
+async fn admin_sees_every_camera_including_the_one_that_is_off() {
     let env = TestEnv::start("admin").await;
     env.seed_database();
 
     let response = env.activity("admin", RANGE).await;
-    assert_eq!(review_cameras(&response), ["front", "back", "side"]);
-    assert_eq!(motion_cameras(&response), ["back", "front", "side"]);
+    assert_eq!(
+        review_cameras(&response),
+        ["front", "back", "side", "living"]
+    );
+    assert_eq!(
+        motion_cameras(&response),
+        ["back", "front", "living", "side"]
+    );
+    env.finish();
+}
+
+#[tokio::test]
+async fn activity_returns_events_of_a_camera_that_is_off_and_hides_cameras_outside_the_role() {
+    let env = TestEnv::start("off-camera").await;
+    env.seed_database();
+
+    let named = env
+        .activity("admin", &format!("{RANGE}&cameras=living"))
+        .await;
+    assert_eq!(review_cameras(&named), ["living"]);
+    assert_eq!(review(&named, "r-living").camera, "living");
+    assert_eq!(motion_cameras(&named), ["living"]);
+
+    let listed = env.activity("livingonly", RANGE).await;
+    assert_eq!(review_cameras(&listed), ["living"]);
+    assert_eq!(motion_cameras(&listed), ["living"]);
+
+    // A role that may not see the camera gets empty arrays, not an error.
+    let refused = env
+        .activity("frontonly", &format!("{RANGE}&cameras=living"))
+        .await;
+    assert!(refused.reviews.is_empty());
+    assert!(refused.motion.is_empty());
+
+    let front = env.activity("frontonly", RANGE).await;
+    assert_eq!(review_cameras(&front), ["front"]);
+    assert_eq!(motion_cameras(&front), ["front"]);
     env.finish();
 }
 

@@ -73,7 +73,7 @@ impl ConfigSource {
         Ok(self
             .config()
             .await?
-            .camera_entries_for_role(role)
+            .camera_entries_for_role_including_off(role)
             .into_iter()
             .map(|entry| entry.name)
             .collect())
