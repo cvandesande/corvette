@@ -95,6 +95,15 @@ for a JSON mapping from a playback request to files on disk, then reads those
 files itself. Any service taking ownership of `/api` must continue answering the
 mapping request until the playback architecture changes.
 
+The playlist route contract "A recorded range plays through one playlist
+route" is served by an nginx-vod location of its own, and the mapping request
+that location makes must reach the same lookup, so the lookup keeps answering
+for as long as the playlist route exists.
+
+**Current backing**: nginx hands that mapping request to the backing's
+existing lookup route through an internal location that sits outside the
+`/corvette/api/v1/media/` prefix.
+
 ## Media paths remain stable during migration
 
 nginx serves `clips/`, `recordings/`, and `exports/` with
@@ -145,13 +154,17 @@ collision class for `/exports/`, `/clips/`, `/stream/`, `/vod/`, `/cache/`,
 are reserved and must never become client-side routes."
 
 The UI test in `crates/corvette-ui/src/lib.rs` enforces this contract from two
-hand-maintained mirrors: `RESERVED_NGINX_PREFIXES`, copied verbatim from the
-vendored deployed configuration (`tests/nginx-parity/vendor/nginx.conf`) with
-each entry keeping the trailing slash nginx matches it with — all carry one
-except `/ws` and `/auth`, which nginx matches without — and `CLIENT_ROUTES`,
-mirroring the `<Route>` declarations the two `App` cfg branches share; a test
-has no way to introspect those declarations. A new client route or a new nginx
-location goes into both lists in the same change.
+hand-maintained mirrors. `RESERVED_NGINX_PREFIXES` mirrors the current
+backing's own nginx locations; its reference copy is the vendored file
+`tests/nginx-parity/vendor/nginx.conf`, a byte-for-byte upstream copy that is
+never edited (per its `PROVENANCE`). Each entry keeps the trailing slash nginx
+matches it with — all carry one except `/ws` and `/auth`, which nginx matches
+without. `CLIENT_ROUTES` mirrors the `<Route>` declarations the two `App` cfg
+branches share; a test has no way to introspect those declarations. A new
+client route goes into `CLIENT_ROUTES`, and a new backing-location prefix goes
+into `RESERVED_NGINX_PREFIXES`; the reserved list gains no `/corvette/` entry,
+because Corvette's own API lives under `/corvette/api/v1/` and no client
+route claims it.
 
 The `recordings` exception stays declared until a deliberate client-route
 rename resolves the collision. The test fails when a declared collision stops
@@ -813,6 +826,51 @@ reviews, so a review's `media` carries only its thumbnail and its clip. Each lin
 
 When Corvette owns login (issue #30), and later its own camera configuration, these
 response shapes stay the same; only their sources change.
+
+## A recorded range plays through one playlist route
+
+Corvette serves a recorded camera range to a browser as one playlist route,
+so every browser can play a clip, scrub it, and start the picture before the
+whole clip has loaded.
+
+The address is
+`GET /corvette/api/v1/media/<camera>/start/<start>/end/<end>/master.m3u8`.
+`<camera>` is a percent-encoded path segment; `<start>` and `<end>` are Unix
+seconds, decimals allowed. Clients do not build this address: they take it
+from a link the server issued, as "Media availability is explicit" requires.
+
+The playlist's variant, index, init and segment URIs are relative and
+resolve under the route's own directory (`…/start/<start>/end/<end>/`), so
+one nginx location covers the whole directory.
+
+The playlist's media type is `application/vnd.apple.mpegurl`. Segments are
+byte-range capable: a request with a `Range` header on a segment answers
+`206` with `Content-Range`.
+
+The route accepts `GET` only. A request that carries no signed-in identity
+is refused by the identity check with its `401` or `403`; a method other
+than `GET` is refused with `403`.
+
+A range with no recording retained, and an empty or inverted range
+(`start >= end`), each answer `404` with code `not_found`, in the JSON
+error shape `{"code": ..., "message": ...}` this file defines for service
+errors above, where the code is the stable value. This `404` is the one
+answer nginx itself generates in this JSON shape.
+
+A clip starts at or before the requested second. **Current backing**: the
+backing pulls the start back to the previous keyframe of the first
+recording, or to the start of that recording when no keyframe can be read.
+
+A clip carries the audio its recording holds; audio presence follows the
+camera's recording settings and the contract promises nothing more.
+
+Every recording row that overlaps the requested range is served.
+**Current backing**: the backing skips a recording whose resulting duration
+is under 100 ms, or 600 s or more, where the resulting duration is the
+recording's duration trimmed to the requested range and pulled back to the
+previous keyframe; a range for which every recording is skipped answers
+like a range with no recording. Whether the deployed recordings ever reach
+600 s is unverified.
 
 ## No camera's audio track is published on any live-view transport yet
 
