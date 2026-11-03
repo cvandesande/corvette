@@ -1,5 +1,4 @@
-//! Frigate's review records and sampled motion as one activity model, with the
-//! components that present it.
+//! The activity model built from Frigate's review records and sampled motion.
 
 use corvette_api::{MotionActivity, ReviewEvent, ReviewSegment, ReviewSeverity};
 use leptos::prelude::*;
@@ -10,9 +9,8 @@ use crate::shell::{Status, StatusGlyph};
 
 pub(crate) const RECENT_ACTIVITY_HOURS: u32 = 6;
 
-/// Width of the buckets Frigate samples motion into, and so the span a single
-/// motion sample stands for. Requested from the API as `scale`, which is why
-/// both sides read this one definition.
+/// Width of the buckets Frigate samples motion into, so the span a sample
+/// stands for. Sent as `scale`, which is why both sides read one definition.
 pub(crate) const MOTION_BUCKET_SECONDS: u32 = 30;
 
 #[component]
@@ -37,9 +35,8 @@ pub(crate) enum EventListLayout {
     Complete,
 }
 
-/// Events a compact list shows on mobile before the reader asks for the rest.
-/// Both the hidden count and the per-card rule read this, so a change cannot
-/// make "Show N more" disagree with what is hidden.
+/// Events a compact list shows before the reader asks for the rest; the hidden
+/// count and the per-card rule both read this, so they cannot disagree.
 const COMPACT_EVENT_LIMIT: usize = 4;
 
 #[component]
@@ -72,10 +69,8 @@ pub(crate) fn ReviewEventList(
                     let snapshot_url = event.data.detections.first().map(|id| {
                         event_snapshot_url(id)
                     });
-                    // Frigate expires an event's snapshot on its own retention,
-                    // separately from the review and its thumbnail, so the
-                    // snapshot is preferred for the box it draws and the review
-                    // crop stands in whenever it has already gone.
+                    // Frigate expires a snapshot on its own retention, so
+                    // the review thumbnail stands in once it has gone.
                     let shows_snapshot = RwSignal::new(snapshot_url.is_some());
                     let detail = review_event_title(&event);
                     let thumbnail_alt = format!("{detail} activity from {}", event.camera);
@@ -165,11 +160,8 @@ fn ReviewPlayback(
             .unwrap_or_else(|| js_sys::Date::now() / 1_000.0),
     };
     let clip_url = StoredValue::new(range.clip_url());
-    // A review outlives the footage it was recorded from, and Frigate answers a
-    // clip request for an expired range with a JSON 400 that a <video> element
-    // reports as an unsupported MIME type. Ask which segments are retained
-    // before naming a media URL, so the reader is told the clip is gone rather
-    // than that their browser cannot play it.
+    // A review outlives its footage: Frigate answers an expired clip range
+    // with a JSON 400, which a <video> reports as an unsupported type.
     let retained_segments = LocalResource::new(move || {
         let camera = range.camera.clone();
         let (start_time, end_time) = (range.start_time, range.end_time);
@@ -344,8 +336,6 @@ fn review_event_title(event: &ReviewEvent) -> String {
         .unwrap_or_else(|| severity_label(event.severity).to_owned())
 }
 
-/// Addresses a tracked object's snapshot, cropped to the object and carrying
-/// the detection box Frigate draws on it.
 fn event_snapshot_url(event_id: &str) -> String {
     let event_id = js_sys::encode_uri_component(event_id);
     format!("/api/events/{event_id}/snapshot.jpg?crop=1&height=360&quality=80")

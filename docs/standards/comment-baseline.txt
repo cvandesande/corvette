@@ -35,7 +35,6 @@
 10.3 4 39 crates/corvette-rtsp-client/tests/inv1_no_container_format.rs
 10.3 4 39 crates/corvette-rtsp-client/tests/inv7_no_unbounded_channel.rs
 18.7 50 268 crates/corvette-rtsp-client/tests/session.rs
-3.3 19 569 crates/corvette-ui/src/activity.rs
 32.0 212 663 crates/corvette-ui/src/all_cameras.rs
 8.6 23 269 crates/corvette-ui/src/local_time.rs
 9.0 35 391 crates/corvette-ui/src/media.rs
