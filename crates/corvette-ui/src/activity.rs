@@ -1,8 +1,15 @@
 //! The activity model built from Frigate's review records and sampled motion.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use corvette_api::{ActivityReview, MotionActivity, ReviewEvent, ReviewSegment, ReviewSeverity};
 use leptos::prelude::*;
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::{JsCast, JsValue};
+use web_sys::{Event, HtmlVideoElement};
 
+use crate::expanded_view::ensure_hls_script_loaded;
 use crate::local_time::format_event_time;
 use crate::media::RecordingRange;
 use crate::shell::{Status, StatusGlyph};
@@ -145,7 +152,6 @@ fn ReviewPlayback(
     review: ReviewEvent,
     selected_review: RwSignal<Option<ReviewEvent>>,
 ) -> impl IntoView {
-    let playback_failed = RwSignal::new(false);
     let close_button = NodeRef::<leptos::html::Button>::new();
     Effect::new(move |_| {
         if let Some(button) = close_button.get() {
@@ -194,22 +200,7 @@ fn ReviewPlayback(
                         detail="Asking the server for this alert's clip."
                         glyph=StatusGlyph::Recording
                     /> }.into_any(),
-                    Some(ClipOutcome::Playable(url)) => view! {
-                        <video
-                            class="recording-player"
-                            src=url.clone()
-                            data-clip-url=url
-                            controls
-                            autoplay
-                            playsinline
-                            on:error=move |_| playback_failed.set(true)
-                        >"This browser cannot play the event recording."</video>
-                        {move || playback_failed.get().then(|| view! {
-                            <p class="recording-error" role="alert">
-                                "The high-resolution clip is not available from Frigate."
-                            </p>
-                        })}
-                    }.into_any(),
+                    Some(ClipOutcome::Playable(url)) => view! { <ClipPlayer url=url/> }.into_any(),
                     Some(outcome) => view! {
                         <>
                             <p class="recording-error" role="alert">{outcome.message()}</p>
@@ -223,6 +214,251 @@ fn ReviewPlayback(
             </section>
         </div>
     }
+}
+
+#[component]
+fn ClipPlayer(url: String) -> impl IntoView {
+    let attempt = RwSignal::new(0u32);
+    let failed = RwSignal::new(false);
+    view! {
+        // Keyed so a retry builds a new element: a plain reactive block reuses the
+        // same <video>, keeping what the failed attempt left on it.
+        <For
+            each=move || [attempt.get()]
+            key=|attempt| *attempt
+            children=move |_| view! { <ClipVideo url=url.clone() failed/> }
+        />
+        {move || failed.get().then(|| view! {
+            <>
+                <p class="recording-error" role="alert">
+                    "This clip did not play in this browser."
+                </p>
+                <button
+                    type="button"
+                    on:click=move |_| {
+                        failed.set(false);
+                        attempt.update(|attempt| *attempt += 1);
+                    }
+                >"Retry"</button>
+            </>
+        })}
+    }
+}
+
+#[component]
+fn ClipVideo(url: String, failed: RwSignal<bool>) -> impl IntoView {
+    let video_ref = NodeRef::<leptos::html::Video>::new();
+    let ladder = StoredValue::new_local(None::<ClipLadder>);
+    let playlist_url = url.clone();
+    Effect::new(move |_| {
+        let Some(video) = video_ref.get() else {
+            return;
+        };
+        ladder.set_value(Some(ClipLadder::start(
+            &video,
+            playlist_url.clone(),
+            failed.write_only(),
+        )));
+    });
+    on_cleanup(move || {
+        if let Some(Some(ladder)) = ladder.try_update_value(Option::take) {
+            drop(ladder);
+        }
+    });
+    view! {
+        <video
+            class="recording-player"
+            data-clip-url=url
+            controls
+            autoplay
+            playsinline
+            node_ref=video_ref
+        >"This browser cannot play the event recording."</video>
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClipRung {
+    WaitingForScript,
+    HlsJs,
+    Native,
+    Failed,
+}
+
+struct ClipLadderState {
+    stopped: bool,
+    rung: ClipRung,
+    video: HtmlVideoElement,
+    playlist_url: String,
+    hls_instance: JsValue,
+    on_hls_error: Option<Closure<dyn FnMut(JsValue, JsValue)>>,
+    on_video_error: Option<Closure<dyn FnMut(Event)>>,
+    playback_failed: WriteSignal<bool>,
+}
+
+/// Every `Closure` handed to hls.js or the element stays in the ladder until the ladder itself
+/// drops: freeing a `Closure` while JavaScript is inside its call would crash the page.
+struct ClipLadder {
+    state: Rc<RefCell<ClipLadderState>>,
+}
+
+impl ClipLadder {
+    fn start(
+        video: &HtmlVideoElement,
+        playlist_url: String,
+        playback_failed: WriteSignal<bool>,
+    ) -> Self {
+        let state = Rc::new(RefCell::new(ClipLadderState {
+            stopped: false,
+            rung: ClipRung::WaitingForScript,
+            video: video.clone(),
+            playlist_url,
+            hls_instance: JsValue::UNDEFINED,
+            on_hls_error: None,
+            on_video_error: None,
+            playback_failed,
+        }));
+        let on_video_error = {
+            let shared = Rc::clone(&state);
+            Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+                let Ok(mut state) = shared.try_borrow_mut() else {
+                    return;
+                };
+                if state.stopped {
+                    return;
+                }
+                match state.rung {
+                    ClipRung::WaitingForScript | ClipRung::Failed => {}
+                    ClipRung::HlsJs => start_native(&mut state),
+                    ClipRung::Native => {
+                        state.rung = ClipRung::Failed;
+                        state.playback_failed.set(true);
+                    }
+                }
+            })
+        };
+        video.set_onerror(Some(on_video_error.as_ref().unchecked_ref()));
+        state.borrow_mut().on_video_error = Some(on_video_error);
+        let state_for_script = Rc::clone(&state);
+        ensure_hls_script_loaded(move || start_hls_rung(&state_for_script));
+        Self { state }
+    }
+}
+
+impl Drop for ClipLadder {
+    fn drop(&mut self) {
+        let mut state = self.state.borrow_mut();
+        state.stopped = true;
+        state.video.set_onerror(None);
+        if let Ok(destroy) =
+            js_sys::Reflect::get(&state.hls_instance, &JsValue::from_str("destroy"))
+                .and_then(wasm_bindgen::JsCast::dyn_into::<js_sys::Function>)
+        {
+            let _ = destroy.call0(&state.hls_instance);
+        }
+        state.hls_instance = JsValue::UNDEFINED;
+        state.on_hls_error = None;
+        state.on_video_error = None;
+    }
+}
+
+fn start_hls_rung(state: &Rc<RefCell<ClipLadderState>>) {
+    let mut borrowed = state.borrow_mut();
+    // The script can finish loading after the dialog closed or Retry re-mounted: a stopped
+    // ladder ignores it.
+    if borrowed.stopped {
+        return;
+    }
+    borrowed.rung = ClipRung::HlsJs;
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    // No `Hls.isSupported()` gate: its codec detection is unreliable on iOS; a fatal error
+    // falls to the native rung instead.
+    let Ok(hls_ctor) = js_sys::Reflect::get(&window, &JsValue::from_str("Hls"))
+        .and_then(wasm_bindgen::JsCast::dyn_into::<js_sys::Function>)
+    else {
+        start_native(&mut borrowed);
+        return;
+    };
+    // `preferManagedMediaSource: true` overrides hls.js's shipped default, which picks the
+    // plain `MediaSource` global on iOS 17.1+ instead of the working `ManagedMediaSource`.
+    let config = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &config,
+        &JsValue::from_str("preferManagedMediaSource"),
+        &JsValue::TRUE,
+    );
+    let Ok(hls_instance) = js_sys::Reflect::construct(&hls_ctor, &js_sys::Array::of1(&config))
+    else {
+        start_native(&mut borrowed);
+        return;
+    };
+    let on_hls_error = {
+        let shared = Rc::clone(state);
+        Closure::<dyn FnMut(JsValue, JsValue)>::new(move |_event: JsValue, data: JsValue| {
+            let Ok(mut inner) = shared.try_borrow_mut() else {
+                return;
+            };
+            if inner.stopped || inner.rung != ClipRung::HlsJs {
+                return;
+            }
+            let fatal = js_sys::Reflect::get(&data, &JsValue::from_str("fatal"))
+                .ok()
+                .is_some_and(|value| value.is_truthy());
+            if fatal {
+                start_native(&mut inner);
+            }
+        })
+    };
+    if let Ok(on_fn) = js_sys::Reflect::get(&hls_instance, &JsValue::from_str("on"))
+        .and_then(wasm_bindgen::JsCast::dyn_into::<js_sys::Function>)
+    {
+        // "hlsError" is the literal wire value of `Hls.Events.ERROR`.
+        let _ = on_fn.call2(
+            &hls_instance,
+            &JsValue::from_str("hlsError"),
+            on_hls_error.as_ref().unchecked_ref(),
+        );
+    }
+    borrowed.on_hls_error = Some(on_hls_error);
+    borrowed.hls_instance = hls_instance.clone();
+    if let Ok(attach_media) = js_sys::Reflect::get(&hls_instance, &JsValue::from_str("attachMedia"))
+        .and_then(wasm_bindgen::JsCast::dyn_into::<js_sys::Function>)
+    {
+        let _ = attach_media.call1(&hls_instance, &borrowed.video);
+    }
+    if let Ok(load_source) = js_sys::Reflect::get(&hls_instance, &JsValue::from_str("loadSource"))
+        .and_then(wasm_bindgen::JsCast::dyn_into::<js_sys::Function>)
+    {
+        let _ = load_source.call1(&hls_instance, &JsValue::from_str(&borrowed.playlist_url));
+    }
+    let _ = borrowed.video.play();
+}
+
+/// Advanced to from the fatal `hlsError` handler or the element's `error` handler. The
+/// element's `error` handler is what detects a native rung that fails.
+fn start_native(state: &mut ClipLadderState) {
+    state.rung = ClipRung::Native;
+    // hls.js's destroy() also unbinds every listener it owns, including this ladder's own
+    // `"hlsError"` subscription, so no separate `off()` is needed.
+    if let Ok(destroy) = js_sys::Reflect::get(&state.hls_instance, &JsValue::from_str("destroy"))
+        .and_then(wasm_bindgen::JsCast::dyn_into::<js_sys::Function>)
+    {
+        let _ = destroy.call0(&state.hls_instance);
+    }
+    state.hls_instance = JsValue::UNDEFINED;
+    if state
+        .video
+        .can_play_type("application/vnd.apple.mpegurl")
+        .is_empty()
+    {
+        state.rung = ClipRung::Failed;
+        state.playback_failed.set(true);
+        return;
+    }
+    state.video.set_src(&state.playlist_url);
+    let _ = state.video.play();
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

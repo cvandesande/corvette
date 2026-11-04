@@ -472,6 +472,7 @@ test.describe("recording timeline", () => {
 
 test("recent events are filtered review activity from the last six hours", async ({ page }) => {
   const activityRequests = [];
+  const playlistRequests = [];
   let alertBounds;
   let mergedMotionPreviewPath;
   await page.route("**/corvette/api/v1/cameras", (route) => route.fulfill({ json: { cameras: [] } }));
@@ -542,9 +543,17 @@ test("recent events are filtered review activity from the last six hours", async
       },
     });
   });
-  await page.route("**/corvette/api/v1/media/**", (route) =>
-    route.fulfill({ contentType: "application/vnd.apple.mpegurl", body: "" }),
-  );
+  await page.route("**/corvette/api/v1/media/**", (route) => {
+    const requestUrl = route.request().url();
+    if (requestUrl.endsWith("/master.m3u8")) {
+      playlistRequests.push(requestUrl);
+      return route.fulfill({
+        contentType: "application/vnd.apple.mpegurl",
+        body: "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nsegment.ts\n#EXT-X-ENDLIST\n",
+      });
+    }
+    return route.fulfill({ status: 404 });
+  });
   await page.route("**/clips/review/*.webp", (route) =>
     route.fulfill({ contentType: "image/webp", body: Buffer.alloc(0) }),
   );
@@ -565,17 +574,29 @@ test("recent events are filtered review activity from the last six hours", async
   await page.getByRole("button", { name: "Alerts", exact: true }).click();
   await expect(cards).toHaveCount(1);
   await expect(cards).toContainText("person");
+  const hlsScriptRequests = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/vendor/hls.min.js") {
+      hlsScriptRequests.push(request.url());
+    }
+  });
   await cards.getByRole("button").click();
   await expect(page.getByRole("dialog", { name: "Selected event playback" })).toBeVisible();
   await expect(page.locator(".playback-modal")).toHaveCSS("position", "fixed");
   const alertClipUrl =
     `/corvette/api/v1/media/front/start/${alertBounds.start}` +
     `/end/${alertBounds.end}/master.m3u8`;
-  await expect(page.locator(".review-playback video")).toHaveAttribute("src", alertClipUrl);
   await expect(page.locator(".review-playback video")).toHaveAttribute(
     "data-clip-url",
     alertClipUrl,
   );
+  await expect.poll(() =>
+    playlistRequests.some((request) => {
+      const recorded = new URL(request);
+      return `${recorded.pathname}${recorded.search}` === alertClipUrl;
+    }),
+  ).toBe(true);
+  await expect.poll(() => hlsScriptRequests.length).toBe(1);
   const activityUrl = new URL(activityRequests[0]);
   expect(activityUrl.pathname).toBe("/corvette/api/v1/activity");
   expect(activityUrl.searchParams.get("cameras")).toBe("front");
@@ -725,6 +746,7 @@ test("a review whose footage expired reports the absence, not a media error", as
 
 test("events route browses a selected day and filters severity", async ({ page }) => {
   const activityRequests = [];
+  const playlistRequests = [];
   let alertBounds;
   await page.setViewportSize({ width: 390, height: 844 });
   await page.route("**/api/recordings/summary?*", (route) =>
@@ -803,9 +825,17 @@ test("events route browses a selected day and filters severity", async ({ page }
       },
     });
   });
-  await page.route("**/corvette/api/v1/media/**", (route) =>
-    route.fulfill({ contentType: "application/vnd.apple.mpegurl", body: "" }),
-  );
+  await page.route("**/corvette/api/v1/media/**", (route) => {
+    const requestUrl = route.request().url();
+    if (requestUrl.endsWith("/master.m3u8")) {
+      playlistRequests.push(requestUrl);
+      return route.fulfill({
+        contentType: "application/vnd.apple.mpegurl",
+        body: "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nsegment.ts\n#EXT-X-ENDLIST\n",
+      });
+    }
+    return route.fulfill({ status: 404 });
+  });
   await page.route("**/clips/review/*.webp", (route) =>
     route.fulfill({ contentType: "image/webp", body: Buffer.alloc(0) }),
   );
@@ -838,11 +868,16 @@ test("events route browses a selected day and filters severity", async ({ page }
   const alertClipUrl =
     `/corvette/api/v1/media/front/start/${alertBounds.start}` +
     `/end/${alertBounds.end}/master.m3u8`;
-  await expect(page.locator(".review-playback video")).toHaveAttribute("src", alertClipUrl);
   await expect(page.locator(".review-playback video")).toHaveAttribute(
     "data-clip-url",
     alertClipUrl,
   );
+  await expect.poll(() =>
+    playlistRequests.some((request) => {
+      const recorded = new URL(request);
+      return `${recorded.pathname}${recorded.search}` === alertClipUrl;
+    }),
+  ).toBe(true);
   const activityUrl = new URL(activityRequests[0]);
   expect(activityUrl.pathname).toBe("/corvette/api/v1/activity");
   expect(activityUrl.searchParams.get("cameras")).toBe("front");

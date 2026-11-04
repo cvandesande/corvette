@@ -596,6 +596,10 @@ thread_local! {
     static HLS_JS_LOAD: RefCell<ScriptLoad> = const { RefCell::new(ScriptLoad::NotRequested) };
 }
 
+pub(crate) fn ensure_hls_script_loaded(on_ready: impl FnOnce() + 'static) {
+    ensure_script_loaded(&HLS_JS_LOAD, HLS_SCRIPT_SRC, on_ready);
+}
+
 fn ensure_script_loaded(
     cell: &'static std::thread::LocalKey<RefCell<ScriptLoad>>,
     src: &'static str,

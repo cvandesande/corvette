@@ -29,6 +29,7 @@ const activityReview = (id, bounds, clipUrl) => ({
 
 async function stubAlertModal(page, firstActivityAnswer, card) {
   const activityRequests = [];
+  const playlistRequests = [];
   const fixture = { bounds: null, playlist: null };
   await page.route("**/corvette/api/v1/cameras", (route) =>
     route.fulfill({ json: { cameras: [] } }),
@@ -67,13 +68,21 @@ async function stubAlertModal(page, firstActivityAnswer, card) {
   await page.route("**/clips/review/*.webp", (route) =>
     route.fulfill({ contentType: "image/webp", body: Buffer.alloc(0) }),
   );
-  await page.route("**/corvette/api/v1/media/**", (route) =>
-    route.fulfill({ contentType: "application/vnd.apple.mpegurl", body: "" }),
-  );
-  return { activityRequests, fixture };
+  await page.route("**/corvette/api/v1/media/**", (route) => {
+    const requestUrl = route.request().url();
+    if (requestUrl.endsWith("/master.m3u8")) {
+      playlistRequests.push(requestUrl);
+      return route.fulfill({
+        contentType: "application/vnd.apple.mpegurl",
+        body: "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nsegment.ts\n#EXT-X-ENDLIST\n",
+      });
+    }
+    return route.fulfill({ status: 404 });
+  });
+  return { activityRequests, fixture, playlistRequests };
 }
 
-async function assertUnavailabilityThenRetry(page, activityRequests, fixture, message) {
+async function assertUnavailabilityThenRetry(page, activityRequests, fixture, playlistRequests, message) {
   await page.goto("/");
   await page.locator(".event-card").getByRole("button").click();
   const playback = page.getByRole("dialog", { name: "Selected event playback" });
@@ -91,7 +100,12 @@ async function assertUnavailabilityThenRetry(page, activityRequests, fixture, me
   await retry.click();
   await expect.poll(() => activityRequests.length).toBe(2);
   await expect(video).toHaveAttribute("data-clip-url", fixture.playlist);
-  await expect(video).toHaveAttribute("src", fixture.playlist);
+  await expect.poll(() =>
+    playlistRequests.some((request) => {
+      const recorded = new URL(request);
+      return `${recorded.pathname}${recorded.search}` === fixture.playlist;
+    }),
+  ).toBe(true);
   await expect(retry).toHaveCount(0);
   await expect(playback.getByText(message)).toHaveCount(0);
 }
@@ -107,7 +121,7 @@ test("an activity answer without the review says the server did not return the a
       }),
     { openReview: false },
   );
-  await assertUnavailabilityThenRetry(page, stubbed.activityRequests, stubbed.fixture,
+  await assertUnavailabilityThenRetry(page, stubbed.activityRequests, stubbed.fixture, stubbed.playlistRequests,
     "The server did not return this alert.");
 });
 
@@ -123,7 +137,7 @@ test("a review with no end says the alert is still in progress", async ({ page }
       }),
     { openReview: true },
   );
-  await assertUnavailabilityThenRetry(page, stubbed.activityRequests, stubbed.fixture,
+  await assertUnavailabilityThenRetry(page, stubbed.activityRequests, stubbed.fixture, stubbed.playlistRequests,
     "This alert is still in progress.");
   const activityUrl = new URL(stubbed.activityRequests[0]);
   expect(Number(activityUrl.searchParams.get("after"))).toBe(stubbed.fixture.bounds.start);
@@ -138,12 +152,12 @@ test("an activity answer of 503 says the clip could not be loaded", async ({ pag
     (route) => route.fulfill({ status: 503, json: { error: "unavailable" } }),
     { openReview: false },
   );
-  await assertUnavailabilityThenRetry(page, stubbed.activityRequests, stubbed.fixture,
+  await assertUnavailabilityThenRetry(page, stubbed.activityRequests, stubbed.fixture, stubbed.playlistRequests,
     "Could not load this alert's clip.");
 });
 
 test("an aborted activity request says the clip could not be loaded", async ({ page }) => {
   const stubbed = await stubAlertModal(page, (route) => route.abort(), { openReview: false });
-  await assertUnavailabilityThenRetry(page, stubbed.activityRequests, stubbed.fixture,
+  await assertUnavailabilityThenRetry(page, stubbed.activityRequests, stubbed.fixture, stubbed.playlistRequests,
     "Could not load this alert's clip.");
 });
