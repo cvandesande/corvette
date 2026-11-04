@@ -6,7 +6,7 @@ use std::future::Future;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -24,6 +24,16 @@ pub const SOCKET_PATH_ENV: &str = "CORVETTE_API_SOCKET";
 const MAX_REQUEST_HEADER_BYTES: usize = 8192;
 
 pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Seconds since the Unix epoch, the unit of every stored `start` and `end`.
+type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
+
+fn system_clock() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
 
 /// One structured log line; this workspace has no logging framework.
 pub(crate) fn log_event(unit: &str, event: &str, detail: impl std::fmt::Display) {
@@ -47,7 +57,6 @@ enum Outcome {
     ClosedEarly,
 }
 
-#[derive(Debug)]
 pub struct ApiServer {
     listener: UnixListener,
     socket_path: PathBuf,
@@ -55,6 +64,18 @@ pub struct ApiServer {
     config: Arc<ConfigSource>,
     db_path: PathBuf,
     media_root: PathBuf,
+    clock: Clock,
+}
+
+impl std::fmt::Debug for ApiServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiServer")
+            .field("socket_path", &self.socket_path)
+            .field("connection_timeout", &self.connection_timeout)
+            .field("db_path", &self.db_path)
+            .field("media_root", &self.media_root)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ApiServer {
@@ -85,12 +106,19 @@ impl ApiServer {
             config,
             db_path: db_path.to_path_buf(),
             media_root: PathBuf::from(activity::DEFAULT_MEDIA_ROOT),
+            clock: Arc::new(system_clock),
         })
     }
 
     #[must_use]
     pub fn with_media_root(mut self, media_root: &Path) -> Self {
         self.media_root = media_root.to_path_buf();
+        self
+    }
+
+    #[must_use]
+    pub fn with_clock(mut self, clock: impl Fn() -> f64 + Send + Sync + 'static) -> Self {
+        self.clock = Arc::new(clock);
         self
     }
 
@@ -107,6 +135,7 @@ impl ApiServer {
             config,
             db_path,
             media_root,
+            clock,
         } = self;
         tokio::pin!(shutdown);
         loop {
@@ -118,6 +147,7 @@ impl ApiServer {
                         let config = Arc::clone(&config);
                         let db_path = db_path.clone();
                         let media_root = media_root.clone();
+                        let clock = Arc::clone(&clock);
                         tokio::spawn(async move {
                             handle_connection(
                                 stream,
@@ -125,6 +155,7 @@ impl ApiServer {
                                 config,
                                 &db_path,
                                 &media_root,
+                                &clock,
                             )
                             .await;
                         });
@@ -159,10 +190,11 @@ async fn handle_connection(
     config: Arc<ConfigSource>,
     db_path: &Path,
     media_root: &Path,
+    clock: &Clock,
 ) {
     let outcome = tokio::time::timeout(
         timeout,
-        read_route_respond(&mut stream, &config, db_path, media_root),
+        read_route_respond(&mut stream, &config, db_path, media_root, clock),
     )
     .await;
     match outcome {
@@ -190,6 +222,7 @@ async fn read_route_respond(
     config: &ConfigSource,
     db_path: &Path,
     media_root: &Path,
+    clock: &Clock,
 ) -> std::io::Result<Outcome> {
     let block = match read_header_block(stream).await {
         HeaderRead::Complete(block) => block,
@@ -202,7 +235,7 @@ async fn read_route_respond(
         HeaderRead::Closed => return Ok(Outcome::ClosedEarly),
     };
     let response = match parse_request(&block) {
-        Ok(request) => route(&request, config, db_path, media_root).await,
+        Ok(request) => route(&request, config, db_path, media_root, clock).await,
         Err(reason) => bad_request(&reason),
     };
     write_response(stream, &response).await?;
@@ -409,6 +442,7 @@ async fn route(
     config: &ConfigSource,
     db_path: &Path,
     media_root: &Path,
+    clock: &Clock,
 ) -> Response {
     let Some(_user) = request
         .remote_user
@@ -424,7 +458,7 @@ async fn route(
         return not_found();
     };
     match route {
-        Route::Activity => activity(request, config, db_path, media_root).await,
+        Route::Activity => activity(request, config, db_path, media_root, clock).await,
         Route::Cameras => cameras(config, &request.remote_role).await,
         Route::Health => health(config, db_path).await,
     }
@@ -449,7 +483,9 @@ async fn activity(
     config: &ConfigSource,
     db_path: &Path,
     media_root: &Path,
+    clock: &Clock,
 ) -> Response {
+    let now = clock();
     let query = match ActivityQuery::parse(&request.query) {
         Ok(query) => query,
         Err(reason) => return bad_request(&reason),
@@ -468,16 +504,16 @@ async fn activity(
         cameras.retain(|name| requested.contains(name));
     }
     let response = if cameras.is_empty() {
-        activity::activity_response(&query, ActivityRows::default(), media_root)
+        activity::activity_response(&query, ActivityRows::default(), media_root, now)
     } else {
         // rusqlite and the media `stat` calls are synchronous: off the async worker.
         let db_path = db_path.to_path_buf();
         let media_root = media_root.to_path_buf();
         let read = tokio::task::spawn_blocking(move || -> rusqlite::Result<ActivityResponse> {
             let mut connection = database::open_read_only(&db_path)?;
-            let rows = activity::read_activity(&mut connection, &query, &cameras)?;
+            let rows = activity::read_activity(&mut connection, &query, &cameras, now)?;
             drop(connection);
-            Ok(activity::activity_response(&query, rows, &media_root))
+            Ok(activity::activity_response(&query, rows, &media_root, now))
         })
         .await;
         match read {

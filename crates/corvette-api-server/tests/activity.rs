@@ -23,6 +23,9 @@ const RECORDINGS_DDL: &str = r#"CREATE TABLE "recordings" ("id" VARCHAR(30) NOT 
 /// Every request uses this range; the seeded activity lies inside it.
 const RANGE: &str = "after=1000&before=2000";
 
+/// The request moment the clock-controlled server answers.
+const FIXED_NOW: f64 = 1_800.0;
+
 struct TestEnv {
     socket: PathBuf,
     dir: PathBuf,
@@ -36,15 +39,30 @@ impl TestEnv {
         Self::with_config_behaviors(
             tag,
             vec![Behavior::Respond(config_response(&fixture_config()))],
+            None,
         )
         .await
     }
 
     async fn refusing(tag: &str) -> Self {
-        Self::with_config_behaviors(tag, vec![Behavior::Refuse]).await
+        Self::with_config_behaviors(tag, vec![Behavior::Refuse], None).await
     }
 
-    async fn with_config_behaviors(tag: &str, behaviors: Vec<Behavior>) -> Self {
+    /// A server whose clock answers `now` for every request.
+    async fn start_with_clock(tag: &str, now: f64) -> Self {
+        Self::with_config_behaviors(
+            tag,
+            vec![Behavior::Respond(config_response(&fixture_config()))],
+            Some(now),
+        )
+        .await
+    }
+
+    async fn with_config_behaviors(
+        tag: &str,
+        behaviors: Vec<Behavior>,
+        clock: Option<f64>,
+    ) -> Self {
         let (_fixture, config_addr) = Fixture::start(behaviors).await;
         let dir = unique_dir(tag);
         let _ = std::fs::remove_dir_all(&dir);
@@ -56,6 +74,10 @@ impl TestEnv {
         let server = ApiServer::bind(&socket, CONNECTION_TIMEOUT, config, &db_path)
             .expect("bind")
             .with_media_root(&media_root);
+        let server = match clock {
+            Some(now) => server.with_clock(move || now),
+            None => server,
+        };
         let socket = server.socket_path().to_path_buf();
         let handle = tokio::spawn(server.serve_until(std::future::pending::<()>()));
         Self {
@@ -78,6 +100,44 @@ impl TestEnv {
             .expect("create reviewsegment");
         db.execute_batch(RECORDINGS_DDL).expect("create recordings");
         seed_activity(&db);
+    }
+
+    /// One review with no end and, on request, one recording row overlapping it.
+    fn seed_in_progress(&self, with_recording: bool) {
+        let db = Connection::open(&self.db_path).expect("create test database");
+        db.execute_batch(REVIEWSEGMENT_DDL)
+            .expect("create reviewsegment");
+        db.execute_batch(RECORDINGS_DDL).expect("create recordings");
+        db.execute(
+            "INSERT INTO reviewsegment \
+             (id, camera, start_time, end_time, severity, thumb_path, data) \
+             VALUES (?, ?, ?, ?, ?, ?, '{}')",
+            params![
+                "live",
+                "front",
+                1_500.0,
+                None::<f64>,
+                "alert",
+                "/media/frigate/thumb.webp"
+            ],
+        )
+        .expect("insert review");
+        if with_recording {
+            db.execute(
+                "INSERT INTO recordings \
+                 (id, camera, path, start_time, end_time, duration, motion) \
+                 VALUES (?, ?, ?, ?, ?, 50.0, ?)",
+                params![
+                    "live-rec",
+                    "front",
+                    "/front/1550.mp4",
+                    1_550.0,
+                    1_600.0,
+                    Some(1)
+                ],
+            )
+            .expect("insert recording");
+        }
     }
 
     fn write_media(&self, rel: &str) {
@@ -510,8 +570,8 @@ async fn a_thumbnail_path_escaping_the_media_root_is_not_linked() {
 }
 
 #[tokio::test]
-async fn a_clip_url_appears_only_for_an_ended_review_with_a_recording() {
-    let env = TestEnv::start("clip").await;
+async fn a_clip_url_appears_for_a_review_with_an_overlapping_recording() {
+    let env = TestEnv::start_with_clock("clip", FIXED_NOW).await;
     env.seed_database();
 
     let response = env
@@ -524,8 +584,44 @@ async fn a_clip_url_appears_only_for_an_ended_review_with_a_recording() {
         })
     );
     assert_eq!(review(&response, "r-back").media.clip, None);
-    // Ongoing reviews have no clip even with recordings present.
-    assert_eq!(review(&response, "r-side").media.clip, None);
+    // A review with no end links up to the request moment when a recording row overlaps.
+    assert_eq!(
+        review(&response, "r-side").media.clip,
+        Some(MediaLink {
+            url: "/corvette/api/v1/media/side/start/1520/end/1800/master.m3u8".to_owned()
+        })
+    );
+    env.finish();
+}
+
+#[tokio::test]
+async fn an_in_progress_review_links_a_clip_to_the_request_moment() {
+    let env = TestEnv::start_with_clock("clip-in-progress", FIXED_NOW).await;
+    env.seed_in_progress(true);
+
+    let response = env
+        .activity("admin", &format!("{RANGE}&include=reviews"))
+        .await;
+    assert_eq!(
+        review(&response, "live").media.clip,
+        Some(MediaLink {
+            url: "/corvette/api/v1/media/front/start/1500/end/1800/master.m3u8".to_owned()
+        })
+    );
+    env.finish();
+}
+
+#[tokio::test]
+async fn an_in_progress_review_without_an_overlapping_recording_has_no_clip() {
+    let env = TestEnv::start_with_clock("clip-in-progress-bare", FIXED_NOW).await;
+    env.seed_in_progress(false);
+
+    let response = env
+        .activity("admin", &format!("{RANGE}&include=reviews"))
+        .await;
+    let live = review(&response, "live");
+    assert!(live.end.is_none());
+    assert_eq!(live.media.clip, None);
     env.finish();
 }
 

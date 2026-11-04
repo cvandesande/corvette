@@ -187,13 +187,14 @@ pub fn read_activity(
     connection: &mut Connection,
     query: &ActivityQuery,
     cameras: &[String],
+    now: f64,
 ) -> rusqlite::Result<ActivityRows> {
     if cameras.is_empty() || !(query.include_reviews || query.include_motion) {
         return Ok(ActivityRows::default());
     }
     let transaction = connection.transaction()?;
     let reviews = if query.include_reviews {
-        read_reviews(&transaction, query, cameras)?
+        read_reviews(&transaction, query, cameras, now)?
     } else {
         Vec::new()
     };
@@ -283,6 +284,7 @@ fn read_reviews(
     transaction: &rusqlite::Transaction<'_>,
     query: &ActivityQuery,
     cameras: &[String],
+    now: f64,
 ) -> rusqlite::Result<Vec<ReviewRow>> {
     let placeholders = camera_placeholders(cameras);
     let sql = format!(
@@ -313,13 +315,17 @@ fn read_reviews(
     )?;
     for review in &mut reviews {
         review.has_recording = match review.end {
-            None => false,
             // `EXISTS` always returns one row holding 0 or 1, so the value is
             // read rather than asking whether a row came back.
             Some(end) => overlaps
                 .query_row(params![review.camera.as_str(), end, review.start], |row| {
                     row.get(0)
                 })?,
+            None if now > review.start => overlaps
+                .query_row(params![review.camera.as_str(), now, review.start], |row| {
+                    row.get(0)
+                })?,
+            None => false,
         };
     }
     Ok(reviews)
@@ -428,6 +434,7 @@ pub fn activity_response(
     query: &ActivityQuery,
     rows: ActivityRows,
     media_root: &Path,
+    now: f64,
 ) -> ActivityResponse {
     ActivityResponse {
         after: query.after,
@@ -449,7 +456,7 @@ pub fn activity_response(
                 audio: row.audio,
                 media: ReviewMedia {
                     thumbnail: thumbnail_link(&row.thumb_path, media_root),
-                    clip: clip_link(&row.camera, row.start, row.end, row.has_recording),
+                    clip: clip_link(&row.camera, row.start, row.end, row.has_recording, now),
                 },
             })
             .collect(),
@@ -480,8 +487,14 @@ fn thumbnail_link(thumb_path: &str, media_root: &Path) -> Option<MediaLink> {
     })
 }
 
-fn clip_link(camera: &str, start: f64, end: Option<f64>, has_recording: bool) -> Option<MediaLink> {
-    let end = end?;
+fn clip_link(
+    camera: &str,
+    start: f64,
+    end: Option<f64>,
+    has_recording: bool,
+    now: f64,
+) -> Option<MediaLink> {
+    let end = end.unwrap_or(now);
     if !has_recording {
         return None;
     }
@@ -521,6 +534,9 @@ mod tests {
 
     const REVIEWSEGMENT_DDL: &str = r#"CREATE TABLE "reviewsegment" ("id" VARCHAR(30) NOT NULL PRIMARY KEY, "camera" VARCHAR(20) NOT NULL, "start_time" DATETIME NOT NULL, "end_time" DATETIME, "severity" VARCHAR(30) NOT NULL, "thumb_path" VARCHAR(255) NOT NULL, "data" JSON NOT NULL)"#;
     const RECORDINGS_DDL: &str = r#"CREATE TABLE "recordings" ("id" VARCHAR(30) NOT NULL PRIMARY KEY, "camera" VARCHAR(20) NOT NULL, "path" VARCHAR(255) NOT NULL, "start_time" DATETIME NOT NULL, "end_time" DATETIME NOT NULL, "duration" REAL NOT NULL, "motion" INTEGER)"#;
+
+    /// The request moment every test in this module fixes the clock to.
+    const NOW: f64 = 1_950.0;
 
     /// An in-memory database with the two Frigate tables this read uses.
     fn frigate_database() -> Connection {
@@ -680,9 +696,11 @@ mod tests {
         c: f64,
         cameras: &[String],
     ) {
-        let whole = read_activity(connection, &full_query(a, c), cameras).expect("whole range");
-        let first = read_activity(connection, &full_query(a, b), cameras).expect("first half");
-        let second = read_activity(connection, &full_query(b, c), cameras).expect("second half");
+        let whole =
+            read_activity(connection, &full_query(a, c), cameras, NOW).expect("whole range");
+        let first = read_activity(connection, &full_query(a, b), cameras, NOW).expect("first half");
+        let second =
+            read_activity(connection, &full_query(b, c), cameras, NOW).expect("second half");
 
         let concatenated: Vec<MotionBucket> =
             first.motion.into_iter().chain(second.motion).collect();
@@ -717,6 +735,7 @@ mod tests {
             &mut connection,
             &motion_query(990.0, 1_100.0),
             &camera_list(&["front", "back"]),
+            NOW,
         )
         .expect("read");
         assert_eq!(
@@ -746,6 +765,7 @@ mod tests {
             &mut connection,
             &motion_query(990.0, 1_100.0),
             &camera_list(&["front"]),
+            NOW,
         )
         .expect("read");
         assert!(rows.motion.is_empty());
@@ -761,6 +781,7 @@ mod tests {
             &mut connection,
             &motion_query(990.0, 1_025.0),
             &camera_list(&["front"]),
+            NOW,
         )
         .expect("read");
         assert_eq!(
@@ -790,6 +811,7 @@ mod tests {
             &mut connection,
             &motion_query(1_000.0, 1_100.0),
             &camera_list(&["front"]),
+            NOW,
         )
         .expect("read");
         assert_eq!(
@@ -812,6 +834,7 @@ mod tests {
             &mut connection,
             &motion_query(990.0, 1_100.0),
             &camera_list(&["front"]),
+            NOW,
         )
         .expect("read");
         assert_eq!(
@@ -833,6 +856,7 @@ mod tests {
             &mut connection,
             &range_query(1_000.0, 2_000.0),
             &camera_list(&["front"]),
+            NOW,
         )
         .expect("read");
         assert!(rows.motion.is_empty());
@@ -847,7 +871,8 @@ mod tests {
             ..range_query(1_000.0, 2_000.0)
         };
 
-        let rows = read_activity(&mut connection, &query, &camera_list(&["front"])).expect("read");
+        let rows =
+            read_activity(&mut connection, &query, &camera_list(&["front"]), NOW).expect("read");
         assert_eq!(rows, ActivityRows::default());
     }
 
@@ -1005,6 +1030,7 @@ mod tests {
             &mut connection,
             &range_query(1_000.0, 2_000.0),
             &camera_list(&["front"]),
+            NOW,
         )
         .expect("read");
         assert_eq!(
@@ -1042,6 +1068,7 @@ mod tests {
             &mut connection,
             &range_query(1_000.0, 1_500.0),
             &camera_list(&["front"]),
+            NOW,
         )
         .expect("first range");
         assert_eq!(review_ids(&first), ["spanning"]);
@@ -1049,6 +1076,7 @@ mod tests {
             &mut connection,
             &range_query(1_500.0, 2_000.0),
             &camera_list(&["front"]),
+            NOW,
         )
         .expect("second range");
         assert_eq!(review_ids(&second), ["spanning", "zero-length-at-1500"]);
@@ -1086,6 +1114,7 @@ mod tests {
             &mut connection,
             &range_query(1_000.0, 2_000.0),
             &camera_list(&["front", "side"]),
+            NOW,
         )
         .expect("read");
         assert_eq!(review_ids(&rows), ["row-front", "row-side"]);
@@ -1104,7 +1133,7 @@ mod tests {
         );
 
         let rows =
-            read_activity(&mut connection, &range_query(1_000.0, 2_000.0), &[]).expect("read");
+            read_activity(&mut connection, &range_query(1_000.0, 2_000.0), &[], NOW).expect("read");
         assert!(rows.reviews.is_empty());
     }
 
@@ -1119,6 +1148,7 @@ mod tests {
             &mut connection,
             &range_query(1_000.0, 2_000.0),
             &camera_list(&["front"]),
+            NOW,
         )
         .expect("read");
         assert_eq!(review_ids(&rows), ["aaa", "bbb", "ccc"]);
@@ -1143,6 +1173,7 @@ mod tests {
             &mut connection,
             &range_query(1_000.0, 2_000.0),
             &camera_list(&["front"]),
+            NOW,
         )
         .expect("read");
         let review = &rows.reviews[0];
@@ -1169,6 +1200,7 @@ mod tests {
             &mut connection,
             &range_query(1_000.0, 2_000.0),
             &camera_list(&["front"]),
+            NOW,
         )
         .expect("read");
         assert_eq!(
@@ -1207,6 +1239,7 @@ mod tests {
             &mut connection,
             &range_query(1_000.0, 2_000.0),
             &camera_list(&["front"]),
+            NOW,
         )
         .unwrap_err();
         assert!(
@@ -1240,6 +1273,7 @@ mod tests {
                 &mut connection,
                 &range_query(1_000.0, 2_000.0),
                 &camera_list(&["front"]),
+                NOW,
             )
             .unwrap_err();
             assert!(
@@ -1284,6 +1318,7 @@ mod tests {
             &mut connection,
             &range_query(1_000.0, 2_000.0),
             &camera_list(&["front"]),
+            NOW,
         )
         .expect("read");
         assert_eq!(
@@ -1315,6 +1350,7 @@ mod tests {
             &mut connection,
             &range_query(1_000.0, 2_000.0),
             &camera_list(&["front"]),
+            NOW,
         )
         .unwrap_err();
         assert!(
@@ -1371,6 +1407,7 @@ mod tests {
             &mut connection,
             &range_query(1_000.0, 2_000.0),
             &camera_list(&["front", "back", "side"]),
+            NOW,
         )
         .expect("read");
         let has_recording = |id: &str| {
@@ -1384,7 +1421,101 @@ mod tests {
         assert!(!has_recording("other-camera"));
         assert!(!has_recording("recording-ends-at-start"));
         assert!(!has_recording("recording-starts-at-end"));
-        assert!(!has_recording("ongoing"));
+        assert!(has_recording("ongoing"));
+    }
+
+    #[test]
+    fn an_ongoing_review_links_a_clip_up_to_the_request_moment() {
+        let mut connection = frigate_database();
+        insert_review(&connection, "live", "front", "alert", 1_500.0, None);
+        insert_recording(&connection, "rec-live", "front", 1_550.0, 1_600.0);
+
+        let rows = read_activity(
+            &mut connection,
+            &range_query(1_000.0, 2_000.0),
+            &camera_list(&["front"]),
+            NOW,
+        )
+        .expect("read");
+        let live = rows
+            .reviews
+            .iter()
+            .find(|review| review.id == "live")
+            .expect("review present");
+        assert!(live.has_recording);
+        assert_eq!(
+            clip_link("front", live.start, live.end, live.has_recording, NOW),
+            Some(MediaLink {
+                url: "/corvette/api/v1/media/front/start/1500/end/1950/master.m3u8".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn an_ongoing_review_with_no_overlapping_recording_row_has_no_link() {
+        let mut connection = frigate_database();
+        insert_review(&connection, "other-camera", "back", "alert", 1_500.0, None);
+        insert_recording(&connection, "rec-front", "front", 1_550.0, 1_600.0);
+        insert_review(
+            &connection,
+            "ends-at-start",
+            "end-edge",
+            "alert",
+            1_950.0,
+            None,
+        );
+        insert_recording(&connection, "rec-ends", "end-edge", 1_900.0, 1_950.0);
+        insert_review(
+            &connection,
+            "starts-at-now",
+            "start-edge",
+            "alert",
+            1_500.0,
+            None,
+        );
+        insert_recording(&connection, "rec-starts", "start-edge", 1_950.0, 2_000.0);
+        insert_review(&connection, "no-rows", "bare", "alert", 1_500.0, None);
+
+        let rows = read_activity(
+            &mut connection,
+            &range_query(1_000.0, 2_000.0),
+            &camera_list(&["front", "back", "end-edge", "start-edge", "bare"]),
+            NOW,
+        )
+        .expect("read");
+        for id in ["other-camera", "ends-at-start", "starts-at-now", "no-rows"] {
+            let found = rows
+                .reviews
+                .iter()
+                .find(|review| review.id == id)
+                .unwrap_or_else(|| panic!("review `{id}` missing"));
+            assert!(!found.has_recording, "review `{id}` has a link");
+        }
+    }
+
+    #[test]
+    fn a_request_at_or_before_an_ongoing_review_start_has_no_link() {
+        let mut connection = frigate_database();
+        insert_review(&connection, "at-now", "front", "alert", 1_950.0, None);
+        insert_recording(&connection, "rec-at", "front", 1_940.0, 1_960.0);
+        insert_review(&connection, "after-now", "side", "alert", 1_960.0, None);
+        insert_recording(&connection, "rec-after-now", "side", 1_940.0, 1_970.0);
+
+        let rows = read_activity(
+            &mut connection,
+            &range_query(1_000.0, 2_000.0),
+            &camera_list(&["front", "side"]),
+            NOW,
+        )
+        .expect("read");
+        for id in ["at-now", "after-now"] {
+            let found = rows
+                .reviews
+                .iter()
+                .find(|review| review.id == id)
+                .unwrap_or_else(|| panic!("review `{id}` missing"));
+            assert!(!found.has_recording, "review `{id}` has a link");
+        }
     }
 
     #[test]
@@ -1404,7 +1535,8 @@ mod tests {
             include_motion: true,
             ..range_query(1_000.0, 2_000.0)
         };
-        let rows = read_activity(&mut connection, &query, &camera_list(&["front"])).expect("read");
+        let rows =
+            read_activity(&mut connection, &query, &camera_list(&["front"]), NOW).expect("read");
         assert!(rows.reviews.is_empty());
     }
 
@@ -1609,15 +1741,25 @@ mod tests {
     }
 
     #[test]
-    fn a_clip_url_appears_only_for_an_ended_review_with_a_recording() {
+    fn a_clip_link_needs_a_recording() {
         assert_eq!(
-            clip_link("front door", 1.5, Some(2.0), true).expect("clip link"),
+            clip_link("front door", 1.5, Some(2.0), true, NOW).expect("clip link"),
             MediaLink {
                 url: "/corvette/api/v1/media/front%20door/start/1.5/end/2/master.m3u8".to_owned()
             }
         );
-        assert_eq!(clip_link("front", 1.5, Some(2.0), false), None);
-        assert_eq!(clip_link("front", 1.5, None, false), None);
+        assert_eq!(clip_link("front", 1.5, Some(2.0), false, NOW), None);
+        assert_eq!(clip_link("front", 1.5, None, false, NOW), None);
+    }
+
+    #[test]
+    fn an_ongoing_review_with_a_recording_links_to_the_request_moment() {
+        assert_eq!(
+            clip_link("front", 1.5, None, true, NOW).expect("clip link"),
+            MediaLink {
+                url: "/corvette/api/v1/media/front/start/1.5/end/1950/master.m3u8".to_owned()
+            }
+        );
     }
 
     #[test]
@@ -1646,7 +1788,7 @@ mod tests {
             }],
         };
         assert_eq!(
-            activity_response(&range_query(1_000.0, 2_000.0), rows, &root),
+            activity_response(&range_query(1_000.0, 2_000.0), rows, &root, NOW),
             ActivityResponse {
                 after: 1_000.0,
                 before: 2_000.0,
