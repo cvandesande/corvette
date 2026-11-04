@@ -476,7 +476,7 @@ impl ClipOutcome {
             Self::Playable(_) => "",
             Self::NoRecording => "There is no recording available for this alert.",
             Self::NotReturned => "The server did not return this alert.",
-            Self::InProgress => "This alert is still in progress.",
+            Self::InProgress => "This alert is still in progress and has no recording to play yet.",
             Self::LoadFailed => "Could not load this alert's clip.",
         }
     }
@@ -885,6 +885,15 @@ mod tests {
     fn clip_outcome_of_an_in_progress_review_is_in_progress() {
         let reviews: Reviews = Ok(vec![activity_review("alert", None, None)]);
         assert_eq!(clip_outcome(&reviews, "alert"), ClipOutcome::InProgress);
+    }
+
+    #[test]
+    fn clip_outcome_of_an_in_progress_review_with_a_link_is_playable() {
+        let reviews: Reviews = Ok(vec![activity_review("alert", None, Some("/alert.m3u8"))]);
+        assert_eq!(
+            clip_outcome(&reviews, "alert"),
+            ClipOutcome::Playable("/alert.m3u8".to_owned())
+        );
     }
 
     #[test]

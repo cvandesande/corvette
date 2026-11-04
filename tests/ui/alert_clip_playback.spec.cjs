@@ -1,7 +1,7 @@
 const { expect, test } = require(process.env.PLAYWRIGHT_TEST_PATH);
 const { refuseMalformedActivityQuery } = require("./activity_query.cjs");
 
-// The alert dialog's four "no clip" outcomes and its player's failure state: each exact message, a visible Retry, and one Retry tap that re-asks the activity route or rebuilds the player.
+// The alert dialog's "no clip" outcomes, an alert in progress that plays its link, and the player's failure state: each exact message, a visible Retry, and one Retry tap that re-asks the activity route or rebuilds the player.
 
 const activityAnswer = (request, reviews) => {
   const params = new URL(request.url()).searchParams;
@@ -133,7 +133,7 @@ test("an activity answer without the review says the server did not return the a
     "The server did not return this alert.");
 });
 
-test("a review with no end says the alert is still in progress", async ({ page }) => {
+test("an alert in progress with no recording yet says so and offers Retry", async ({ page }) => {
   const testStartSeconds = Date.now() / 1000;
   const stubbed = await stubAlertModal(
     page,
@@ -146,12 +146,44 @@ test("a review with no end says the alert is still in progress", async ({ page }
     { openReview: true },
   );
   await assertUnavailabilityThenRetry(page, stubbed.activityRequests, stubbed.fixture, stubbed.playlistRequests,
-    "This alert is still in progress.");
+    "This alert is still in progress and has no recording to play yet.");
   const activityUrl = new URL(stubbed.activityRequests[0]);
   expect(Number(activityUrl.searchParams.get("after"))).toBe(stubbed.fixture.bounds.start);
   const windowEnd = Number(activityUrl.searchParams.get("before"));
   expect(windowEnd).toBeGreaterThanOrEqual(testStartSeconds);
   expect(windowEnd).toBeLessThanOrEqual(Date.now() / 1000);
+});
+
+test("an alert still in progress with a link plays that link", async ({ page }) => {
+  let link = null;
+  const stubbed = await stubAlertModal(
+    page,
+    (route, fixture) => {
+      link =
+        `/corvette/api/v1/media/front/start/${fixture.bounds.start}/end/${fixture.bounds.start + 90}/master.m3u8`;
+      return route.fulfill({
+        json: activityAnswer(route.request(), [
+          activityReview("alert-review", { ...fixture.bounds, end: null }, link),
+        ]),
+      });
+    },
+    { openReview: true },
+  );
+  await page.goto("/");
+  await page.locator(".event-card").getByRole("button").click();
+  const playback = page.getByRole("dialog", { name: "Selected event playback" });
+  await expect(playback).toBeVisible();
+  const video = playback.locator("video");
+  await expect(video).toHaveAttribute("data-clip-url", link);
+  await expect.poll(() =>
+    stubbed.playlistRequests.some((request) => {
+      const recorded = new URL(request);
+      return `${recorded.pathname}${recorded.search}` === link;
+    }),
+  ).toBe(true);
+  await expect(playback.getByRole("alert")).toHaveCount(0);
+  await expect(playback.getByRole("button", { name: "Retry" })).toHaveCount(0);
+  expect(stubbed.activityRequests.length).toBe(1);
 });
 
 test("an activity answer of 503 says the clip could not be loaded", async ({ page }) => {
