@@ -65,6 +65,12 @@ the note with the relevant API contract rather than leaving the rationale only
 in an issue, commit message, or compatibility workaround.
 
 Use the Rust toolchain pinned by `rust-toolchain.toml`; `nix develop` provides it.
+Start every Claude Code session from inside a `nix develop` shell, so `cargo`,
+`rustc` and `playwright` are on the PATH. At the start of each session, run
+`echo "${IN_NIX_SHELL:-}"; command -v cargo`. When the first prints nothing or the
+second prints nothing, tell the human in the first reply that the session was not
+started inside `nix develop`, and wrap each toolchain command in
+`nix develop --command` until they restart it.
 
 Before committing, compare the staged change with its GitHub issue and
 `docs/design/`. Update or close the issue when its outcome or next step has
