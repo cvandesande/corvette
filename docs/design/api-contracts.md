@@ -867,11 +867,14 @@ The route accepts `GET` only. A request that carries no signed-in identity
 is refused by the identity check with its `401` or `403`; a method other
 than `GET` is refused with `403`.
 
-A range with no recording retained, and an empty or inverted range
-(`start >= end`), each answer `404` with code `not_found`, in the JSON
-error shape `{"code": ..., "message": ...}` this file defines for service
-errors above, where the code is the stable value. This `404` is the one
-answer nginx itself generates in this JSON shape.
+A range with no recording retained, and an inverted range (`start > end`),
+each answer `404` with code `not_found`, in the JSON error shape
+`{"code": ..., "message": ...}` this file defines for service errors
+above, where the code is the stable value. This `404` is the one answer
+nginx itself generates in this JSON shape. An empty range (`start == end`)
+is served like any other range: it answers `200` with a playlist when a
+recording holds that instant, and answers like a range with no recording
+(the `404` above) when none does.
 
 A clip starts at or before the requested second. **Current backing**: the
 backing pulls the start back to the previous keyframe of the first
