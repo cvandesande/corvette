@@ -8,9 +8,9 @@ cd "$REPO" || exit 2
 usage() {
   cat <<'USAGE'
 usage: gate.sh <leg> [args...]
-  comment         pct <file>|baseline|check <base>..<tip>|staged|selftest
+  comment         pct <file>|baseline|check <base>..<tip>|staged|sweep [--base <rev>] <file>...|selftest
   obs             baseline|deps|selftest
-  d8              staged|range <a>..<b>|selftest
+  d8              staged|worktree <rev> [<path>...]|range <a>..<b>|selftest
   selftest        dispatcher reachability check
 USAGE
 }
@@ -155,6 +155,103 @@ obs_fail_help() {
   echo "see     AGENTS.md \"Dependency gate\" and docs/standards/STYLE.md"
 }
 
+# One mechanical proof of a comments-only change: print "ok <name>" or
+# "FAIL <name>" plus up to ten offending lines; return 1 when it failed.
+# Density reads the working tree; the others take <rev> then the file list.
+
+comment_marker_of() {
+  case "$1" in
+    *.rs) printf '//' ;;
+    *.sh|*.yml|*.yaml|*.conf|*.toml|Dockerfile*|*/Dockerfile*) printf '#' ;;
+  esac
+}
+
+# Content lines of one file's diff since a revision, sign included. Headers
+# are skipped by position (diff --git to the first @@), never by prefix.
+sweep_changed_lines() {
+  git diff -U0 "$1" -- "$2" \
+    | awk '
+        /^diff --git/ { hdr = 1; next }
+        hdr { if (/^@@/) hdr = 0; next }
+        substr($0, 1, 1) == "+" || substr($0, 1, 1) == "-" { print }'
+}
+
+check_density() {
+  local f p c FAIL=0
+  for f in "$@"; do
+    read -r p c _ <<<"$(comment_pct_of "$f")"
+    if awk -v p="$p" -v c="$c" "BEGIN{exit !(p<=$TARGET || c<=$GRACE)}"; then
+      echo "ok    density $p% ($c lines) $f"
+    else
+      echo "FAIL  density $p% ($c lines) $f — over ${TARGET}% with more than ${GRACE} comment lines"
+      FAIL=1
+    fi
+  done
+  return $FAIL
+}
+
+check_comments_only() {
+  local rev="$1" f lines
+  lines="$(for f in "${@:2}"; do
+    sweep_changed_lines "$rev" "$f" \
+      | awk -v m="$(comment_marker_of "$f")" '
+          { rest = substr($0, 2); bare = rest
+            sub(/^[ \t]+/, "", bare)
+            if (bare != "" && index(bare, m) != 1) print }'
+  done)"
+  if [ -n "$lines" ]; then
+    echo "FAIL  comments-only changed lines that are neither comment nor blank:"
+    printf '%s\n' "$lines" | head -10
+    return 1
+  fi
+  echo "ok    comments-only"
+}
+
+check_width() {
+  local rev="$1" f n FAIL=0
+  n=$(for f in "${@:2}"; do sweep_changed_lines "$rev" "$f" | grep '^+' | sed 's/^+//'; done \
+      | LC_ALL=C.UTF-8 awk 'length() > 79 { print substr($0, 1, 60) " …"; f = 1 } END { if (f) exit 1 }') \
+    || { echo "FAIL  width added line over 79 characters:"; printf '%s\n' "$n" | head -10; FAIL=1; }
+  [ "$FAIL" -eq 0 ] && echo "ok    width"
+  return $FAIL
+}
+
+check_trailing_space() {
+  local rev="$1" f lines
+  lines=$(for f in "${@:2}"; do
+            sweep_changed_lines "$rev" "$f" | grep '^+' | sed 's/^+//' | grep -E '[ 	]$' || true
+          done)
+  if [ -n "$lines" ]; then
+    echo "FAIL  trailing-space added line ends in space or tab:"
+    printf '%s\n' "$lines" | head -10
+    return 1
+  fi
+  echo "ok    trailing-space"
+}
+
+check_identifiers() {
+  if "$SELF" d8 worktree "$@" >/dev/null 2>&1; then
+    echo "ok    identifiers"
+    return 0
+  fi
+  echo "FAIL  identifiers the d8 leg rejects an added line:"
+  "$SELF" d8 worktree "$@" 2>&1 | sed -n '1,11p'
+  return 1
+}
+
+check_lint_attrs() {
+  local rev="$1" f lines
+  lines=$(for f in "${@:2}"; do
+            sweep_changed_lines "$rev" "$f" | grep -E '^[+-][[:space:]]*#!?\[(allow|expect|warn|deny|forbid)\(' || true
+          done)
+  if [ -n "$lines" ]; then
+    echo "FAIL  lint-attributes the change touches a lint attribute:"
+    printf '%s\n' "$lines" | head -10
+    return 1
+  fi
+  echo "ok    lint-attributes"
+}
+
 leg_comment() {
   local BASELINE="docs/standards/comment-baseline.txt" TARGET="3.0" GRACE=3
   case "${1:-}" in
@@ -257,6 +354,58 @@ leg_comment() {
         fi
       done < <(git diff --cached -M --diff-filter=ACMR --name-status)
       [ "$FAIL" -eq 0 ] || { comment_fail_help; echo "comment-gate: FAIL (staged)"; }
+      exit $FAIL ;;
+    sweep)
+      local SWBASE="HEAD" SWFILES=() FAIL=0 f
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --base)
+            if [ "$#" -lt 2 ]; then
+              echo "comment-sweep: --base needs a revision"
+              exit 2
+            fi
+            SWBASE="$2"
+            shift 2
+            ;;
+          --base=*)
+            SWBASE="${1#--base=}"
+            shift
+            ;;
+          -*)
+            echo "comment-sweep: unknown option $1"
+            exit 2
+            ;;
+          *)
+            SWFILES+=("$1")
+            shift
+            ;;
+        esac
+      done
+      if [ "${#SWFILES[@]}" -eq 0 ]; then
+        echo "comment-sweep: no file named"
+        exit 2
+      fi
+      git rev-parse --verify --quiet "${SWBASE}^{commit}" >/dev/null \
+        || { echo "comment-sweep: base '$SWBASE' does not resolve"; exit 2; }
+      for f in "${SWFILES[@]}"; do
+        comment_measurable "$f" \
+          || { echo "comment-sweep: $f is not a file type the comment gate measures"; exit 2; }
+        git cat-file -e "$SWBASE:$f" 2>/dev/null \
+          || { echo "comment-sweep: $f does not exist at $SWBASE"; exit 2; }
+      done
+      FAIL=0
+      check_density "${SWFILES[@]}" || FAIL=1
+      check_comments_only "$SWBASE" "${SWFILES[@]}" || FAIL=1
+      check_width "$SWBASE" "${SWFILES[@]}" || FAIL=1
+      check_trailing_space "$SWBASE" "${SWFILES[@]}" || FAIL=1
+      check_identifiers "$SWBASE" "${SWFILES[@]}" || FAIL=1
+      check_lint_attrs "$SWBASE" "${SWFILES[@]}" || FAIL=1
+      if [ "$FAIL" -eq 0 ]; then
+        echo "comment-sweep: PASS"
+      else
+        echo "comment-sweep: FAIL"
+      fi
       exit $FAIL ;;
     selftest)
       local TMP p1 c1 n1 p2 c2 n2 REPO2 OUT RC p3 c3 n3 p3b c3b n3b p4 c4 n4 p4b c4b n4b c5 n5 SEC FIRST_LINE OUT2 RC2 OUT3 RC3 OUT4 RC4 OUT5 RC5 OUT6 RC6
@@ -460,8 +609,146 @@ leg_comment() {
       printf '%s\n' "$OUT12" | grep -q "^FAIL.*over.rs" || { echo "selftest FAIL: expected FAIL for the same staged over-target file once MERGE_HEAD is gone; got rc=$RC12: $OUT12"; exit 1; }
       [ "$RC12" -ne 0 ] || { echo "selftest FAIL: expected nonzero exit once MERGE_HEAD is gone"; exit 1; }
       echo "selftest PASS: same staged over-target file FAILs once MERGE_HEAD is absent (no behavior change on non-merge commits)"
+
+      rm -rf "$REPO2"; REPO2="$(mktemp -d)"; trap 'rm -f "$TMP"; rm -rf "$REPO2"' EXIT
+      ( cd "$REPO2" && mkdir -p docs/standards && git init -q && git config user.email t@t && git config user.name t
+        printf 'fn f() {}\n// keep one\n// keep two\n// keep three\nfn g() {}\n' > sweep.rs
+        printf '#!/bin/sh\nhelper_code=1\n' > helper.sh
+        git add sweep.rs helper.sh && git commit -q -m base )
+      ( cd "$REPO2" && printf 'fn f() {}\n// keep one\n// keep two\nfn g() {}\n' > sweep.rs )
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep sweep.rs 2>&1)"; RC=$?
+      { [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q "^comment-sweep: PASS$"; } \
+        || { echo "selftest FAIL: sweep (a) comment-only deletion expected PASS; rc=$RC: $OUT"; exit 1; }
+      [ "$(printf '%s\n' "$OUT" | grep -c "^ok    ")" = "6" ] \
+        || { echo "selftest FAIL: sweep (a) expected six ok lines; got: $OUT"; exit 1; }
+      echo "selftest PASS: sweep (a) comment-only deletion prints six ok and PASS"
+      ( cd "$REPO2" && printf 'fn f() {}\n// keep one\n// keep two\nfn g(_x: u32) {}\n' > sweep.rs )
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep sweep.rs 2>&1)"; RC=$?
+      { [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q "^FAIL  comments-only"; } \
+        || { echo "selftest FAIL: sweep (b) changed code line expected comments-only FAIL; rc=$RC: $OUT"; exit 1; }
+      echo "selftest PASS: sweep (b) changed code line fails comments-only"
+      ( cd "$REPO2" && printf 'fn f() {}\n// keep one\n// keep two\nfn g() {}\n' > sweep.rs
+        printf '// %s\n' "$(printf 'x%.0s' {1..77})" >> sweep.rs )
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep sweep.rs 2>&1)"; RC=$?
+      { [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q "^FAIL  width"; } \
+        || { echo "selftest FAIL: sweep (c) added 80-character line expected width FAIL; rc=$RC: $OUT"; exit 1; }
+      ( cd "$REPO2" && printf 'fn f() {}\n// keep one\n// keep two\nfn g() {}\n' > sweep.rs
+        printf '// %s—\n' "$(printf 'x%.0s' {1..75})" >> sweep.rs )
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep sweep.rs 2>&1)"; RC=$?
+      { [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q "^ok    width"; } \
+        || { echo "selftest FAIL: sweep (c) added 79-character line with an em dash expected width ok; rc=$RC: $OUT"; exit 1; }
+      echo "selftest PASS: sweep (c) width fails at 80 characters and passes at 79 with an em dash"
+      ( cd "$REPO2" && printf 'fn f() {}\n// keep one\n// keep two\nfn g() {}\n// trailing space here \n' > sweep.rs )
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep sweep.rs 2>&1)"; RC=$?
+      { [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q "^FAIL  trailing-space" \
+        && ! printf '%s\n' "$OUT" | grep -q "^FAIL  comments-only"; } \
+        || { echo "selftest FAIL: sweep (d) trailing space expected trailing-space FAIL; rc=$RC: $OUT"; exit 1; }
+      echo "selftest PASS: sweep (d) added trailing space fails trailing-space"
+      ( cd "$REPO2" && printf 'fn f() {}\n// keep one\n// keep two\nfn g() {}\n// per issue 12\n' > sweep.rs )
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep sweep.rs 2>&1)"; RC=$?
+      { [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q "^FAIL  identifiers" \
+        && ! printf '%s\n' "$OUT" | grep -q "^FAIL  comments-only"; } \
+        || { echo "selftest FAIL: sweep (e) added identifier comment expected identifiers FAIL; rc=$RC: $OUT"; exit 1; }
+      echo "selftest PASS: sweep (e) comment naming a tracker identifier fails identifiers"
+      ( cd "$REPO2" && printf 'fn f() {}\n// keep one\n// keep two\nfn g() {}\n#[allow(dead_code)]\n' > sweep.rs )
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep sweep.rs 2>&1)"; RC=$?
+      { [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q "^FAIL  lint-attributes" \
+        && printf '%s\n' "$OUT" | grep -q "^FAIL  comments-only"; } \
+        || { echo "selftest FAIL: sweep (f) added lint attribute expected lint-attributes FAIL; rc=$RC: $OUT"; exit 1; }
+      echo "selftest PASS: sweep (f) added lint attribute fails lint-attributes and comments-only"
+      ( cd "$REPO2" && printf 'fn f() {}\n// keep one\n// keep two\n// keep three\n// keep four\n// keep five\n' > sweep.rs )
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep sweep.rs 2>&1)"; RC=$?
+      printf '%s\n' "$OUT" | grep -q "^FAIL  density" \
+        || { echo "selftest FAIL: sweep (g) file over 3.0% with 5 comment lines expected density FAIL; rc=$RC: $OUT"; exit 1; }
+      [ "$RC" -eq 1 ] || { echo "selftest FAIL: sweep (g) expected exit 1 for the density FAIL; rc=$RC: $OUT"; exit 1; }
+      echo "selftest PASS: sweep (g) file left over 3.0% with more than three comment lines fails density"
+      ( cd "$REPO2" && printf 'fn f() {}\n// keep one\n// keep two\nfn g() {}\n' > sweep.rs && git add -A && git commit -q -m cleaned )
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep --base HEAD~1 sweep.rs 2>&1)"; RC=$?
+      [ "$RC" -eq 0 ] || { echo "selftest FAIL: sweep (h) committed sweep with --base HEAD~1 expected PASS; rc=$RC: $OUT"; exit 1; }
+      printf '%s\n' "$OUT" | grep -q "^comment-sweep: PASS$" \
+        || { echo "selftest FAIL: sweep (h) committed sweep expected PASS line; rc=$RC: $OUT"; exit 1; }
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep sweep.rs 2>&1)"; RC=$?
+      [ "$RC" -eq 0 ] || { echo "selftest FAIL: sweep (h) same file at HEAD with an empty diff expected PASS; rc=$RC: $OUT"; exit 1; }
+      echo "selftest PASS: sweep (h) a committed sweep passes against its parent and against HEAD"
+      ( cd "$REPO2" && printf '#!/bin/sh\n# why this helper exists\nhelper_code=1\n' > helper.sh && git add -A && git commit -q -m "helper comment" )
+      ( cd "$REPO2" && printf '#!/bin/sh\nhelper_code=1\n' > helper.sh )
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep helper.sh 2>&1)"; RC=$?
+      [ "$RC" -eq 0 ] || { echo "selftest FAIL: sweep (i) deleted hash comment line expected PASS; rc=$RC: $OUT"; exit 1; }
+      ( cd "$REPO2" && printf '#!/bin/sh\nhelper_code=2\n' > helper.sh )
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep helper.sh 2>&1)"; RC=$?
+      { [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q "^FAIL  comments-only"; } \
+        || { echo "selftest FAIL: sweep (i) changed shell code line expected comments-only FAIL; rc=$RC: $OUT"; exit 1; }
+      echo "selftest PASS: sweep (i) hash comments measured by the hash marker: a deletion passes, a code change fails"
+      ( cd "$REPO2" && git checkout -q -- helper.sh )
+      sweep_usage_case() {
+        local out rc
+        out="$(cd "$REPO2" && "$SELF" comment sweep "$@" 2>&1)"; rc=$?
+        { [ "$rc" -eq 2 ] && printf '%s\n' "$out" | grep -q "^comment-sweep: "; } \
+          || { echo "selftest FAIL: sweep (j) usage error '$*' expected exit 2 with a comment-sweep line; rc=$rc: $out"; exit 1; }
+        printf '%s\n' "$out" | grep -q "^ok " && { echo "selftest FAIL: sweep (j) '$*' printed checks; got: $out"; exit 1; }
+      }
+      sweep_usage_case
+      sweep_usage_case --nonsense sweep.rs
+      sweep_usage_case --base not-a-rev sweep.rs
+      sweep_usage_case README.md
+      sweep_usage_case untracked.rs
+      echo "selftest PASS: sweep (j) no file, unknown option, unresolvable base, unmeasurable type and untracked file each exit 2"
+      ( cd "$REPO2" && printf 'fn h() {}\n// per issue 12\n' > other.rs )
+      ( cd "$REPO2" && OUT="$("$SELF" comment sweep sweep.rs 2>&1)"; RC=$?
+        [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q "^comment-sweep: PASS$" ) \
+        || { echo "selftest FAIL: sweep (k) sweep of the named file must pass while other.rs holds an identifier; rc as reported"; exit 1; }
+      ( cd "$REPO2" && rm -f other.rs )
+      echo "selftest PASS: sweep (k) an unnamed dirty file is not this sweep's business"
+      ( cd "$REPO2" && "$SELF" d8 worktree HEAD sweep.rs >/dev/null 2>&1 ) \
+        || { echo "selftest FAIL: sweep (l) d8 worktree on a clean file expected exit 0"; exit 1; }
+      ( cd "$REPO2" && printf 'fn f() {}\n// keep one\n// keep two\nfn g() {}\n// per issue 12\n' > sweep.rs
+        ! "$SELF" d8 worktree HEAD sweep.rs >/dev/null 2>&1 ) \
+        || { echo "selftest FAIL: sweep (l) d8 worktree with an added identifier comment expected nonzero"; exit 1; }
+      echo "selftest PASS: sweep (l) d8 worktree passes a clean working tree and fails an added identifier comment"
+      ( cd "$REPO2" && printf '%s\n' '---' '# why this' 'key: 1' > doc.yml
+        git add doc.yml && git commit -q -m "add yml" )
+      ( cd "$REPO2" && printf '%s\n' '# why this' 'key: 1' > doc.yml )
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep doc.yml 2>&1)"; RC=$?
+      { [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q "^FAIL  comments-only"; } \
+        || { echo "selftest FAIL: sweep (m) removed document separator expected comments-only FAIL; rc=$RC: $OUT"; exit 1; }
+      echo "selftest PASS: sweep (m) a removed --- line is content and fails comments-only"
+      ( cd "$REPO2" && printf '#!/bin/sh\nbase_line=1\n' > plus.sh
+        git add plus.sh && git commit -q -m "add sh" )
+      ( cd "$REPO2" && printf '%s\n' '#!/bin/sh' 'base_line=1' "++ $(printf 'x%.0s' {1..80}) " > plus.sh )
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep plus.sh 2>&1)"; RC=$?
+      { [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q "^FAIL  comments-only" \
+        && printf '%s\n' "$OUT" | grep -q "^FAIL  width" \
+        && printf '%s\n' "$OUT" | grep -q "^FAIL  trailing-space"; } \
+        || { echo "selftest FAIL: sweep (n) added line starting with ++ expected comments-only, width and trailing-space FAILs; rc=$RC: $OUT"; exit 1; }
+      echo "selftest PASS: sweep (n) an added line starting ++ is content measured by all three diff checks"
+      ( cd "$REPO2" && printf '%s\n' 'fn a() {}' '' '// note' 'fn b() {}' > blank.rs
+        git add blank.rs && git commit -q -m "add blank" )
+      ( cd "$REPO2" && printf '%s\n' 'fn a() {}' '// note' 'fn b() {}' '' > blank.rs )
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep blank.rs 2>&1)"; RC=$?
+      { [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q "^ok    comments-only$" \
+        && [ "$(printf '%s\n' "$OUT" | tail -1)" = "comment-sweep: PASS" ]; } \
+        || { echo "selftest FAIL: sweep (o) added and removed blank lines expected exit 0 with ok comments-only and a PASS last line; rc=$RC: $OUT"; exit 1; }
+      echo "selftest PASS: sweep (o) added and removed blank lines are accepted by comments-only"
+      ( cd "$REPO2" && git checkout -q -- . )
+      ( cd "$REPO2" && "$SELF" d8 worktree HEAD >/dev/null 2>&1 ) \
+        || { echo "selftest FAIL: sweep (p) d8 worktree with no path on a clean tree expected exit 0"; exit 1; }
+      ( cd "$REPO2" && printf '# per issue 12\n' >> helper.sh )
+      ( cd "$REPO2" && ! "$SELF" d8 worktree HEAD >/dev/null 2>&1 ) \
+        || { echo "selftest FAIL: sweep (p) d8 worktree with no path expected nonzero for an identifier in an unnamed file"; exit 1; }
+      ( cd "$REPO2" && "$SELF" d8 worktree HEAD sweep.rs >/dev/null 2>&1 ) \
+        || { echo "selftest FAIL: sweep (p) d8 worktree naming a clean path expected exit 0 while an unnamed file is dirty"; exit 1; }
+      ( cd "$REPO2" && git checkout -q -- helper.sh )
+      echo "selftest PASS: sweep (p) d8 worktree without a path checks the whole path list; with a path it checks only that path"
+      ( cd "$REPO2" && printf '%s\n' 'fn a() {}' '// c1' '// c2' '// c3' '// c4' '// c5' 'fn b() {}' > dense.rs
+        git add dense.rs && git commit -q -m "add dense" )
+      OUT="$(cd "$REPO2" && "$SELF" comment sweep dense.rs 2>&1)"; RC=$?
+      { [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -q "^FAIL  density" \
+        && printf '%s\n' "$OUT" | grep -q "^ok    comments-only$" \
+        && [ "$(printf '%s\n' "$OUT" | tail -1)" = "comment-sweep: FAIL" ]; } \
+        || { echo "selftest FAIL: sweep (q) committed over-density file expected density-only FAIL; rc=$RC: $OUT"; exit 1; }
+      echo "selftest PASS: sweep (q) a file over the density limit fails the sweep when nothing else is wrong"
       exit 0 ;;
-    *) echo "usage: gate.sh comment pct <file> [src] | baseline | check <base>..<tip> | staged | selftest"; exit 2 ;;
+    *) echo "usage: gate.sh comment pct <file> [src] | baseline | check <base>..<tip> | staged | sweep [--base <rev>] <file>... | selftest"; exit 2 ;;
   esac
 }
 
@@ -725,12 +1012,31 @@ leg_d8() {
     selftest)
       d8_scope_selftest
       echo "d8-gate: self-test OK" ;;
-    staged)
-      local rc=0
-      diff=$(git diff --cached -- "${D8_SPEC[@]}"); locs=$(mktemp)
+    staged|worktree)
+      local rc=0 label spec a
+      if [ "$1" = "worktree" ]; then
+        local REV="${2:-}"
+        [ -n "$REV" ] || { echo "usage: gate.sh d8 worktree <rev> [<path>...]"; exit 2; }
+        git rev-parse --verify --quiet "${REV}^{commit}" >/dev/null \
+          || { echo "d8-gate: cannot resolve '$REV'"; exit 2; }
+        label="worktree vs $REV"
+        if [ "$#" -gt 2 ]; then
+          spec=("${@:3}")
+          for a in "${D8_SPEC[@]}"; do
+            case "$a" in ':(exclude)'*) spec+=("$a") ;; esac
+          done
+          diff=$(git diff "$REV" -- "${spec[@]}")
+        else
+          diff=$(git diff "$REV" -- "${D8_SPEC[@]}")
+        fi
+      else
+        diff=$(git diff --cached -- "${D8_SPEC[@]}")
+        label="staged .rs/.toml/.md"
+      fi
+      locs=$(mktemp)
       printf '%s\n' "$diff" | d8_added_locs >"$locs"
       printf '%s\n' "$diff" | d8_added_lines \
-        | D8_LOCS="$locs" d8_check_code_lines "staged .rs/.toml/.md additions" || { d8_fail_help; rc=1; }
+        | D8_LOCS="$locs" d8_check_code_lines "$label additions" || { d8_fail_help; rc=1; }
       rm -f "$locs"; exit $rc ;;
     range)
       [ -n "${2:-}" ] || { echo "usage: gate.sh d8 range <a>..<b>"; exit 2; }
@@ -747,7 +1053,7 @@ leg_d8() {
       fi
       exit $rc ;;
     *)
-      echo "usage: gate.sh d8 staged|range <a>..<b>|selftest"; exit 2 ;;
+      echo "usage: gate.sh d8 staged|worktree <rev> [<path>...]|range <a>..<b>|selftest"; exit 2 ;;
   esac
 }
 
