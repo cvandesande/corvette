@@ -1,6 +1,6 @@
 const { expect, test } = require(process.env.PLAYWRIGHT_TEST_PATH);
 
-// The alert dialog's four "no clip" outcomes: each exact message, a visible Retry, and one Retry tap that re-asks the activity route and renders a changed answer.
+// The alert dialog's four "no clip" outcomes and its player's failure state: each exact message, a visible Retry, and one Retry tap that re-asks the activity route or rebuilds the player.
 
 const activityAnswer = (request, reviews) => {
   const params = new URL(request.url()).searchParams;
@@ -30,6 +30,7 @@ const activityReview = (id, bounds, clipUrl) => ({
 async function stubAlertModal(page, firstActivityAnswer, card) {
   const activityRequests = [];
   const playlistRequests = [];
+  const media = { failing: false };
   const fixture = { bounds: null, playlist: null };
   await page.route("**/corvette/api/v1/cameras", (route) =>
     route.fulfill({ json: { cameras: [] } }),
@@ -72,6 +73,9 @@ async function stubAlertModal(page, firstActivityAnswer, card) {
     const requestUrl = route.request().url();
     if (requestUrl.endsWith("/master.m3u8")) {
       playlistRequests.push(requestUrl);
+      if (media.failing) {
+        return route.fulfill({ status: 404 });
+      }
       return route.fulfill({
         contentType: "application/vnd.apple.mpegurl",
         body: "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nsegment.ts\n#EXT-X-ENDLIST\n",
@@ -79,7 +83,7 @@ async function stubAlertModal(page, firstActivityAnswer, card) {
     }
     return route.fulfill({ status: 404 });
   });
-  return { activityRequests, fixture, playlistRequests };
+  return { activityRequests, fixture, media, playlistRequests };
 }
 
 async function assertUnavailabilityThenRetry(page, activityRequests, fixture, playlistRequests, message) {
@@ -160,4 +164,63 @@ test("an aborted activity request says the clip could not be loaded", async ({ p
   const stubbed = await stubAlertModal(page, (route) => route.abort(), { openReview: false });
   await assertUnavailabilityThenRetry(page, stubbed.activityRequests, stubbed.fixture, stubbed.playlistRequests,
     "Could not load this alert's clip.");
+});
+
+test("a clip the player cannot play says so, and Retry builds a new player for the same link", async ({ page }) => {
+  const stubbed = await stubAlertModal(
+    page,
+    (route, fixture) =>
+      route.fulfill({
+        json: activityAnswer(route.request(), [
+          activityReview("alert-review", fixture.bounds, fixture.playlist),
+        ]),
+      }),
+    { openReview: false },
+  );
+  stubbed.media.failing = true;
+  await page.goto("/");
+  await page.locator(".event-card").getByRole("button").click();
+  const playback = page.getByRole("dialog", { name: "Selected event playback" });
+  const failure = playback.getByText("This clip did not play in this browser.");
+  await expect(failure).toBeVisible();
+  const retry = playback.getByRole("button", { name: "Retry" });
+  await expect(retry).toBeVisible();
+  const video = playback.locator("video");
+  await expect(video).toHaveAttribute("data-clip-url", stubbed.fixture.playlist);
+  await expect(playback.getByRole("alert")).toHaveText("This clip did not play in this browser.");
+  const requestsBeforeRetry = stubbed.playlistRequests.length;
+  await video.evaluate((element) => {
+    element.firstPlayer = true;
+  });
+  stubbed.media.failing = false;
+  await retry.click();
+  await expect(failure).toHaveCount(0);
+  await expect(retry).toHaveCount(0);
+  await expect.poll(() => stubbed.playlistRequests.length).toBeGreaterThan(requestsBeforeRetry);
+  await expect.poll(() => video.evaluate((element) => element.firstPlayer === true)).toBe(false);
+  expect(stubbed.activityRequests.length).toBe(1);
+});
+
+test("a browser with no native HLS shows the same failure after hls.js fails", async ({ page }) => {
+  const stubbed = await stubAlertModal(
+    page,
+    (route, fixture) =>
+      route.fulfill({
+        json: activityAnswer(route.request(), [
+          activityReview("alert-review", fixture.bounds, fixture.playlist),
+        ]),
+      }),
+    { openReview: false },
+  );
+  stubbed.media.failing = true;
+  // Models a browser that cannot play HLS itself; the code checks the capability, never a browser name.
+  await page.addInitScript(() => {
+    HTMLMediaElement.prototype.canPlayType = () => "";
+  });
+  await page.goto("/");
+  await page.locator(".event-card").getByRole("button").click();
+  const playback = page.getByRole("dialog", { name: "Selected event playback" });
+  await expect(playback.getByText("This clip did not play in this browser.")).toBeVisible();
+  await expect(playback.getByRole("button", { name: "Retry" })).toBeVisible();
+  expect(stubbed.playlistRequests.length).toBe(1);
 });
