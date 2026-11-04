@@ -1,4 +1,5 @@
 const { expect, test } = require(process.env.PLAYWRIGHT_TEST_PATH);
+const { refuseMalformedActivityQuery } = require("./activity_query.cjs");
 
 // The alert dialog's four "no clip" outcomes and its player's failure state: each exact message, a visible Retry, and one Retry tap that re-asks the activity route or rebuilds the player.
 
@@ -57,6 +58,9 @@ async function stubAlertModal(page, firstActivityAnswer, card) {
   await page.route("**/api/review/activity/motion?*", (route) => route.fulfill({ json: [] }));
   await page.route("**/corvette/api/v1/activity?*", (route) => {
     activityRequests.push(route.request().url());
+    if (refuseMalformedActivityQuery(route)) {
+      return;
+    }
     if (activityRequests.length === 1) {
       return firstActivityAnswer(route, fixture);
     }

@@ -13,6 +13,7 @@ use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 
 const CAMERAS_PATH: &str = "/corvette/api/v1/cameras";
+const ACTIVITY_PATH: &str = "/corvette/api/v1/activity";
 const EVENTS_PATH: &str = "/api/events?limit=10&sort=date_desc&has_clip=1";
 const REVIEW_LIMIT: u32 = 1_000;
 
@@ -102,11 +103,16 @@ pub(super) async fn fetch_activity_reviews(
     after: f64,
     before: f64,
 ) -> Result<Vec<ActivityReview>, String> {
-    let camera = js_sys::encode_uri_component(camera);
-    let path = format!(
-        "/corvette/api/v1/activity?cameras={camera}&after={after}&before={before}&include=reviews"
-    );
-    let response: ActivityResponse = fetch_json(Request::get(&path), &path).await?;
+    // The request builder appends `&` to a url that already has a query, and this route refuses the empty segment.
+    let after = after.to_string();
+    let before = before.to_string();
+    let request = Request::get(ACTIVITY_PATH).query([
+        ("cameras", camera),
+        ("after", after.as_str()),
+        ("before", before.as_str()),
+        ("include", "reviews"),
+    ]);
+    let response: ActivityResponse = fetch_json(request, ACTIVITY_PATH).await?;
     Ok(response.reviews)
 }
 

@@ -1,4 +1,5 @@
 const { expect, test } = require(process.env.PLAYWRIGHT_TEST_PATH);
+const { refuseMalformedActivityQuery } = require("./activity_query.cjs");
 
 const isRecordingPayload = (request) =>
   new URL(request.url()).pathname.includes("split___recordings_route_view_");
@@ -511,6 +512,9 @@ test("recent events are filtered review activity from the last six hours", async
   });
   await page.route("**/corvette/api/v1/activity?*", (route) => {
     activityRequests.push(route.request().url());
+    if (refuseMalformedActivityQuery(route)) {
+      return;
+    }
     const params = new URL(route.request().url()).searchParams;
     return route.fulfill({
       json: {
@@ -702,6 +706,9 @@ test("a review whose footage expired reports the absence, not a media error", as
   await page.route("**/api/review/activity/motion?*", (route) => route.fulfill({ json: [] }));
   await page.route("**/corvette/api/v1/activity?*", (route) => {
     activityRequestCount += 1;
+    if (refuseMalformedActivityQuery(route)) {
+      return;
+    }
     const params = new URL(route.request().url()).searchParams;
     return route.fulfill({
       json: {
@@ -793,6 +800,9 @@ test("events route browses a selected day and filters severity", async ({ page }
   });
   await page.route("**/corvette/api/v1/activity?*", (route) => {
     activityRequests.push(route.request().url());
+    if (refuseMalformedActivityQuery(route)) {
+      return;
+    }
     const params = new URL(route.request().url()).searchParams;
     return route.fulfill({
       json: {
