@@ -116,6 +116,7 @@ fn CameraCard(
             title: player_title.clone(),
         };
         let still_paused = Signal::derive(move || expanded_camera.get().is_some());
+        let page_camera_name = camera.name.clone();
         view! {
             <article class="camera-card">
                 <button
@@ -128,6 +129,13 @@ fn CameraCard(
                     <h2>{camera.display_name.clone()}</h2>
                     <p>{camera.name}</p>
                 </button>
+                <a
+                    class="camera-card-page-link"
+                    href=format!("/camera/{}", js_sys::encode_uri_component(&page_camera_name))
+                    aria-label=format!("Open {} on its own page", camera.display_name)
+                >
+                    "Own page"
+                </a>
             </article>
         }
         .into_any()

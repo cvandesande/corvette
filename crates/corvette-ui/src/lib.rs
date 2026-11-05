@@ -10,6 +10,7 @@ mod activity;
 mod all_cameras;
 mod api;
 mod calendar;
+mod camera_page;
 mod dashboard;
 mod events;
 mod expanded_view;
@@ -28,6 +29,7 @@ use leptos::prelude::*;
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
 
+use crate::camera_page::CameraPage;
 use crate::dashboard::Dashboard;
 use crate::events::EventBrowser;
 use crate::monitor::Monitor;
@@ -48,6 +50,7 @@ fn App() -> impl IntoView {
         <Router>
             <Routes fallback=|| "Page not found">
                 <Route path=path!("") view=Dashboard/>
+                <Route path=path!("camera/:name") view=CameraPage/>
                 <Route path=path!("events") view=EventBrowser/>
                 <Route path=path!("recordings") view=RecordingBrowser/>
                 <Route path=path!("monitor") view=Monitor/>
@@ -64,6 +67,7 @@ fn App() -> impl IntoView {
             <Routes fallback=|| "Page not found">
                 <Route path=path!("") view=Dashboard/>
                 <Route path=path!("events") view=EventBrowser/>
+                <Route path=path!("camera/:name") view=CameraPage/>
                 <Route
                     path=path!("recordings")
                     view={leptos_router::Lazy::<RecordingsRoute>::new()}
@@ -92,7 +96,7 @@ const RESERVED_NGINX_PREFIXES: &[&str] = &[
 ];
 
 #[cfg(test)]
-const CLIENT_ROUTES: &[&str] = &["", "events", "recordings", "monitor"];
+const CLIENT_ROUTES: &[&str] = &["", "events", "recordings", "monitor", "camera/:name"];
 
 #[cfg(test)]
 const KNOWN_TRAILING_SLASH_EXCEPTIONS: &[&str] = &["recordings"];

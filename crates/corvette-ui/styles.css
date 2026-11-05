@@ -150,6 +150,13 @@ main {
   color: #8fa09e;
 }
 
+.empty-state + a {
+  display: inline-block;
+  margin-top: 1rem;
+  color: #69d1ba;
+  text-decoration: underline;
+}
+
 .status-glyph {
   flex: 0 0 auto;
 }
@@ -230,6 +237,19 @@ main {
 }
 
 .camera-card-link:focus-visible {
+  outline: 2px solid #69d1ba;
+  outline-offset: -2px;
+}
+
+.camera-card-page-link {
+  display: block;
+  padding: 0 1rem 1rem;
+  color: #8fa09e;
+  font-size: 0.8rem;
+  text-decoration: underline;
+}
+
+.camera-card-page-link:focus-visible {
   outline: 2px solid #69d1ba;
   outline-offset: -2px;
 }
