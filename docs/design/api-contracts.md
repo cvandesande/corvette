@@ -734,21 +734,29 @@ upstream cannot hold a request open, and in size, so an oversized response is a 
 upstream and not a configuration worth parsing.
 
 Every response the service sends — success and error alike — is JSON with
-`Content-Type: application/json`, carries `Cache-Control: no-store`, and closes the
-connection. Responses nginx generates itself — `401` from a failed identity check, `403`
+`Content-Type: application/json`, with one exception: the still route's `200` is the
+camera's picture, `Content-Type: image/jpeg`, while every error the still route sends is
+JSON like every other route's. Every response carries `Cache-Control: no-store` and
+closes the connection. Responses nginx generates itself — `401` from a failed identity check, `403`
 for a refused method, `502` when the service is unreachable — carry nginx's own HTML
 body instead. Service errors share one shape, `{"code": ..., "message": ...}`, where
 `code` is a stable machine value to branch on and `message` describes the failure:
 
-- `bad_request` (`400`): the request could not be parsed; `message` names the reason.
+- `bad_request` (`400`): the request could not be parsed; `message` names the reason,
+  including a malformed camera segment or `height` on the still route.
 - `unauthorized` (`401`): no or empty `Remote-User`.
-- `not_found` (`404`): a path under the prefix that names no route, or the range-link
-  route answering for a camera that does not exist, that the caller's role may not see, or
-  that has no recorded footage overlapping the requested range.
-- `config_unavailable` (`503`): the cameras, activity or range-link route has no usable
-  Frigate configuration.
+- `not_found` (`404`): a path under the prefix that names no route, the range-link route
+  answering for a camera that does not exist, that the caller's role may not see, or that
+  has no recorded footage overlapping the requested range, or the still route answering
+  for a camera that does not exist or that the caller's role may not see.
+- `config_unavailable` (`503`): the cameras, activity, range-link or still route has no
+  usable Frigate configuration.
 - `database_unavailable` (`503`): the activity or range-link route could not read Frigate's
   database. The underlying error is logged, not returned.
+- `no_picture` (`404`): the still route found a camera the caller may see that is switched
+  off.
+- `picture_unavailable` (`503`): the still route could not get a usable picture from the
+  backing; the reason is logged, not returned.
 - `unhealthy` (`503`): the health route found failing parts; `message` names each one.
 
 `GET /corvette/api/v1/health` answers `200` `{"database":"ok","config":"ok"}` when both
@@ -941,6 +949,50 @@ the link.
 **Current backing**: recorded footage is what the rows of the backing's recordings table
 describe; a recording file deleted outside Frigate while its row remains is not detected,
 as Frigate does not detect it.
+
+The route accepts `GET` only, with the identity rules "Corvette's own API lives under
+`/corvette/api/v1/`" states for every route.
+
+## The server serves a camera's current picture
+
+A client shows a camera's picture — a tile, a preview — without building a backing
+address: the route fetches the picture and the server checks the role.
+
+`GET /corvette/api/v1/cameras/<name>/still.jpg?height=N` answers the camera's current
+picture, with `<name>` the camera's name percent-encoded (`+` stays `+`):
+
+- `height` is optional and defaults to 270; it is a whole number from 1 to 576, written
+  with ASCII digits only.
+
+The camera segment and the query are checked before the configuration is fetched: a
+malformed `height`, a repeated, unknown or value-less parameter, an empty query segment
+(`&&` or a trailing `&`) or a malformed name escape answers `400` `bad_request` with a
+message naming the reason, so such a request answers `400` while the configuration is
+unavailable.
+
+The answer is `200` with `Content-Type: image/jpeg`, `Cache-Control: no-store` and
+`Connection: close`; the body is the camera's current picture `height` pixels tall, its
+width following the camera's aspect ratio.
+
+A camera that does not exist and a camera the caller's role may not see each answer `404`
+`not_found` with the same `code` and `message` ("No such camera."), so the route reveals
+nothing about cameras the caller cannot see. A camera that is switched off answers `404`
+`no_picture` ("The camera is off and has no picture.") and the server asks the backing for
+nothing. No usable configuration copy answers `503` `config_unavailable` under the
+condition the cameras route states for it. A backing answer that is not a usable picture
+answers `503` `picture_unavailable` ("The camera's picture could not be fetched."); the
+backing's own status and body are never returned, and the reason is logged.
+
+A usable picture is a `200` whose whole response is at most 1 MiB, carries no transfer or
+content encoding, has a body matching its `Content-Length`, begins with the three JPEG
+marker bytes `FF D8 FF`, and arrives within the fetch's 2-second bound.
+
+**Current backing**: the picture is Frigate's `latest.jpg` for the camera, requested
+through Frigate's local API port at the requested height. A camera whose frames have
+stopped makes Frigate answer `200` with its own substituted error image, so the route
+forwards that image as a picture; the answer carries no frame time, so a client cannot
+tell from this route how old a picture is. `height=0` makes Frigate answer the picture
+at its detect-stream size, so the contract enforces its own 1-576 range.
 
 The route accepts `GET` only, with the identity rules "Corvette's own API lives under
 `/corvette/api/v1/`" states for every route.

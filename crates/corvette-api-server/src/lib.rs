@@ -14,6 +14,7 @@ pub mod activity;
 pub mod clip_link;
 pub mod config;
 pub mod database;
+pub mod still;
 
 use crate::activity::{ActivityQuery, ActivityRows};
 use crate::config::ConfigSource;
@@ -51,6 +52,25 @@ struct Request {
 struct Response {
     status: &'static str,
     body: Vec<u8>,
+    content_type: &'static str,
+}
+
+impl Response {
+    const fn json(status: &'static str, body: Vec<u8>) -> Self {
+        Self {
+            status,
+            body,
+            content_type: "application/json",
+        }
+    }
+
+    const fn jpeg(body: Vec<u8>) -> Self {
+        Self {
+            status: "200 OK",
+            body,
+            content_type: "image/jpeg",
+        }
+    }
 }
 
 enum Outcome {
@@ -454,6 +474,9 @@ async fn route(
     else {
         return unauthorized();
     };
+    if let Some(segment) = still::camera_segment(&request.path) {
+        return still_picture(request, config, segment).await;
+    }
     let Some(route) = Route::ALL
         .into_iter()
         .find(|candidate| candidate.path() == request.path)
@@ -470,11 +493,34 @@ async fn route(
 
 async fn cameras(config: &ConfigSource, role: &str) -> Response {
     match config.camera_list_json(role).await {
-        Ok(body) => Response {
-            status: "200 OK",
-            body,
-        },
+        Ok(body) => Response::json("200 OK", body),
         Err(err) => config_unavailable(&err),
+    }
+}
+
+async fn still_picture(request: &Request, config: &ConfigSource, segment: &str) -> Response {
+    let camera = match activity::percent_decode(segment) {
+        Ok(camera) => camera,
+        Err(reason) => return bad_request(&reason),
+    };
+    let height = match still::parse_height(&request.query) {
+        Ok(height) => height,
+        Err(reason) => return bad_request(&reason),
+    };
+    let entry = match config.camera_for_role(&request.remote_role, &camera).await {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return camera_not_found(),
+        Err(err) => return config_unavailable(&err),
+    };
+    if !entry.enabled {
+        return no_picture();
+    }
+    match still::fetch_still(config.backing_addr(), &camera, height).await {
+        Ok(bytes) => Response::jpeg(bytes),
+        Err(detail) => {
+            log_event("still", "fetch-error", &detail);
+            picture_unavailable()
+        }
     }
 }
 
@@ -523,10 +569,10 @@ async fn activity(
         }
     };
     // ActivityResponse is strings and numbers only; this cannot fail to serialize.
-    Response {
-        status: "200 OK",
-        body: serde_json::to_vec(&response).expect("activity body serializes"),
-    }
+    Response::json(
+        "200 OK",
+        serde_json::to_vec(&response).expect("activity body serializes"),
+    )
 }
 
 async fn clip_link(request: &Request, config: &ConfigSource, db_path: &Path) -> Response {
@@ -563,15 +609,15 @@ async fn clip_link(request: &Request, config: &ConfigSource, db_path: &Path) -> 
         return no_footage();
     }
     // MediaLink is one String field; its derived Serialize never fails.
-    Response {
-        status: "200 OK",
-        body: serde_json::to_vec(&activity::playlist_link(
+    Response::json(
+        "200 OK",
+        serde_json::to_vec(&activity::playlist_link(
             &query.camera,
             query.start,
             query.end,
         ))
         .expect("media link serializes"),
-    }
+    )
 }
 
 async fn health(config: &ConfigSource, db_path: &Path) -> Response {
@@ -591,10 +637,10 @@ async fn health(config: &ConfigSource, db_path: &Path) -> Response {
         config: "ok".to_owned(),
     };
     // `Health` is two String fields; its derived Serialize never fails.
-    Response {
-        status: "200 OK",
-        body: serde_json::to_vec(&body).expect("health body serializes"),
-    }
+    Response::json(
+        "200 OK",
+        serde_json::to_vec(&body).expect("health body serializes"),
+    )
 }
 
 async fn probe_database(db_path: &Path) -> Result<(), String> {
@@ -611,10 +657,10 @@ fn error_response(status: &'static str, code: &str, message: &str) -> Response {
         message: message.to_owned(),
     };
     // ErrorBody is two String fields; its derived Serialize never fails.
-    Response {
+    Response::json(
         status,
-        body: serde_json::to_vec(&body).expect("error body serializes"),
-    }
+        serde_json::to_vec(&body).expect("error body serializes"),
+    )
 }
 
 fn bad_request(message: &str) -> Response {
@@ -657,6 +703,26 @@ fn no_footage() -> Response {
     )
 }
 
+fn camera_not_found() -> Response {
+    error_response("404 Not Found", "not_found", "No such camera.")
+}
+
+fn no_picture() -> Response {
+    error_response(
+        "404 Not Found",
+        "no_picture",
+        "The camera is off and has no picture.",
+    )
+}
+
+fn picture_unavailable() -> Response {
+    error_response(
+        "503 Service Unavailable",
+        "picture_unavailable",
+        "The camera's picture could not be fetched.",
+    )
+}
+
 /// Drains buffered bytes so the close sends a FIN, not an RST that drops the response.
 fn drain_buffered(stream: &UnixStream) {
     let mut scratch = [0_u8; 4096];
@@ -665,8 +731,9 @@ fn drain_buffered(stream: &UnixStream) {
 
 async fn write_response(stream: &mut UnixStream, response: &Response) -> std::io::Result<()> {
     let header = format!(
-        "HTTP/1.0 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        "HTTP/1.0 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
         response.status,
+        response.content_type,
         response.body.len()
     );
     stream.write_all(header.as_bytes()).await?;

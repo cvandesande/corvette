@@ -2,7 +2,7 @@
 //! trustworthy configuration; chunked, encoded or truncated responses are not.
 
 use crate::{find_header_end, log_event, split_at_byte, split_header_lines, trim_spaces, utf8};
-use corvette_api::FrigateConfig;
+use corvette_api::{CameraEntry, FrigateConfig};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -62,6 +62,23 @@ impl ConfigSource {
         Ok(serde_json::to_vec(&list).expect("camera list serializes"))
     }
 
+    pub(crate) async fn camera_for_role(
+        &self,
+        role: &str,
+        name: &str,
+    ) -> Result<Option<CameraEntry>, ConfigFetchError> {
+        Ok(self
+            .config()
+            .await?
+            .camera_entries_for_role_including_off(role)
+            .into_iter()
+            .find(|entry| entry.name == name))
+    }
+
+    pub(crate) fn backing_addr(&self) -> &str {
+        &self.addr
+    }
+
     pub(crate) async fn available(&self) -> Result<(), ConfigFetchError> {
         self.config().await.map(|_config| ())
     }
@@ -103,7 +120,18 @@ impl ConfigSource {
 }
 
 async fn fetch(addr: &str) -> Result<FrigateConfig, ConfigFetchError> {
-    tokio::time::timeout(FETCH_TIMEOUT, fetch_from(addr))
+    let body = get_body(addr, "/api/config", MAX_CONFIG_BYTES, "config").await?;
+    serde_json::from_slice(&body)
+        .map_err(|err| ConfigFetchError(format!("response body is not a config: {err}")))
+}
+
+pub(crate) async fn get_body(
+    addr: &str,
+    path: &str,
+    limit: usize,
+    what: &str,
+) -> Result<Vec<u8>, ConfigFetchError> {
+    tokio::time::timeout(FETCH_TIMEOUT, get_body_from(addr, path, limit, what))
         .await
         .map_err(|_elapsed| {
             ConfigFetchError(format!(
@@ -112,39 +140,44 @@ async fn fetch(addr: &str) -> Result<FrigateConfig, ConfigFetchError> {
         })?
 }
 
-async fn fetch_from(addr: &str) -> Result<FrigateConfig, ConfigFetchError> {
+async fn get_body_from(
+    addr: &str,
+    path: &str,
+    limit: usize,
+    what: &str,
+) -> Result<Vec<u8>, ConfigFetchError> {
     let mut stream = TcpStream::connect(addr)
         .await
         .map_err(|err| ConfigFetchError(format!("could not connect to {addr}: {err}")))?;
     // Frigate's nginx serves `/api/` from cache unless the request sends `X-Cache-Bypass`.
     let request = format!(
-        "GET /api/config HTTP/1.0\r\nHost: {addr}\r\nX-Cache-Bypass: 1\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.0\r\nHost: {addr}\r\nX-Cache-Bypass: 1\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(request.as_bytes()).await.map_err(|err| {
         ConfigFetchError(format!(
-            "could not send the config request to {addr}: {err}"
+            "could not send the {what} request to {addr}: {err}"
         ))
     })?;
     let mut response = Vec::new();
     stream
-        .take(MAX_CONFIG_BYTES as u64 + 1)
+        .take(limit as u64 + 1)
         .read_to_end(&mut response)
         .await
         .map_err(|err| {
             ConfigFetchError(format!(
-                "could not read the config response from {addr}: {err}"
+                "could not read the {what} response from {addr}: {err}"
             ))
         })?;
-    if response.len() > MAX_CONFIG_BYTES {
+    if response.len() > limit {
         return Err(ConfigFetchError(format!(
-            "config response from {addr} exceeded the {} MiB limit",
-            MAX_CONFIG_BYTES / (1024 * 1024)
+            "{what} response from {addr} exceeded the {} MiB limit",
+            limit / (1024 * 1024)
         )));
     }
     parse_response(&response)
 }
 
-fn parse_response(response: &[u8]) -> Result<FrigateConfig, ConfigFetchError> {
+fn parse_response(response: &[u8]) -> Result<Vec<u8>, ConfigFetchError> {
     let Some(head_end) = find_header_end(response) else {
         return Err(ConfigFetchError(
             "response ended before its header block did".to_owned(),
@@ -202,6 +235,5 @@ fn parse_response(response: &[u8]) -> Result<FrigateConfig, ConfigFetchError> {
             body.len()
         )));
     }
-    serde_json::from_slice(body)
-        .map_err(|err| ConfigFetchError(format!("response body is not a config: {err}")))
+    Ok(body.to_vec())
 }

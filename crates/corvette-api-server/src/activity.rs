@@ -529,7 +529,7 @@ pub(crate) fn playlist_link(camera: &str, start: f64, end: f64) -> MediaLink {
 }
 
 /// Percent-encodes every byte outside the unreserved set as upper-case `%XX`.
-fn percent_encode_segment(segment: &str) -> String {
+pub(crate) fn percent_encode_segment(segment: &str) -> String {
     const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = String::with_capacity(segment.len());
     for byte in segment.as_bytes() {
