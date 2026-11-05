@@ -22,6 +22,9 @@ const HLS_PLAYLIST_PATH_PREFIX: &str = "/live/hls/";
 /// Below the vendored library's own 10-second reconnect deadline, so this timeout is what a viewer experiences against an unreachable relay.
 const MOQ_ATTEMPT_TIMEOUT_MS: i32 = 4_000;
 
+/// A stalled script request never fires `load` or `error`, so only a timer can end the wait for it.
+const SCRIPT_LOAD_TIMEOUT_MS: i32 = 10_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LivePath {
     Connecting,
@@ -241,9 +244,15 @@ fn mount_moq(state: &Rc<RefCell<SessionState>>) {
     };
 
     let state = Rc::clone(state);
-    ensure_script_loaded(&MOQ_WATCH_LOAD, MOQ_WATCH_SCRIPT_SRC, move || {
-        create_moq_watch_element(&state, &camera_name, &relay_url);
-    });
+    let fallback_state = Rc::clone(&state);
+    ensure_script_loaded(
+        &MOQ_WATCH_LOAD,
+        MOQ_WATCH_SCRIPT_SRC,
+        move || {
+            create_moq_watch_element(&state, &camera_name, &relay_url);
+        },
+        move || mount_hls_fallback(fallback_state),
+    );
 }
 
 fn moq_connection_handles(
@@ -274,6 +283,8 @@ fn create_moq_watch_element(state: &Rc<RefCell<SessionState>>, camera_name: &str
         return;
     };
     let Ok(element) = document.create_element("moq-watch") else {
+        drop(borrowed);
+        mount_hls_fallback(Rc::clone(state));
         return;
     };
     let _ = element.set_attribute("url", relay_url);
@@ -283,6 +294,8 @@ fn create_moq_watch_element(state: &Rc<RefCell<SessionState>>, camera_name: &str
         let _ = element.append_child(&canvas);
     }
     if borrowed.container.append_child(&element).is_err() {
+        drop(borrowed);
+        mount_hls_fallback(Rc::clone(state));
         return;
     }
 
@@ -399,9 +412,18 @@ fn mount_hls_fallback(state: Rc<RefCell<SessionState>>) {
         borrowed.camera_name.clone()
     };
 
-    ensure_script_loaded(&HLS_JS_LOAD, HLS_SCRIPT_SRC, move || {
-        create_hls_video(&state, &camera_name);
-    });
+    let fallback_state = Rc::clone(&state);
+    let fallback_camera_name = camera_name.clone();
+    ensure_script_loaded(
+        &HLS_JS_LOAD,
+        HLS_SCRIPT_SRC,
+        move || {
+            create_hls_video(&state, &camera_name);
+        },
+        move || {
+            try_native_hls_or_give_up(&fallback_state, &fallback_camera_name);
+        },
+    );
 }
 
 fn create_video_element(borrowed: &SessionState) -> Option<HtmlVideoElement> {
@@ -585,10 +607,14 @@ fn video_decoder_available() -> bool {
         .is_ok_and(|value| value.is_function())
 }
 
+type ScriptWaiters = Vec<(Box<dyn FnOnce()>, Box<dyn FnOnce()>)>;
+
 enum ScriptLoad {
     NotRequested,
-    Loading(Vec<Box<dyn FnOnce()>>),
+    Loading(ScriptWaiters),
     Ready,
+    /// A script that failed once is never re-injected for the life of the page, so every later caller settles to its failure at once.
+    Failed,
 }
 
 thread_local! {
@@ -597,69 +623,117 @@ thread_local! {
 }
 
 pub(crate) fn ensure_hls_script_loaded(on_ready: impl FnOnce() + 'static) {
-    ensure_script_loaded(&HLS_JS_LOAD, HLS_SCRIPT_SRC, on_ready);
+    ensure_script_loaded(&HLS_JS_LOAD, HLS_SCRIPT_SRC, on_ready, || {});
 }
 
 fn ensure_script_loaded(
     cell: &'static std::thread::LocalKey<RefCell<ScriptLoad>>,
     src: &'static str,
     on_ready: impl FnOnce() + 'static,
+    on_failed: impl FnOnce() + 'static,
 ) {
-    let mut on_ready: Option<Box<dyn FnOnce()>> = Some(Box::new(on_ready));
+    let ready: Box<dyn FnOnce()> = Box::new(on_ready);
+    let failed: Box<dyn FnOnce()> = Box::new(on_failed);
+    let mut settle_now: Option<Box<dyn FnOnce()>> = None;
     let should_inject = cell.with(|state| {
         let mut state = state.borrow_mut();
         match &mut *state {
-            ScriptLoad::Ready => false,
+            ScriptLoad::Ready => {
+                settle_now = Some(ready);
+                false
+            }
+            ScriptLoad::Failed => {
+                settle_now = Some(failed);
+                false
+            }
             ScriptLoad::Loading(waiters) => {
-                if let Some(on_ready) = on_ready.take() {
-                    waiters.push(on_ready);
-                }
+                waiters.push((ready, failed));
                 false
             }
             ScriptLoad::NotRequested => {
-                let mut waiters = Vec::with_capacity(1);
-                if let Some(on_ready) = on_ready.take() {
-                    waiters.push(on_ready);
-                }
-                *state = ScriptLoad::Loading(waiters);
+                *state = ScriptLoad::Loading(vec![(ready, failed)]);
                 true
             }
         }
     });
-    if let Some(on_ready) = on_ready {
-        on_ready();
+    if let Some(settle_now) = settle_now {
+        settle_now();
     }
     if !should_inject {
         return;
     }
 
     let Some(window) = web_sys::window() else {
+        settle_script_failed(cell);
         return;
     };
     let Some(document) = window.document() else {
+        settle_script_failed(cell);
         return;
     };
     let Ok(script_element) = document.create_element("script") else {
+        settle_script_failed(cell);
         return;
     };
     let Ok(script) = script_element.dyn_into::<web_sys::HtmlScriptElement>() else {
+        settle_script_failed(cell);
         return;
     };
     script.set_src(src);
 
-    let on_load = Closure::once_into_js(move || {
-        let waiters =
-            cell.with(|state| std::mem::replace(&mut *state.borrow_mut(), ScriptLoad::Ready));
-        if let ScriptLoad::Loading(waiters) = waiters {
-            for waiter in waiters {
-                waiter();
+    let settled = Rc::new(Cell::new(false));
+
+    let on_load = {
+        let settled = Rc::clone(&settled);
+        Closure::once_into_js(move || {
+            if settled.replace(true) {
+                return;
             }
-        }
-    });
+            let waiters =
+                cell.with(|state| std::mem::replace(&mut *state.borrow_mut(), ScriptLoad::Ready));
+            if let ScriptLoad::Loading(waiters) = waiters {
+                for (on_ready, _) in waiters {
+                    on_ready();
+                }
+            }
+        })
+    };
     script.set_onload(Some(on_load.unchecked_ref()));
+
+    let on_error = {
+        let settled = Rc::clone(&settled);
+        Closure::once_into_js(move || {
+            if settled.replace(true) {
+                return;
+            }
+            settle_script_failed(cell);
+        })
+    };
+    script.set_onerror(Some(on_error.unchecked_ref()));
+
+    let on_timeout = Closure::once_into_js(move || {
+        if settled.replace(true) {
+            return;
+        }
+        settle_script_failed(cell);
+    });
+    let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+        on_timeout.unchecked_ref(),
+        SCRIPT_LOAD_TIMEOUT_MS,
+    );
 
     if let Some(root) = document.document_element() {
         let _ = root.append_child(&script);
+    }
+}
+
+fn settle_script_failed(cell: &'static std::thread::LocalKey<RefCell<ScriptLoad>>) {
+    let waiters =
+        cell.with(|state| std::mem::replace(&mut *state.borrow_mut(), ScriptLoad::Failed));
+    if let ScriptLoad::Loading(waiters) = waiters {
+        for (_, on_failed) in waiters {
+            on_failed();
+        }
     }
 }
 
