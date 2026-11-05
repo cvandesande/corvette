@@ -11,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
 pub mod activity;
+pub mod clip_link;
 pub mod config;
 pub mod database;
 
@@ -421,17 +422,19 @@ pub(crate) fn utf8(bytes: &[u8]) -> Option<&str> {
 pub enum Route {
     Activity,
     Cameras,
+    ClipLink,
     Health,
 }
 
 impl Route {
-    pub const ALL: [Self; 3] = [Self::Activity, Self::Cameras, Self::Health];
+    pub const ALL: [Self; 4] = [Self::Activity, Self::Cameras, Self::ClipLink, Self::Health];
 
     #[must_use]
     pub fn path(self) -> String {
         match self {
             Self::Activity => format!("{API_PREFIX}activity"),
             Self::Cameras => format!("{API_PREFIX}cameras"),
+            Self::ClipLink => format!("{API_PREFIX}clip-link"),
             Self::Health => format!("{API_PREFIX}health"),
         }
     }
@@ -460,6 +463,7 @@ async fn route(
     match route {
         Route::Activity => activity(request, config, db_path, media_root, clock).await,
         Route::Cameras => cameras(config, &request.remote_role).await,
+        Route::ClipLink => clip_link(request, config, db_path).await,
         Route::Health => health(config, db_path).await,
     }
 }
@@ -470,11 +474,7 @@ async fn cameras(config: &ConfigSource, role: &str) -> Response {
             status: "200 OK",
             body,
         },
-        Err(err) => error_response(
-            "503 Service Unavailable",
-            "config_unavailable",
-            &format!("Frigate configuration is unavailable: {err}"),
-        ),
+        Err(err) => config_unavailable(&err),
     }
 }
 
@@ -492,13 +492,7 @@ async fn activity(
     };
     let mut cameras = match config.allowed_camera_names(&request.remote_role).await {
         Ok(cameras) => cameras,
-        Err(err) => {
-            return error_response(
-                "503 Service Unavailable",
-                "config_unavailable",
-                &format!("Frigate configuration is unavailable: {err}"),
-            );
-        }
+        Err(err) => return config_unavailable(&err),
     };
     if let Some(requested) = &query.cameras {
         cameras.retain(|name| requested.contains(name));
@@ -532,6 +526,51 @@ async fn activity(
     Response {
         status: "200 OK",
         body: serde_json::to_vec(&response).expect("activity body serializes"),
+    }
+}
+
+async fn clip_link(request: &Request, config: &ConfigSource, db_path: &Path) -> Response {
+    let query = match clip_link::ClipLinkQuery::parse(&request.query) {
+        Ok(query) => query,
+        Err(reason) => return bad_request(&reason),
+    };
+    let allowed = match config.allowed_camera_names(&request.remote_role).await {
+        Ok(cameras) => cameras,
+        Err(err) => return config_unavailable(&err),
+    };
+    if !allowed.contains(&query.camera) {
+        return no_footage();
+    }
+    let db_path = db_path.to_path_buf();
+    let camera = query.camera.clone();
+    let read = tokio::task::spawn_blocking(move || -> rusqlite::Result<bool> {
+        let connection = database::open_read_only(&db_path)?;
+        clip_link::has_recorded_footage(&connection, &camera, query.start, query.end)
+    })
+    .await;
+    let has_footage = match read {
+        Ok(Ok(has_footage)) => has_footage,
+        Ok(Err(err)) => {
+            log_event("database", "clip-link-read-error", err);
+            return database_unavailable();
+        }
+        Err(err) => {
+            log_event("database", "clip-link-task-error", err);
+            return database_unavailable();
+        }
+    };
+    if !has_footage {
+        return no_footage();
+    }
+    // MediaLink is one String field; its derived Serialize never fails.
+    Response {
+        status: "200 OK",
+        body: serde_json::to_vec(&activity::playlist_link(
+            &query.camera,
+            query.start,
+            query.end,
+        ))
+        .expect("media link serializes"),
     }
 }
 
@@ -582,6 +621,14 @@ fn bad_request(message: &str) -> Response {
     error_response("400 Bad Request", "bad_request", message)
 }
 
+fn config_unavailable(err: &impl std::fmt::Display) -> Response {
+    error_response(
+        "503 Service Unavailable",
+        "config_unavailable",
+        &format!("Frigate configuration is unavailable: {err}"),
+    )
+}
+
 fn database_unavailable() -> Response {
     error_response(
         "503 Service Unavailable",
@@ -600,6 +647,14 @@ fn unauthorized() -> Response {
 
 fn not_found() -> Response {
     error_response("404 Not Found", "not_found", "no such route")
+}
+
+fn no_footage() -> Response {
+    error_response(
+        "404 Not Found",
+        "not_found",
+        "No recorded footage is available for this camera and range.",
+    )
 }
 
 /// Drains buffered bytes so the close sends a FIN, not an RST that drops the response.

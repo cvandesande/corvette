@@ -34,7 +34,7 @@ impl ActivityQuery {
     ///
     /// Returns a message naming the offending parameter or the failing text.
     pub fn parse(query: &str) -> Result<Self, String> {
-        let params = parse_parameters(query)?;
+        let params = parse_parameters(query, &["after", "before", "cameras", "include"])?;
         let after = params
             .get("after")
             .map(String::as_str)
@@ -45,14 +45,7 @@ impl ActivityQuery {
             .map(String::as_str)
             .ok_or_else(|| "missing query parameter `before`".to_owned())
             .and_then(|value| parse_timestamp("before", value))?;
-        if after >= before {
-            return Err("`before` must be greater than `after`".to_owned());
-        }
-        if before - after > MAX_RANGE_SECONDS {
-            return Err(format!(
-                "`before` is more than {MAX_RANGE_SECONDS} seconds after `after`"
-            ));
-        }
+        check_range("after", "before", after, before)?;
 
         let cameras = params.get("cameras").map(|value| {
             value
@@ -90,7 +83,28 @@ impl ActivityQuery {
     }
 }
 
-fn parse_parameters(query: &str) -> Result<BTreeMap<String, String>, String> {
+/// Rejects a range whose end is not after its start, or longer than [`MAX_RANGE_SECONDS`].
+pub(crate) fn check_range(
+    from_name: &str,
+    to_name: &str,
+    from: f64,
+    to: f64,
+) -> Result<(), String> {
+    if from >= to {
+        return Err(format!("`{to_name}` must be greater than `{from_name}`"));
+    }
+    if to - from > MAX_RANGE_SECONDS {
+        return Err(format!(
+            "`{to_name}` is more than {MAX_RANGE_SECONDS} seconds after `{from_name}`"
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_parameters(
+    query: &str,
+    allowed: &[&str],
+) -> Result<BTreeMap<String, String>, String> {
     let mut params = BTreeMap::new();
     if query.is_empty() {
         return Ok(params);
@@ -104,7 +118,7 @@ fn parse_parameters(query: &str) -> Result<BTreeMap<String, String>, String> {
             return Err(format!("query parameter `{name}` is missing its value"));
         };
         let name = percent_decode(raw_name)?;
-        if !matches!(name.as_str(), "after" | "before" | "cameras" | "include") {
+        if !allowed.contains(&name.as_str()) {
             return Err(format!("unknown query parameter `{name}`"));
         }
         if params.contains_key(name.as_str()) {
@@ -115,7 +129,7 @@ fn parse_parameters(query: &str) -> Result<BTreeMap<String, String>, String> {
     Ok(params)
 }
 
-fn parse_timestamp(name: &str, value: &str) -> Result<f64, String> {
+pub(crate) fn parse_timestamp(name: &str, value: &str) -> Result<f64, String> {
     value
         .parse::<f64>()
         .ok()
@@ -124,7 +138,7 @@ fn parse_timestamp(name: &str, value: &str) -> Result<f64, String> {
 }
 
 /// `+` stays `+`: this grammar has no plus-as-space convention.
-fn percent_decode(text: &str) -> Result<String, String> {
+pub(crate) fn percent_decode(text: &str) -> Result<String, String> {
     let mut decoded = Vec::with_capacity(text.len());
     let mut bytes = text.as_bytes().iter();
     while let Some(&byte) = bytes.next() {
@@ -280,6 +294,9 @@ fn sorted_cameras(mut bucket: MotionBucket) -> MotionBucket {
     bucket
 }
 
+pub(crate) const RECORDING_OVERLAP_SQL: &str = "SELECT EXISTS(SELECT 1 FROM recordings \
+     WHERE camera = ? AND start_time < ? AND end_time > ?)";
+
 fn read_reviews(
     transaction: &rusqlite::Transaction<'_>,
     query: &ActivityQuery,
@@ -309,10 +326,7 @@ fn read_reviews(
         .query_map(params_from_iter(&parameters), review_from_row)?
         .collect::<rusqlite::Result<Vec<ReviewRow>>>()?;
 
-    let mut overlaps = transaction.prepare(
-        "SELECT EXISTS(SELECT 1 FROM recordings \
-         WHERE camera = ? AND start_time < ? AND end_time > ?)",
-    )?;
+    let mut overlaps = transaction.prepare(RECORDING_OVERLAP_SQL)?;
     for review in &mut reviews {
         review.has_recording = match review.end {
             // `EXISTS` always returns one row holding 0 or 1, so the value is
@@ -498,16 +512,20 @@ fn clip_link(
     if !has_recording {
         return None;
     }
+    Some(playlist_link(camera, start, end))
+}
+
+pub(crate) fn playlist_link(camera: &str, start: f64, end: f64) -> MediaLink {
     // `{}` on an f64 is Rust's shortest round-trip form, so stored whole
     // seconds come back as `1500`, not `1500.0`.
-    Some(MediaLink {
+    MediaLink {
         url: format!(
             "/corvette/api/v1/media/{}/start/{}/end/{}/master.m3u8",
             percent_encode_segment(camera),
             start,
             end
         ),
-    })
+    }
 }
 
 /// Percent-encodes every byte outside the unreserved set as upper-case `%XX`.

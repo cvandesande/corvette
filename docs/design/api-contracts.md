@@ -32,7 +32,8 @@ entry is a review decision or a sampled motion interval.
 A motion timestamp identifies the start of a sampling bucket, not an exact
 retained frame. Media for motion activity is addressed as a range because a
 point timestamp can fall in a recording gap even when its bucket contains
-playable footage.
+playable footage. The server issues the link for such a range through the
+range-link route, `GET /corvette/api/v1/clip-link`.
 
 ## Ranges use half-open overlap
 
@@ -741,10 +742,12 @@ body instead. Service errors share one shape, `{"code": ..., "message": ...}`, w
 
 - `bad_request` (`400`): the request could not be parsed; `message` names the reason.
 - `unauthorized` (`401`): no or empty `Remote-User`.
-- `not_found` (`404`): a path under the prefix that names no route.
-- `config_unavailable` (`503`): the cameras or activity route has no usable Frigate
-  configuration.
-- `database_unavailable` (`503`): the activity route could not read Frigate's
+- `not_found` (`404`): a path under the prefix that names no route, or the range-link
+  route answering for a camera that does not exist, that the caller's role may not see, or
+  that has no recorded footage overlapping the requested range.
+- `config_unavailable` (`503`): the cameras, activity or range-link route has no usable
+  Frigate configuration.
+- `database_unavailable` (`503`): the activity or range-link route could not read Frigate's
   database. The underlying error is logged, not returned.
 - `unhealthy` (`503`): the health route found failing parts; `message` names each one.
 
@@ -823,18 +826,18 @@ reviews, so a review's `media` carries only its thumbnail and its clip. Each lin
   deleted outside Frigate is reported unavailable. The URL is the stored path with the
   `/media/frigate` prefix removed, each segment percent-encoded, which nginx serves under
   `/clips/` (see "Thumbnails under `/clips/` carry no usable content type").
-- `clip` is present when the review has ended and at least one recording row of its camera
-  overlaps `[start, end)`. A review with no end has `clip` when its start is before the
-  moment of the request and at least one recording row of its camera overlaps
-  `[start, moment of the request)`, and the link's range ends at the moment of the
-  request, which differs from request to request. The URL is the address of "A recorded
-  range plays through one playlist route",
+- `clip` is present when the review has ended and recorded footage of its camera overlaps
+  `[start, end)`. A review with no end has `clip` when its start is before the moment of
+  the request and recorded footage of its camera overlaps `[start, moment of the
+  request)`, and the link's range ends at the moment of the request, which differs from
+  request to request. The URL is the address of "A recorded range plays through one
+  playlist route",
   `/corvette/api/v1/media/{camera}/start/{start}/end/{end}/master.m3u8`, with the camera
   percent-encoded, the review's start, and its end (the moment of the request for a review
-  with no end). The answers that route gives
-  for a range it cannot serve are those of that section. **Current backing**: a recording
-  file deleted outside Frigate while its row remains is not detected, as Frigate does not
-  detect it.
+  with no end). The answers that route gives for a range it cannot serve are those of that
+  section. **Current backing**: a recording is a row of the backing's database, and a
+  recording file deleted outside Frigate while its row remains is not detected, as
+  Frigate does not detect it.
 
 When Corvette owns login (issue #30), and later its own camera configuration, these
 response shapes stay the same; only their sources change.
@@ -858,7 +861,8 @@ The address is
 `GET /corvette/api/v1/media/<camera>/start/<start>/end/<end>/master.m3u8`.
 `<camera>` is a percent-encoded path segment; `<start>` and `<end>` are Unix
 seconds, decimals allowed. Clients do not build this address: they take it
-from a link the server issued, as "Media availability is explicit" requires.
+from a link the server issued, either a review's `media.clip` or the range-link
+route's answer, as "Media availability is explicit" requires.
 
 The playlist's variant, index, init and segment URIs are relative and
 resolve under the route's own directory (`…/start/<start>/end/<end>/`), so
@@ -895,6 +899,51 @@ recording's duration trimmed to the requested range and pulled back to the
 previous keyframe; a range for which every recording is skipped answers
 like a range with no recording. Whether the deployed recordings ever reach
 600 s is unverified.
+
+## The server issues a link for any recorded range
+
+A client sometimes holds a time range with no review behind it: the range of a motion entry
+in the activity answer, or a range a person selects on the timeline. This `clip-link` route
+answers the link that plays a camera's recorded footage for such a range, and the client
+never builds the playlist address itself.
+
+`GET /corvette/api/v1/clip-link?camera=&start=&end=` answers `{"url": "<address>"}`:
+
+- `camera` is required and names one camera.
+- `start` and `end` are required Unix seconds, decimal fractions allowed, finite and not
+  negative, with `start < end` and a range of at most 31 days (2678400 s), the bounds of
+  the activity route's `after` and `before`.
+- Names and values are percent-decoded (`+` stays `+`). A missing required parameter, an
+  unknown, repeated or value-less parameter, an empty segment (`&&` or a trailing `&`), a
+  malformed escape or one that decodes to invalid UTF-8, or a value outside these rules
+  answers `400` `bad_request` with a message naming the reason.
+
+The query is checked before the configuration is fetched, so a malformed request answers
+`400` even while the configuration is unavailable.
+
+The answer is `200` with `{"url": "<address>"}` when the caller's role may see the camera
+and recorded footage of the camera overlaps `[start, end)` under "Ranges use half-open
+overlap". The address is the one "A recorded range plays through one playlist route"
+defines, with the camera percent-encoded and the requested range, and it has the same shape
+as the `url` of a review's `media.clip`.
+
+A camera that does not exist, a camera the caller's role may not see, and a camera with no
+recorded footage overlapping the range each answer `404` `not_found` with the same `code`
+and `message`, so the route reveals nothing about cameras the caller cannot see. The route
+answers `503` `config_unavailable` under the condition the cameras route states for it: no
+usable configuration copy can be served. It answers `503` `database_unavailable` when the
+recordings cannot be read; the underlying error is logged, not returned.
+
+A link states availability at the moment of the request. Retention can remove footage
+afterwards, and the playlist route's own answers for a range it cannot serve then apply to
+the link.
+
+**Current backing**: recorded footage is what the rows of the backing's recordings table
+describe; a recording file deleted outside Frigate while its row remains is not detected,
+as Frigate does not detect it.
+
+The route accepts `GET` only, with the identity rules "Corvette's own API lives under
+`/corvette/api/v1/`" states for every route.
 
 ## No camera's audio track is published on any live-view transport yet
 
