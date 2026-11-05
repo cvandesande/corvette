@@ -28,7 +28,7 @@ test("the grid tile renders no iframe and no live video element", async ({ page 
   );
   await page.route("**/api/review?*", (route) => route.fulfill({ json: [] }));
   await page.route("**/api/review/activity/motion?*", (route) => route.fulfill({ json: [] }));
-  await page.route("**/api/*/latest.jpg*", (route) =>
+  await page.route("**/corvette/api/v1/cameras/*/still.jpg*", (route) =>
     route.fulfill({ contentType: "image/jpeg", body: JPEG }),
   );
 

@@ -13,6 +13,18 @@ const JPEG = Buffer.from(
   "base64",
 );
 
+// A decodable 2x2 JPEG, a different size from the first picture, so a swapped
+// refresh shows as a new natural width on the displayed image.
+const JPEG2 = Buffer.from(
+  "/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYyLjI4LjEwMgD/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABLAAEBAAAAAAAAAAAAAAAAAAAABQEBAAAAAAAAAAAAAAAAAAAABhABAAAAAAAAAAAAAAAAAAAAABEBAAAAAAAAAAAAAAAAAAAAAP/AABEIAAIAAgMBIgACEQADEQD/2gAMAwEAAhEDEQA/AIIB2OP/2Q==",
+  "base64",
+);
+
+// The exact address a front-camera tile must ask for: height is its only query
+// parameter, because the contract refuses any other one.
+const FRONT_STILL_URL = "/corvette/api/v1/cameras/front/still.jpg?height=270";
+const GARAGE_STILL_URL = "/corvette/api/v1/cameras/garage/still.jpg?height=270";
+
 const FRONT_CAMERA = {
   name: "front",
   display_name: "Front",
@@ -37,23 +49,25 @@ const stubDashboardApis = (page, cameras) =>
   ]);
 
 const stubStills = (page) =>
-  page.route("**/api/*/latest.jpg*", (route) =>
-    route.fulfill({ contentType: "image/jpeg", body: JPEG }),
+  page.route("**/corvette/api/v1/cameras/*/still.jpg*", (route) =>
+    route.fulfill({
+      contentType: "image/jpeg",
+      headers: { "cache-control": "no-store" },
+      body: JPEG,
+    }),
   );
 
 const recordStillRequests = (page, requests) => {
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.pathname.endsWith("/latest.jpg")) {
+    if (url.pathname.endsWith("/still.jpg")) {
       requests.push(`${url.pathname}${url.search}`);
     }
   });
 };
 
-const requestsForCameraRefresh = (requests, camera, counter) =>
-  requests.filter(
-    (path) => path.startsWith(`/api/${camera}/`) && path.endsWith(`&r=${counter}`),
-  ).length;
+const requestsForCameraRefresh = (requests, camera) =>
+  requests.filter((path) => path.startsWith(`/corvette/api/v1/cameras/${camera}/`)).length;
 
 const stillTile = (page, index) => page.locator(".camera-card").nth(index).locator(".still-tile");
 const stillImage = (page, index) => stillTile(page, index).locator("img.still-tile-image");
@@ -67,10 +81,7 @@ test("each tile shows a sized still picture and no live video", async ({ page })
   await page.goto("/");
 
   await expect(stillImage(page, 0)).toHaveCount(1);
-  await expect(stillImage(page, 0)).toHaveAttribute(
-    "src",
-    /^\/api\/front\/latest\.jpg\?height=270&r=\d+$/,
-  );
+  await expect(stillImage(page, 0)).toHaveAttribute("src", FRONT_STILL_URL);
   await expect(page.locator(".camera-card video")).toHaveCount(0);
   expect(
     allRequests.filter((pathname) => pathname.startsWith("/live/mse/ws/")),
@@ -87,15 +98,61 @@ test("each tile requests a fresh picture every 30 seconds", async ({ page }) => 
   await stubStills(page);
   await page.goto("/");
 
-  await expect(stillImage(page, 0)).toHaveAttribute("src", /\/api\/front\/latest\.jpg\?height=270&r=1$/);
-  await expect(stillImage(page, 1)).toHaveAttribute("src", /\/api\/garage\/latest\.jpg\?height=270&r=1$/);
+  await expect(stillImage(page, 0)).toHaveAttribute("src", FRONT_STILL_URL);
+  await expect(stillImage(page, 1)).toHaveAttribute("src", GARAGE_STILL_URL);
 
   await page.clock.fastForward(30_000);
 
-  await expect.poll(() => requestsForCameraRefresh(requests, "front", 2)).toBeGreaterThan(0);
-  await expect.poll(() => requestsForCameraRefresh(requests, "garage", 2)).toBeGreaterThan(0);
-  await expect(stillImage(page, 0)).toHaveAttribute("src", /&r=2$/);
-  await expect(stillImage(page, 1)).toHaveAttribute("src", /&r=2$/);
+  await expect
+    .poll(() => requestsForCameraRefresh(requests, "front"))
+    .toBeGreaterThanOrEqual(2);
+  await expect
+    .poll(() => requestsForCameraRefresh(requests, "garage"))
+    .toBeGreaterThanOrEqual(2);
+
+  // The refresh re-reads the identical address: no counter, no other parameter.
+  const frontRequests = requests.filter((path) =>
+    path.startsWith("/corvette/api/v1/cameras/front/"),
+  );
+  expect(frontRequests[0]).toBe(FRONT_STILL_URL);
+  expect(frontRequests[1]).toBe(FRONT_STILL_URL);
+
+  // A refresh that loaded restarts the tile's own age, so the label is back to
+  // "just now" even though thirty seconds passed.
+  await expect(stillTile(page, 0).locator(".still-tile-age")).toHaveText("just now");
+  await expect(stillImage(page, 0)).toHaveAttribute("src", FRONT_STILL_URL);
+  await expect(stillImage(page, 1)).toHaveAttribute("src", GARAGE_STILL_URL);
+});
+
+test("a refreshed picture replaces the displayed one", async ({ page }) => {
+  await page.clock.install();
+  // Each refresh cycle fetches the identical address twice, once to preload and
+  // once when the visible image takes the src, so the stub switches on the
+  // clock moving rather than on a request count.
+  let refreshed = false;
+
+  await stubDashboardApis(page, [FRONT_CAMERA]);
+  await page.route("**/corvette/api/v1/cameras/*/still.jpg*", (route) =>
+    route.fulfill({
+      contentType: "image/jpeg",
+      headers: { "cache-control": "no-store" },
+      body: refreshed ? JPEG2 : JPEG,
+    }),
+  );
+
+  await page.goto("/");
+  await expect(stillImage(page, 0)).toHaveAttribute("src", FRONT_STILL_URL);
+  await expect
+    .poll(() => stillImage(page, 0).evaluate((image) => image.naturalWidth))
+    .toBe(1);
+
+  refreshed = true;
+  await page.clock.fastForward(30_000);
+
+  await expect
+    .poll(() => stillImage(page, 0).evaluate((image) => image.naturalWidth))
+    .toBe(2);
+  await expect(stillImage(page, 0)).toHaveAttribute("src", FRONT_STILL_URL);
 });
 
 test("a hidden page skips picture refreshes and a visible page refreshes at once", async ({
@@ -109,8 +166,8 @@ test("a hidden page skips picture refreshes and a visible page refreshes at once
   await stubStills(page);
   await page.goto("/");
 
-  await expect(stillImage(page, 0)).toHaveAttribute("src", /latest\.jpg/);
-  await expect(stillImage(page, 1)).toHaveAttribute("src", /latest\.jpg/);
+  await expect(stillImage(page, 0)).toHaveAttribute("src", FRONT_STILL_URL);
+  await expect(stillImage(page, 1)).toHaveAttribute("src", GARAGE_STILL_URL);
   const baseline = requests.length;
 
   await page.evaluate(() => {
@@ -124,8 +181,12 @@ test("a hidden page skips picture refreshes and a visible page refreshes at once
     Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
     document.dispatchEvent(new Event("visibilitychange"));
   });
-  await expect.poll(() => requestsForCameraRefresh(requests, "front", 2)).toBeGreaterThan(0);
-  await expect.poll(() => requestsForCameraRefresh(requests, "garage", 2)).toBeGreaterThan(0);
+  await expect
+    .poll(() => requestsForCameraRefresh(requests, "front"))
+    .toBeGreaterThanOrEqual(2);
+  await expect
+    .poll(() => requestsForCameraRefresh(requests, "garage"))
+    .toBeGreaterThanOrEqual(2);
 });
 
 test("an expanded view pauses picture refreshes and closing it resumes them", async ({ page }) => {
@@ -137,7 +198,7 @@ test("an expanded view pauses picture refreshes and closing it resumes them", as
   await stubStills(page);
   await page.goto("/");
 
-  await expect(stillImage(page, 0)).toHaveAttribute("src", /latest\.jpg/);
+  await expect(stillImage(page, 0)).toHaveAttribute("src", FRONT_STILL_URL);
   const baseline = requests.length;
 
   await page.getByRole("button", { name: /expand front to full view/i }).click();
@@ -161,9 +222,9 @@ test("a camera whose first load fails shows no picture and an old picture turns 
     { ...FRONT_CAMERA, name: "broken", display_name: "Broken" },
     { ...GARAGE_CAMERA, name: "flaky", display_name: "Flaky" },
   ]);
-  await page.route("**/api/broken/latest.jpg*", (route) => route.abort());
+  await page.route("**/corvette/api/v1/cameras/broken/still.jpg*", (route) => route.abort());
   let flakyLoads = 0;
-  await page.route("**/api/flaky/latest.jpg*", (route) => {
+  await page.route("**/corvette/api/v1/cameras/flaky/still.jpg*", (route) => {
     flakyLoads += 1;
     if (flakyLoads === 1) {
       return route.fulfill({ contentType: "image/jpeg", body: JPEG });
@@ -172,7 +233,11 @@ test("a camera whose first load fails shows no picture and an old picture turns 
   });
 
   await page.goto("/");
-  await expect(stillImage(page, 1)).toHaveAttribute("src", /latest\.jpg\?height=270&r=1$/);
+  await expect(stillImage(page, 1)).toHaveAttribute(
+    "src",
+    "/corvette/api/v1/cameras/flaky/still.jpg?height=270",
+  );
+  await expect(stillTile(page, 1)).toHaveClass(/still-tile-showing/);
 
   await page.clock.fastForward(60_000);
 
@@ -181,7 +246,10 @@ test("a camera whose first load fails shows no picture and an old picture turns 
 
   await expect(stillTile(page, 1)).toHaveClass(/still-tile-stale/);
   await expect(stillTile(page, 1).locator(".still-tile-age")).toHaveText("no update for 1 min");
-  await expect(stillImage(page, 1)).toHaveAttribute("src", /latest\.jpg/);
+  await expect(stillImage(page, 1)).toHaveAttribute(
+    "src",
+    "/corvette/api/v1/cameras/flaky/still.jpg?height=270",
+  );
 });
 
 test("the age label grows while refreshes fail", async ({ page }) => {
@@ -189,10 +257,14 @@ test("the age label grows while refreshes fail", async ({ page }) => {
 
   await stubDashboardApis(page, [FRONT_CAMERA]);
   let loads = 0;
-  await page.route("**/api/*/latest.jpg*", (route) => {
+  await page.route("**/corvette/api/v1/cameras/*/still.jpg*", (route) => {
     loads += 1;
     if (loads === 1) {
-      return route.fulfill({ contentType: "image/jpeg", body: JPEG });
+      return route.fulfill({
+        contentType: "image/jpeg",
+        headers: { "cache-control": "no-store" },
+        body: JPEG,
+      });
     }
     return route.abort();
   });

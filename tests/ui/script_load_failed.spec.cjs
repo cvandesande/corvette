@@ -29,7 +29,7 @@ const setup = async (page) => {
     ),
     page.route("**/api/review?*", (route) => route.fulfill({ json: [] })),
     page.route("**/api/review/activity/motion?*", (route) => route.fulfill({ json: [] })),
-    page.route("**/api/*/latest.jpg*", (route) =>
+    page.route("**/corvette/api/v1/cameras/*/still.jpg*", (route) =>
       route.fulfill({ contentType: "image/jpeg", body: JPEG }),
     ),
     // Never answered, so the live-path label stays on its value.

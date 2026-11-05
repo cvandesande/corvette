@@ -148,8 +148,8 @@ today. See `.agents/issue-12/DESIGN-live-view.md` for the decisions of record
 and `.agents/issue-12/PLAN-live-view.md` for the implementation plan.
 
 The dashboard grid shows each camera's latest still picture, refreshed in
-place, read from the current backing's `/api/<camera>/latest.jpg` route, an
-interim source Corvette's own still route replaces. Browser-native
+place, from Corvette's `/corvette/api/v1/cameras/<name>/still.jpg` route, which
+fetches the picture from the current backing. Browser-native
 `MediaSource` performs decode and render for the expanded view's HLS
 fallback, into which `hls.js` appends segments. The relay and `hang`'s
 Web Component, and the HLS/LL-HLS packager, each carry a configured camera's

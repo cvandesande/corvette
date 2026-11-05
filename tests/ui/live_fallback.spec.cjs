@@ -31,7 +31,7 @@ const setup = async (page) => {
     ),
     page.route("**/api/review?*", (route) => route.fulfill({ json: [] })),
     page.route("**/api/review/activity/motion?*", (route) => route.fulfill({ json: [] })),
-    page.route("**/api/*/latest.jpg*", (route) =>
+    page.route("**/corvette/api/v1/cameras/*/still.jpg*", (route) =>
       route.fulfill({ contentType: "image/jpeg", body: JPEG }),
     ),
     // Never answered, so the HLS picture never starts and the play prompt is what the screen must offer.

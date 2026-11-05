@@ -95,7 +95,6 @@ struct LoaderState {
     expired: RwSignal<bool>,
     age_label: RwSignal<String>,
     paused: Signal<bool>,
-    counter: u32,
     failed_loads: u32,
     last_loaded_at: f64,
     refresh_timer: Option<i32>,
@@ -121,7 +120,6 @@ impl LoaderState {
             expired,
             age_label,
             paused,
-            counter: 0,
             failed_loads: 0,
             last_loaded_at: 0.0,
             refresh_timer: None,
@@ -165,17 +163,16 @@ impl LoaderState {
     }
 }
 
-fn still_url(camera_path: &str, counter: u32) -> String {
-    // The image route is the current backing's, not a Corvette contract, and it
-    // reports no frame age, so the label times this tile's own load.
-    format!("/api/{camera_path}/latest.jpg?height={STILL_HEIGHT_PX}&r={counter}")
+fn still_url(camera_path: &str) -> String {
+    // The contract refuses other query parameters and answers `no-store`, so a
+    // plain address is the only one allowed and a refresh re-reads it.
+    format!("/corvette/api/v1/cameras/{camera_path}/still.jpg?height={STILL_HEIGHT_PX}")
 }
 
 fn begin_load(state: &Rc<RefCell<LoaderState>>) {
     let (document, url) = {
-        let mut borrowed = state.borrow_mut();
-        borrowed.counter += 1;
-        let url = still_url(&borrowed.camera_path, borrowed.counter);
+        let borrowed = state.borrow();
+        let url = still_url(&borrowed.camera_path);
         (borrowed.document.clone(), url)
     };
     let Ok(element) = document.create_element("img") else {

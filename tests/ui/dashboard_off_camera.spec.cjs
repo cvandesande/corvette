@@ -46,21 +46,21 @@ const stubDashboardApis = (page, cameras) =>
   ]);
 
 const stubStills = (page) =>
-  page.route("**/api/*/latest.jpg*", (route) =>
+  page.route("**/corvette/api/v1/cameras/*/still.jpg*", (route) =>
     route.fulfill({ contentType: "image/jpeg", body: JPEG }),
   );
 
 const recordStillRequests = (page, requests) => {
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.pathname.endsWith("/latest.jpg")) {
+    if (url.pathname.endsWith("/still.jpg")) {
       requests.push(url.pathname);
     }
   });
 };
 
 const stillRequestsFor = (requests, camera) =>
-  requests.filter((pathname) => pathname === `/api/${camera}/latest.jpg`).length;
+  requests.filter((pathname) => pathname === `/corvette/api/v1/cameras/${camera}/still.jpg`).length;
 
 test("an off camera keeps its grid slot and shows an off line", async ({ page }) => {
   await stubDashboardApis(page, [ZETA_CAMERA, LIVING_CAMERA, ALPHA_CAMERA]);
