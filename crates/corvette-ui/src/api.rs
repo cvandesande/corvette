@@ -5,8 +5,8 @@
 
 use crate::activity::MOTION_BUCKET_SECONDS;
 use corvette_api::{
-    ActivityResponse, ActivityReview, Camera, CameraEntry, CameraList, Event, MotionActivity,
-    PreviewClip, RecordingSegment, ReviewEvent, ReviewSegment,
+    ActivityResponse, ActivityReview, Camera, CameraEntry, CameraList, Event, MediaLink,
+    MotionActivity, PreviewClip, RecordingSegment, ReviewEvent, ReviewSegment,
 };
 use gloo_net::http::{Request, RequestBuilder};
 use serde::de::DeserializeOwned;
@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 
 const CAMERAS_PATH: &str = "/corvette/api/v1/cameras";
 const ACTIVITY_PATH: &str = "/corvette/api/v1/activity";
+const CLIP_LINK_PATH: &str = "/corvette/api/v1/clip-link";
 const EVENTS_PATH: &str = "/api/events?limit=10&sort=date_desc&has_clip=1";
 const REVIEW_LIMIT: u32 = 1_000;
 
@@ -114,6 +115,21 @@ pub(super) async fn fetch_activity_reviews(
     ]);
     let response: ActivityResponse = fetch_json(request, ACTIVITY_PATH).await?;
     Ok(response.reviews)
+}
+
+pub(super) async fn fetch_clip_link(
+    camera: &str,
+    start: f64,
+    end: f64,
+) -> Result<Option<MediaLink>, String> {
+    let start = start.to_string();
+    let end = end.to_string();
+    let request = Request::get(CLIP_LINK_PATH).query([
+        ("camera", camera),
+        ("start", start.as_str()),
+        ("end", end.as_str()),
+    ]);
+    fetch_json_or_absent(request, CLIP_LINK_PATH).await
 }
 
 pub(super) async fn fetch_recording_days(

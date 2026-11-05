@@ -1,7 +1,8 @@
 const { expect, test } = require(process.env.PLAYWRIGHT_TEST_PATH);
 const { refuseMalformedActivityQuery } = require("./activity_query.cjs");
+const { refuseMalformedClipLinkQuery } = require("./clip_link_query.cjs");
 
-// The alert dialog's "no clip" outcomes, an alert in progress that plays its link, and the player's failure state: each exact message, a visible Retry, and one Retry tap that re-asks the activity route or rebuilds the player.
+// The alert dialog's "no clip" outcomes for review alerts and Motion entries, an alert in progress that plays its link, and the player's failure state: each message exact, a visible Retry, and one Retry tap that re-asks the route or rebuilds the player.
 
 const activityAnswer = (request, reviews) => {
   const params = new URL(request.url()).searchParams;
@@ -30,13 +31,17 @@ const activityReview = (id, bounds, clipUrl) => ({
 
 async function stubAlertModal(page, firstActivityAnswer, card) {
   const activityRequests = [];
+  const clipLinkRequests = [];
   const playlistRequests = [];
   const media = { failing: false };
-  const fixture = { bounds: null, playlist: null };
+  const fixture = { bounds: null, playlist: null, motion: null };
   await page.route("**/corvette/api/v1/cameras", (route) =>
     route.fulfill({ json: { cameras: [] } }),
   );
   await page.route("**/api/review?*", (route) => {
+    if (card.motion) {
+      return route.fulfill({ json: [] });
+    }
     const before = Number(new URL(route.request().url()).searchParams.get("before"));
     fixture.bounds = { start: before - 60, end: before - 50 };
     fixture.playlist =
@@ -55,7 +60,20 @@ async function stubAlertModal(page, firstActivityAnswer, card) {
       ],
     });
   });
-  await page.route("**/api/review/activity/motion?*", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/review/activity/motion?*", (route) => {
+    if (!card.motion) {
+      return route.fulfill({ json: [] });
+    }
+    const before = Number(new URL(route.request().url()).searchParams.get("before"));
+    const start = before - 180;
+    const end = start + 30;
+    // The query is an address only the route could invent, so playing it proves the page used the answer.
+    const playlist = `/corvette/api/v1/media/front/start/${start}/end/${end}/master.m3u8?grant=issued-by-the-route`;
+    fixture.motion ??= { start, end, playlist };
+    return route.fulfill({
+      json: [{ start_time: start, motion: 42, camera: "front" }],
+    });
+  });
   await page.route("**/corvette/api/v1/activity?*", (route) => {
     activityRequests.push(route.request().url());
     if (refuseMalformedActivityQuery(route)) {
@@ -73,9 +91,21 @@ async function stubAlertModal(page, firstActivityAnswer, card) {
   await page.route("**/clips/review/*.webp", (route) =>
     route.fulfill({ contentType: "image/webp", body: Buffer.alloc(0) }),
   );
+  await page.route("**/api/*/start/*/end/*/preview.gif", (route) =>
+    route.fulfill({ contentType: "image/gif", body: Buffer.alloc(0) }),
+  );
+  await page.route("**/corvette/api/v1/clip-link?*", (route) => {
+    clipLinkRequests.push(route.request().url());
+    if (refuseMalformedClipLinkQuery(route)) {
+      return;
+    }
+    return card.clipLinkAnswer
+      ? card.clipLinkAnswer(route, fixture, clipLinkRequests.length)
+      : route.fulfill({ status: 500, json: { code: "unexpected", message: "no clip link was expected" } });
+  });
   await page.route("**/corvette/api/v1/media/**", (route) => {
     const requestUrl = route.request().url();
-    if (requestUrl.endsWith("/master.m3u8")) {
+    if (new URL(requestUrl).pathname.endsWith("/master.m3u8")) {
       playlistRequests.push(requestUrl);
       if (media.failing) {
         return route.fulfill({ status: 404 });
@@ -87,7 +117,7 @@ async function stubAlertModal(page, firstActivityAnswer, card) {
     }
     return route.fulfill({ status: 404 });
   });
-  return { activityRequests, fixture, media, playlistRequests };
+  return { activityRequests, clipLinkRequests, fixture, media, playlistRequests };
 }
 
 async function assertUnavailabilityThenRetry(page, activityRequests, fixture, playlistRequests, message) {
@@ -116,6 +146,31 @@ async function assertUnavailabilityThenRetry(page, activityRequests, fixture, pl
   ).toBe(true);
   await expect(retry).toHaveCount(0);
   await expect(playback.getByText(message)).toHaveCount(0);
+}
+
+async function assertMotionUnavailabilityThenRetry(page, stubbed, message) {
+  await page.goto("/");
+  await page.locator(".event-card").getByRole("button").click();
+  const playback = page.getByRole("dialog", { name: "Selected event playback" });
+  await expect(playback).toBeVisible();
+  await expect(playback.getByRole("alert")).toHaveText(message);
+  const retry = playback.getByRole("button", { name: "Retry" });
+  await expect(retry).toBeVisible();
+  const video = playback.locator("video");
+  await expect(video).toHaveCount(0);
+  await expect.poll(() => stubbed.clipLinkRequests.length).toBe(1);
+  await retry.click();
+  await expect.poll(() => stubbed.clipLinkRequests.length).toBe(2);
+  await expect(video).toHaveAttribute("data-clip-url", stubbed.fixture.motion.playlist);
+  await expect.poll(() =>
+    stubbed.playlistRequests.some((request) => {
+      const recorded = new URL(request);
+      return `${recorded.pathname}${recorded.search}` === stubbed.fixture.motion.playlist;
+    }),
+  ).toBe(true);
+  await expect(retry).toHaveCount(0);
+  await expect(playback.getByText(message)).toHaveCount(0);
+  expect(stubbed.activityRequests).toHaveLength(0);
 }
 
 test("an activity answer without the review says the server did not return the alert", async ({ page }) => {
@@ -259,4 +314,86 @@ test("a browser with no native HLS shows the same failure after hls.js fails", a
   await expect(playback.getByText("This clip did not play in this browser.")).toBeVisible();
   await expect(playback.getByRole("button", { name: "Retry" })).toBeVisible();
   expect(stubbed.playlistRequests.length).toBe(1);
+});
+
+test("a motion entry plays the link the server issues for its range", async ({ page }) => {
+  const stubbed = await stubAlertModal(
+    page,
+    (route) =>
+      route.fulfill({
+        status: 500,
+        json: { code: "unexpected", message: "a motion entry does not ask the activity route" },
+      }),
+    {
+      motion: true,
+      clipLinkAnswer: (route, fixture) =>
+        route.fulfill({ json: { url: fixture.motion.playlist } }),
+    },
+  );
+  await page.goto("/");
+  await page.locator(".event-card").getByRole("button").click();
+  const playback = page.getByRole("dialog", { name: "Selected event playback" });
+  await expect(playback).toBeVisible();
+  const video = playback.locator("video");
+  await expect(video).toHaveAttribute("data-clip-url", stubbed.fixture.motion.playlist);
+  await expect.poll(() =>
+    stubbed.playlistRequests.some((request) => {
+      const recorded = new URL(request);
+      return `${recorded.pathname}${recorded.search}` === stubbed.fixture.motion.playlist;
+    }),
+  ).toBe(true);
+  await expect(playback.getByRole("alert")).toHaveCount(0);
+  await expect(playback.getByRole("button", { name: "Retry" })).toHaveCount(0);
+  expect(stubbed.clipLinkRequests).toHaveLength(1);
+  const clipLinkUrl = new URL(stubbed.clipLinkRequests[0]);
+  expect(clipLinkUrl.pathname).toBe("/corvette/api/v1/clip-link");
+  expect(clipLinkUrl.searchParams.get("camera")).toBe("front");
+  expect(clipLinkUrl.searchParams.get("start")).toBe(String(stubbed.fixture.motion.start));
+  expect(clipLinkUrl.searchParams.get("end")).toBe(String(stubbed.fixture.motion.end));
+  expect(stubbed.activityRequests).toHaveLength(0);
+});
+
+test("a motion entry with no recorded footage says so and offers Retry", async ({ page }) => {
+  const stubbed = await stubAlertModal(
+    page,
+    (route) =>
+      route.fulfill({
+        status: 500,
+        json: { code: "unexpected", message: "a motion entry does not ask the activity route" },
+      }),
+    {
+      motion: true,
+      clipLinkAnswer: (route, fixture, attempt) =>
+        attempt === 1
+          ? route.fulfill({ status: 404, json: { code: "not_found", message: "no recording" } })
+          : route.fulfill({ json: { url: fixture.motion.playlist } }),
+    },
+  );
+  await assertMotionUnavailabilityThenRetry(
+    page,
+    stubbed,
+    "There is no recording available for this alert.",
+  );
+});
+
+test("a motion entry whose link request fails says the clip could not be loaded", async ({ page }) => {
+  const stubbed = await stubAlertModal(
+    page,
+    (route) =>
+      route.fulfill({
+        status: 500,
+        json: { code: "unexpected", message: "a motion entry does not ask the activity route" },
+      }),
+    {
+      motion: true,
+      clipLinkAnswer: (route, fixture, attempt) =>
+        attempt === 1
+          ? route.fulfill({
+              status: 503,
+              json: { code: "config_unavailable", message: "configuration unavailable" },
+            })
+          : route.fulfill({ json: { url: fixture.motion.playlist } }),
+    },
+  );
+  await assertMotionUnavailabilityThenRetry(page, stubbed, "Could not load this alert's clip.");
 });

@@ -3,7 +3,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use corvette_api::{ActivityReview, MotionActivity, ReviewEvent, ReviewSegment, ReviewSeverity};
+use corvette_api::{
+    ActivityReview, MediaLink, MotionActivity, ReviewEvent, ReviewSegment, ReviewSeverity,
+};
 use leptos::prelude::*;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
@@ -19,6 +21,8 @@ pub(crate) const RECENT_ACTIVITY_HOURS: u32 = 6;
 /// Width of the buckets Frigate samples motion into, so the span a sample
 /// stands for. Sent as `scale`, which is why both sides read one definition.
 pub(crate) const MOTION_BUCKET_SECONDS: u32 = 30;
+
+const MOTION_ID_PREFIX: &str = "motion-";
 
 #[component]
 pub(crate) fn ActivityFilters(filter: RwSignal<ActivityFilter>) -> impl IntoView {
@@ -164,9 +168,20 @@ fn ReviewPlayback(
         .end_time
         .unwrap_or_else(|| js_sys::Date::now() / 1_000.0);
     let review_id = review.id.clone();
+    let motion = is_motion_id(&review.id);
     let clip = LocalResource::new(move || {
         let camera = camera.clone();
-        async move { crate::api::fetch_activity_reviews(&camera, start_time, end_time).await }
+        let review_id = review_id.clone();
+        async move {
+            if motion {
+                motion_outcome(&crate::api::fetch_clip_link(&camera, start_time, end_time).await)
+            } else {
+                clip_outcome(
+                    &crate::api::fetch_activity_reviews(&camera, start_time, end_time).await,
+                    &review_id,
+                )
+            }
+        }
     });
     let heading = review_event_title(&review);
     view! {
@@ -194,7 +209,7 @@ fn ReviewPlayback(
                         on:click=move |_| selected_review.set(None)
                     >"Close"</button>
                 </div>
-                {move || match clip.get().map(|reviews| clip_outcome(&reviews, &review_id)) {
+                {move || match clip.get() {
                     None => view! { <Status
                         heading="Checking availability"
                         detail="Asking the server for this alert's clip."
@@ -498,6 +513,18 @@ fn clip_outcome(reviews: &Result<Vec<ActivityReview>, String>, review_id: &str) 
     ClipOutcome::NoRecording
 }
 
+fn is_motion_id(id: &str) -> bool {
+    id.starts_with(MOTION_ID_PREFIX)
+}
+
+fn motion_outcome(link: &Result<Option<MediaLink>, String>) -> ClipOutcome {
+    match link {
+        Ok(Some(link)) => ClipOutcome::Playable(link.url.clone()),
+        Ok(None) => ClipOutcome::NoRecording,
+        Err(_) => ClipOutcome::LoadFailed,
+    }
+}
+
 fn review_events_for_filter(events: Vec<ReviewEvent>, filter: ActivityFilter) -> Vec<ReviewEvent> {
     let Some(severity) = filter.severity() else {
         return events;
@@ -564,7 +591,7 @@ fn motion_ranges_touch(previous: &RecordingRange, next: &RecordingRange) -> bool
 fn motion_review_event(range: RecordingRange) -> ReviewEvent {
     let encoded_camera = js_sys::encode_uri_component(&range.camera);
     ReviewEvent {
-        id: format!("motion-{}-{}", range.camera, range.start_time),
+        id: format!("{MOTION_ID_PREFIX}{}-{}", range.camera, range.start_time),
         camera: range.camera,
         start_time: range.start_time,
         end_time: Some(range.end_time),
@@ -900,6 +927,35 @@ mod tests {
     fn clip_outcome_of_a_failed_request_is_load_failed() {
         let failed: Reviews = Err("request /corvette/api/v1/activity: no route".to_owned());
         assert_eq!(clip_outcome(&failed, "alert"), ClipOutcome::LoadFailed);
+    }
+
+    #[test]
+    fn a_motion_id_is_recognised_by_its_prefix() {
+        assert!(is_motion_id("motion-front-1760227200"));
+        assert!(!is_motion_id("1760227200.123-abc123"));
+    }
+
+    #[test]
+    fn motion_outcome_of_a_link_is_playable() {
+        assert_eq!(
+            motion_outcome(&Ok(Some(MediaLink {
+                url: "/m.m3u8".to_owned(),
+            }))),
+            ClipOutcome::Playable("/m.m3u8".to_owned())
+        );
+    }
+
+    #[test]
+    fn motion_outcome_of_no_footage_is_no_recording() {
+        assert_eq!(motion_outcome(&Ok(None)), ClipOutcome::NoRecording);
+    }
+
+    #[test]
+    fn motion_outcome_of_a_failed_request_is_load_failed() {
+        assert_eq!(
+            motion_outcome(&Err("request failed".to_owned())),
+            ClipOutcome::LoadFailed
+        );
     }
 
     #[test]
