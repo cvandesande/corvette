@@ -526,12 +526,9 @@ fn motion_outcome(link: &Result<Option<MediaLink>, String>) -> ClipOutcome {
 }
 
 fn review_events_for_filter(events: Vec<ReviewEvent>, filter: ActivityFilter) -> Vec<ReviewEvent> {
-    let Some(severity) = filter.severity() else {
-        return events;
-    };
     events
         .into_iter()
-        .filter(|event| event.severity == severity)
+        .filter(|event| filter.keeps(event.severity))
         .collect()
 }
 
@@ -645,8 +642,10 @@ fn review_thumbnail_url(thumb_path: &str) -> String {
     format!("/{relative_path}")
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum ActivityFilter {
+    #[default]
+    AlertsAndDetections,
     All,
     SignificantMotion,
     Detection,
@@ -654,7 +653,8 @@ pub(crate) enum ActivityFilter {
 }
 
 impl ActivityFilter {
-    pub(crate) const ALL: [Self; 4] = [
+    pub(crate) const ALL: [Self; 5] = [
+        Self::AlertsAndDetections,
         Self::All,
         Self::Alert,
         Self::Detection,
@@ -663,6 +663,7 @@ impl ActivityFilter {
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
+            Self::AlertsAndDetections => "Alerts and detections",
             Self::All => "All",
             Self::SignificantMotion => "Motion",
             Self::Detection => "Detections",
@@ -670,12 +671,15 @@ impl ActivityFilter {
         }
     }
 
-    pub(crate) const fn severity(self) -> Option<ReviewSeverity> {
+    pub(crate) const fn keeps(self, severity: ReviewSeverity) -> bool {
         match self {
-            Self::All => None,
-            Self::SignificantMotion => Some(ReviewSeverity::SignificantMotion),
-            Self::Detection => Some(ReviewSeverity::Detection),
-            Self::Alert => Some(ReviewSeverity::Alert),
+            Self::All => true,
+            Self::AlertsAndDetections => {
+                matches!(severity, ReviewSeverity::Alert | ReviewSeverity::Detection)
+            }
+            Self::SignificantMotion => matches!(severity, ReviewSeverity::SignificantMotion),
+            Self::Detection => matches!(severity, ReviewSeverity::Detection),
+            Self::Alert => matches!(severity, ReviewSeverity::Alert),
         }
     }
 }
@@ -760,19 +764,23 @@ mod tests {
 
     #[test]
     fn recent_activity_filter_keeps_only_the_selected_severity() {
-        let events = [ReviewSeverity::Alert, ReviewSeverity::Detection]
-            .into_iter()
-            .enumerate()
-            .map(|(index, severity)| ReviewEvent {
-                id: index.to_string(),
-                camera: "front".to_owned(),
-                start_time: 100.0,
-                end_time: Some(110.0),
-                severity,
-                thumb_path: "/media/frigate/clips/review/thumb.webp".to_owned(),
-                data: corvette_api::ReviewEventData::default(),
-            })
-            .collect::<Vec<_>>();
+        let events = [
+            ReviewSeverity::Alert,
+            ReviewSeverity::Detection,
+            ReviewSeverity::SignificantMotion,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, severity)| ReviewEvent {
+            id: index.to_string(),
+            camera: "front".to_owned(),
+            start_time: 100.0,
+            end_time: Some(110.0),
+            severity,
+            thumb_path: "/media/frigate/clips/review/thumb.webp".to_owned(),
+            data: corvette_api::ReviewEventData::default(),
+        })
+        .collect::<Vec<_>>();
 
         assert_eq!(
             review_events_for_filter(events.clone(), ActivityFilter::All),
@@ -781,6 +789,12 @@ mod tests {
         assert_eq!(
             review_events_for_filter(events.clone(), ActivityFilter::Alert),
             [events[0].clone()]
+        );
+        let kept = review_events_for_filter(events.clone(), ActivityFilter::AlertsAndDetections);
+        assert_eq!(kept, [events[0].clone(), events[1].clone()]);
+        assert_eq!(
+            ActivityFilter::default(),
+            ActivityFilter::AlertsAndDetections
         );
         assert_eq!(
             review_event_day_severity(&events, 90.0, 120.0),

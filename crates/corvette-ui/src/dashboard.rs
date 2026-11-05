@@ -24,7 +24,7 @@ pub(crate) fn Dashboard() -> impl IntoView {
         crate::api::fetch_motion_activity(after, before)
     });
     let active_section = RwSignal::new("/#live");
-    let activity_filter = RwSignal::new(ActivityFilter::All);
+    let activity_filter = RwSignal::new(ActivityFilter::default());
 
     view! {
         <header class="site-header">

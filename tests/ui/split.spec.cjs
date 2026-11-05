@@ -567,7 +567,10 @@ test("recent events are filtered review activity from the last six hours", async
 
   await page.goto("/");
   const cards = page.locator(".event-card");
-  await expect(cards).toHaveCount(3);
+  await expect(
+    page.getByRole("button", { name: "Alerts and detections", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(cards).toHaveCount(1);
   await page.getByRole("button", { name: "Motion", exact: true }).click();
   await expect(cards).toHaveCount(2);
   await expect(cards).toContainText(["Motion", "Motion"]);
@@ -613,6 +616,82 @@ test("recent events are filtered review activity from the last six hours", async
   await expect(
     page.getByRole("heading", { name: "No events in the last 6 hours" }),
   ).toBeVisible();
+});
+
+test("recent events open on alerts and detections and motion is one tap away", async ({ page }) => {
+  await page.route("**/corvette/api/v1/cameras", (route) =>
+    route.fulfill({
+      json: {
+        cameras: [
+          {
+            name: "living",
+            display_name: "Living",
+            order: 10,
+            detect_width: 1280,
+            detect_height: 720,
+            enabled: false,
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/review?*", (route) => {
+    const after = Number(new URL(route.request().url()).searchParams.get("after"));
+    return route.fulfill({
+      json: [
+        {
+          id: "alert-review",
+          camera: "front",
+          start_time: after + 60,
+          end_time: after + 70,
+          severity: "alert",
+          thumb_path: "/media/frigate/clips/review/alert.webp",
+          data: { objects: ["person"], zones: ["drive"], audio: [] },
+        },
+        {
+          id: "detection-review",
+          camera: "living",
+          start_time: after + 120,
+          end_time: after + 130,
+          severity: "detection",
+          thumb_path: "/media/frigate/clips/review/detection.webp",
+          data: { objects: ["cat"], zones: [], audio: [] },
+        },
+      ],
+    });
+  });
+  await page.route("**/api/review/activity/motion?*", (route) => {
+    const after = Number(new URL(route.request().url()).searchParams.get("after"));
+    return route.fulfill({
+      json: [{ start_time: after + 180, motion: 25, camera: "front" }],
+    });
+  });
+  await page.route("**/clips/review/*.webp", (route) =>
+    route.fulfill({ contentType: "image/webp", body: Buffer.alloc(0) }),
+  );
+  await page.route("**/api/*/start/*/end/*/preview.gif", (route) =>
+    route.fulfill({ contentType: "image/gif", body: Buffer.alloc(0) }),
+  );
+
+  await page.goto("/");
+  const cards = page.locator(".event-card");
+  const filterButtons = page.locator(".activity-filters button");
+  await expect(filterButtons.first()).toHaveText("Alerts and detections");
+  await expect(filterButtons.first()).toHaveAttribute("aria-pressed", "true");
+  await expect(cards).toHaveCount(2);
+  await expect(cards.filter({ hasText: "person" })).toHaveCount(1);
+  await expect(cards.filter({ hasText: "cat" })).toHaveCount(1);
+  await expect(cards.filter({ hasText: "living" })).toHaveCount(1);
+  await expect(cards.filter({ hasText: "Motion" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Motion", exact: true }).click();
+  await expect(cards).toHaveCount(1);
+  await expect(cards.filter({ hasText: "Motion" })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Motion", exact: true }))
+    .toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "All", exact: true }).click();
+  await expect(cards).toHaveCount(3);
+  await page.getByRole("button", { name: "Alerts and detections", exact: true }).click();
+  await expect(cards).toHaveCount(2);
 });
 
 test("event cards show the detection snapshot, falling back to the review crop", async ({
@@ -872,7 +951,10 @@ test("events route browses a selected day and filters severity", async ({ page }
   await eventDays.nth(2).click();
   await expect(page.locator(".calendar-grid button[aria-pressed='true']")).toHaveCount(2);
   const cards = page.locator(".event-card");
-  await expect(cards).toHaveCount(3);
+  await expect(cards).toHaveCount(2);
+  await expect(cards.filter({ hasText: "person" })).toHaveCount(1);
+  await expect(cards.filter({ hasText: "cat" })).toHaveCount(1);
+  await expect(cards.filter({ hasText: "Motion" })).toHaveCount(0);
   await cards.filter({ hasText: "person" }).getByRole("button").click();
   await expect(page.getByRole("dialog", { name: "Selected event playback" })).toBeVisible();
   const alertClipUrl =

@@ -23,7 +23,7 @@ pub(crate) fn EventBrowser() -> impl IntoView {
     let calendar_after = calendar_days.first().map_or(0.0, |day| day.start_time);
     let default_day = local_day_start(&js_sys::Date::new_0());
     let calendar_selection = RwSignal::new(None::<CalendarSelection>);
-    let activity_filter = RwSignal::new(ActivityFilter::All);
+    let activity_filter = RwSignal::new(ActivityFilter::default());
     let timezone = browser_timezone();
     let recording_days = LocalResource::new(move || {
         let timezone = timezone.clone();

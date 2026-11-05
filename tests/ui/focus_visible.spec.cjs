@@ -63,10 +63,13 @@ test.describe("recent-activity filters", () => {
   }) => {
     await page.goto("/");
     const lastNavLink = page.getByRole("link", { name: "Monitor" });
-    const allFilter = page.getByRole("button", { name: "All", exact: true });
+    const alertsAndDetectionsFilter = page.getByRole("button", {
+      name: "Alerts and detections",
+      exact: true,
+    });
 
-    await tabToFocus(page, lastNavLink, allFilter);
-    await expectHarmonizedOutline(allFilter);
+    await tabToFocus(page, lastNavLink, alertsAndDetectionsFilter);
+    await expectHarmonizedOutline(alertsAndDetectionsFilter);
   });
 
   test("compact event list's show-more toggle shows the harmonized outline on keyboard focus", async ({

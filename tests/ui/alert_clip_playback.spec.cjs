@@ -150,6 +150,7 @@ async function assertUnavailabilityThenRetry(page, activityRequests, fixture, pl
 
 async function assertMotionUnavailabilityThenRetry(page, stubbed, message) {
   await page.goto("/");
+  await page.getByRole("button", { name: "Motion", exact: true }).click();
   await page.locator(".event-card").getByRole("button").click();
   const playback = page.getByRole("dialog", { name: "Selected event playback" });
   await expect(playback).toBeVisible();
@@ -331,6 +332,7 @@ test("a motion entry plays the link the server issues for its range", async ({ p
     },
   );
   await page.goto("/");
+  await page.getByRole("button", { name: "Motion", exact: true }).click();
   await page.locator(".event-card").getByRole("button").click();
   const playback = page.getByRole("dialog", { name: "Selected event playback" });
   await expect(playback).toBeVisible();
