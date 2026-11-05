@@ -2,7 +2,7 @@ const { expect, test } = require(process.env.PLAYWRIGHT_TEST_PATH);
 
 // Pins the dashboard tile's still-image behavior: each tile shows the latest
 // picture of its camera from the signed-in image route, refreshes it every 30
-// seconds while the page is visible and no expanded view is open, labels the
+// seconds while the dashboard stays mounted and the page is visible, labels the
 // picture by its own load time, and reports failure as `No picture`.
 
 // A real, decodable 1x1 JPEG, held as base64 so no binary file enters the
@@ -189,7 +189,7 @@ test("a hidden page skips picture refreshes and a visible page refreshes at once
     .toBeGreaterThanOrEqual(2);
 });
 
-test("an expanded view pauses picture refreshes and closing it resumes them", async ({ page }) => {
+test("opening a camera's page stops the picture refreshes and closing it starts them again", async ({ page }) => {
   await page.clock.install();
   const requests = [];
   recordStillRequests(page, requests);
@@ -199,16 +199,18 @@ test("an expanded view pauses picture refreshes and closing it resumes them", as
   await page.goto("/");
 
   await expect(stillImage(page, 0)).toHaveAttribute("src", FRONT_STILL_URL);
-  const baseline = requests.length;
 
-  await page.getByRole("button", { name: /expand front to full view/i }).click();
-  await expect(page.locator(".expanded-view")).toHaveCount(1);
+  // The tap navigates to the camera's page, which unmounts the dashboard and
+  // stops the tile's timers.
+  await page.getByRole("link", { name: /open front live view/i }).click();
+  await expect(page).toHaveURL("/camera/front");
+  const baseline = requests.length;
 
   await page.clock.fastForward(60_000);
   expect(requests.length).toBe(baseline);
 
   await page.getByRole("button", { name: "Close" }).click();
-  await expect(page.locator(".expanded-view")).toHaveCount(0);
+  await expect(page).toHaveURL("/");
 
   await expect.poll(() => requests.length, { timeout: 5_000 }).toBeGreaterThan(baseline);
 });

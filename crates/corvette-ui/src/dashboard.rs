@@ -7,7 +7,6 @@ use crate::activity::{
     ActivityFilter, ActivityFilters, EventListLayout, RECENT_ACTIVITY_HOURS, ReviewEventList,
     recent_activity_empty_heading, review_and_motion_events,
 };
-use crate::expanded_view::{ExpandedCamera, ExpandedView};
 use crate::shell::{NAVIGATION, Status, StatusGlyph};
 use crate::still_tile::StillTile;
 
@@ -26,7 +25,6 @@ pub(crate) fn Dashboard() -> impl IntoView {
     });
     let active_section = RwSignal::new("/#live");
     let activity_filter = RwSignal::new(ActivityFilter::All);
-    let expanded_camera = RwSignal::new(None::<ExpandedCamera>);
 
     view! {
         <header class="site-header">
@@ -67,14 +65,11 @@ pub(crate) fn Dashboard() -> impl IntoView {
                         Some(Ok(cameras)) => view! {
                             <div class="camera-grid" aria-label="Configured cameras">
                                 {cameras.into_iter().map(|camera| view! {
-                                    <CameraCard camera=camera expanded_camera=expanded_camera/>
+                                    <CameraCard camera=camera/>
                                 }).collect_view()}
                             </div>
                         }.into_any(),
                     }}
-                    {move || expanded_camera.get().map(|camera| view! {
-                        <ExpandedView camera=camera expanded=expanded_camera/>
-                    })}
                 </section>
 
                 <section id="events" class="page-section" aria-labelledby="events-heading">
@@ -102,39 +97,23 @@ pub(crate) fn Dashboard() -> impl IntoView {
     }
 }
 
-/// One camera tile: a live view that opens the expanded view when the camera is on,
-/// or a plain off line when the camera is off.
+/// One camera tile: a link to the camera's own page carrying its live picture
+/// when the camera is on, or a plain off line when the camera is off.
 #[component]
-fn CameraCard(
-    camera: CameraEntry,
-    expanded_camera: RwSignal<Option<ExpandedCamera>>,
-) -> impl IntoView {
+fn CameraCard(camera: CameraEntry) -> impl IntoView {
     if camera.enabled {
         let player_title = format!("{} live video", camera.display_name);
-        let expand_camera = ExpandedCamera {
-            name: camera.name.clone(),
-            title: player_title.clone(),
-        };
-        let still_paused = Signal::derive(move || expanded_camera.get().is_some());
         let page_camera_name = camera.name.clone();
         view! {
             <article class="camera-card">
-                <button
+                <a
                     class="camera-card-link"
-                    type="button"
-                    aria-label=format!("Expand {} to full view", camera.display_name)
-                    on:click=move |_| expanded_camera.set(Some(expand_camera.clone()))
+                    href=format!("/camera/{}", js_sys::encode_uri_component(&page_camera_name))
+                    aria-label=format!("Open {} live view", camera.display_name)
                 >
-                    <StillTile camera_name=camera.name.clone() title=player_title paused=still_paused/>
+                    <StillTile camera_name=camera.name.clone() title=player_title/>
                     <h2>{camera.display_name.clone()}</h2>
                     <p>{camera.name}</p>
-                </button>
-                <a
-                    class="camera-card-page-link"
-                    href=format!("/camera/{}", js_sys::encode_uri_component(&page_camera_name))
-                    aria-label=format!("Open {} on its own page", camera.display_name)
-                >
-                    "Own page"
                 </a>
             </article>
         }

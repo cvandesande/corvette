@@ -42,7 +42,7 @@ const setup = async (page) => {
 
 const openExpandedView = async (page) => {
   await page.goto("/");
-  await page.getByRole("button", { name: /expand front to full view/i }).click();
+  await page.getByRole("link", { name: /open front live view/i }).click();
 };
 
 test("an unreachable relay ends on the HLS path within the bound", async ({ page }) => {

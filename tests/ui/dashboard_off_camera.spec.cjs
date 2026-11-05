@@ -87,16 +87,21 @@ test("an off camera asks for no picture while the on cameras do", async ({ page 
   expect(stillRequestsFor(stillRequests, "living")).toBe(0);
 });
 
-test("tapping an off camera opens nothing while live tiles still expand", async ({ page }) => {
+test("tapping an off camera opens nothing while live tiles open their page", async ({ page }) => {
   await stubDashboardApis(page, [ZETA_CAMERA, LIVING_CAMERA, ALPHA_CAMERA]);
   await stubStills(page);
   await page.goto("/");
 
-  await expect(page.locator("button.camera-card-link")).toHaveCount(2);
+  // The off camera renders no link, so only the two live tiles are links.
+  await expect(page.locator("a.camera-card-link")).toHaveCount(2);
 
   await page.locator(".camera-card").nth(1).click();
+  expect(new URL(page.url()).pathname).toBe("/");
   await expect(page.locator(".expanded-view")).toHaveCount(0);
 
-  await page.getByRole("button", { name: /expand zulu cam to full view/i }).click();
-  await expect(page.locator(".expanded-view")).toHaveCount(1);
+  await page.getByRole("link", { name: /open zulu cam live view/i }).click();
+  expect(new URL(page.url()).pathname).toBe("/camera/zeta");
+  await expect(
+    page.getByRole("dialog", { name: /Zulu cam live video expanded live view/i }),
+  ).toBeVisible();
 });

@@ -113,18 +113,26 @@ test("a camera list that cannot be fetched says so", async ({ page }) => {
   await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
-test("a dashboard tile carries its page address", async ({ page }) => {
+test("a dashboard tile opens its camera's page", async ({ page }) => {
   await setup(page, [FRONT_CAMERA, BACK_CAMERA]);
   await page.goto("/");
 
-  await expect(page.getByRole("link", { name: "Open Front on its own page" })).toHaveAttribute(
+  await expect(page.getByRole("link", { name: /open front live view/i })).toHaveAttribute(
     "href",
     "/camera/front",
   );
+  // The separate "Own page" link is gone: the tile itself is the only link.
+  await expect(page.getByRole("link", { name: /own page/i })).toHaveCount(0);
 
-  await page.getByRole("button", { name: /expand front to full view/i }).click();
+  await page.evaluate(() => {
+    window.__spaMarker = 1;
+  });
+  await page.getByRole("link", { name: /open front live view/i }).click();
   await expect(
     page.getByRole("dialog", { name: /Front live video expanded live view/i }),
   ).toBeVisible();
-  expect(new URL(page.url()).pathname).toBe("/");
+  expect(new URL(page.url()).pathname).toBe("/camera/front");
+  await expect(page.locator(".camera-grid")).toHaveCount(0);
+  // Surviving the tap proves the page opened by client-side navigation.
+  expect(await page.evaluate(() => window.__spaMarker)).toBe(1);
 });

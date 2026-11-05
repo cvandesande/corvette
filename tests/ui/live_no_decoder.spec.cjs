@@ -47,7 +47,7 @@ test("a browser without a video decoder goes straight to the HLS live mode", asy
 
   expect(await page.evaluate(() => typeof VideoDecoder)).toBe("undefined");
 
-  await page.getByRole("button", { name: /expand front to full view/i }).click();
+  await page.getByRole("link", { name: /open front live view/i }).click();
 
   // Well under the 4 000 ms MoQ timeout, so only skipping MoQ passes.
   await expect(page.locator(".live-path-indicator")).toHaveAttribute("data-live-path", "hls", {
@@ -66,7 +66,7 @@ test("a browser with a video decoder still tries the MoQ player first", async ({
 
   expect(await page.evaluate(() => typeof VideoDecoder)).toBe("function");
 
-  await page.getByRole("button", { name: /expand front to full view/i }).click();
+  await page.getByRole("link", { name: /open front live view/i }).click();
 
   await expect
     .poll(() => requests.some((url) => url.includes("/vendor/moq-watch.bundle.js")), {

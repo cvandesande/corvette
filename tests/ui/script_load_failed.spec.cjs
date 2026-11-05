@@ -44,7 +44,7 @@ test("a moq player script that fails to load ends on the HLS path", async ({ pag
 
   expect(await page.evaluate(() => typeof VideoDecoder)).toBe("function");
 
-  await page.getByRole("button", { name: /expand front to full view/i }).click();
+  await page.getByRole("link", { name: /open front live view/i }).click();
 
   await expect(page.locator(".live-path-indicator")).toHaveAttribute("data-live-path", "hls", {
     timeout: 3_000,
@@ -59,7 +59,7 @@ test("a moq player script that stalls ends on the HLS path after the script boun
   await setup(page);
   await page.route("**/vendor/moq-watch.bundle.js", () => {});
   await page.goto("/");
-  await page.getByRole("button", { name: /expand front to full view/i }).click();
+  await page.getByRole("link", { name: /open front live view/i }).click();
 
   await expect(page.locator(".live-path-indicator")).toHaveAttribute(
     "data-live-path",
@@ -83,7 +83,7 @@ test("a moq player element that cannot be created ends on the HLS path", async (
     };
   });
   await page.goto("/");
-  await page.getByRole("button", { name: /expand front to full view/i }).click();
+  await page.getByRole("link", { name: /open front live view/i }).click();
 
   await expect(page.locator(".live-path-indicator")).toHaveAttribute("data-live-path", "hls", {
     timeout: 3_000,
@@ -102,7 +102,7 @@ test("a moq player element that cannot be appended ends on the HLS path", async 
     };
   });
   await page.goto("/");
-  await page.getByRole("button", { name: /expand front to full view/i }).click();
+  await page.getByRole("link", { name: /open front live view/i }).click();
 
   await expect(page.locator(".live-path-indicator")).toHaveAttribute("data-live-path", "hls", {
     timeout: 3_000,
@@ -117,7 +117,7 @@ test("an hls script that fails to load ends on the no-path state", async ({ page
   });
   await page.route("**/vendor/hls.min.js", (route) => route.abort());
   await page.goto("/");
-  await page.getByRole("button", { name: /expand front to full view/i }).click();
+  await page.getByRole("link", { name: /open front live view/i }).click();
 
   await expect(page.locator(".live-path-indicator")).toHaveAttribute("data-live-path", "none", {
     timeout: 3_000,
@@ -145,7 +145,7 @@ test("a moq player script that completes after the script bound does not revive 
     held = route;
   });
   await page.goto("/");
-  await page.getByRole("button", { name: /expand front to full view/i }).click();
+  await page.getByRole("link", { name: /open front live view/i }).click();
 
   await expect(page.locator(".live-path-indicator")).toHaveAttribute("data-live-path", "hls", {
     timeout: 15_000,
@@ -162,7 +162,7 @@ test("a moq player script that completes after the script bound does not revive 
   await page.evaluate(() => window.__moqScriptLoaded);
 
   await page.getByRole("button", { name: "Close" }).click();
-  await page.getByRole("button", { name: /expand front to full view/i }).click();
+  await page.getByRole("link", { name: /open front live view/i }).click();
 
   await expect(page.locator(".live-path-indicator")).toHaveAttribute("data-live-path", "hls", {
     timeout: 3_000,

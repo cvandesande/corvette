@@ -110,7 +110,7 @@ test.describe("relay reachable", () => {
     await mockCameraList(page);
     await page.goto("/");
 
-    await page.getByRole("button", { name: /expand browser check to full view/i }).click();
+    await page.getByRole("link", { name: /open browser check live view/i }).click();
 
     const indicator = page.locator(".live-path-indicator");
     await expect(indicator).toHaveAttribute("data-live-path", "moq", { timeout: 6_000 });
@@ -152,7 +152,7 @@ test("the fallback fires within the bounded timeout and mounts a real HLS video 
   await mockCameraList(page);
   await page.goto("/");
 
-  await page.getByRole("button", { name: /expand browser check to full view/i }).click();
+  await page.getByRole("link", { name: /open browser check live view/i }).click();
 
   const indicator = page.locator(".live-path-indicator");
   // Comfortably above `MOQ_ATTEMPT_TIMEOUT_MS` (4s): a closed local port

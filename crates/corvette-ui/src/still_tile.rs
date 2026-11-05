@@ -1,6 +1,6 @@
 //! A dashboard tile showing its camera's latest still picture, refreshed.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
 use leptos::html;
@@ -28,7 +28,7 @@ enum TileStage {
 type LoaderWeak = Weak<RefCell<LoaderState>>;
 
 #[component]
-pub(crate) fn StillTile(camera_name: String, title: String, paused: Signal<bool>) -> impl IntoView {
+pub(crate) fn StillTile(camera_name: String, title: String) -> impl IntoView {
     let image = NodeRef::<html::Img>::new();
     let stage = RwSignal::new(TileStage::Waiting);
     let expired = RwSignal::new(false);
@@ -39,26 +39,8 @@ pub(crate) fn StillTile(camera_name: String, title: String, paused: Signal<bool>
         let Some(image_element) = image.get() else {
             return;
         };
-        let started = LoaderState::start(
-            &camera_name,
-            image_element,
-            stage,
-            expired,
-            age_label,
-            paused,
-        );
+        let started = LoaderState::start(&camera_name, image_element, stage, expired, age_label);
         loader.set_value(started);
-    });
-
-    let was_paused = Cell::new(paused.get_untracked());
-    Effect::new(move |_| {
-        let is_paused = paused.get();
-        if !was_paused.replace(is_paused) || is_paused {
-            return;
-        }
-        if let Some(loaded) = loader.try_update_value(|state| state.clone()).flatten() {
-            resume_refresh(&loaded);
-        }
     });
 
     on_cleanup(move || {
@@ -94,7 +76,6 @@ struct LoaderState {
     stage: RwSignal<TileStage>,
     expired: RwSignal<bool>,
     age_label: RwSignal<String>,
-    paused: Signal<bool>,
     failed_loads: u32,
     last_loaded_at: f64,
     refresh_timer: Option<i32>,
@@ -109,7 +90,6 @@ impl LoaderState {
         stage: RwSignal<TileStage>,
         expired: RwSignal<bool>,
         age_label: RwSignal<String>,
-        paused: Signal<bool>,
     ) -> Option<Rc<RefCell<Self>>> {
         let document = web_sys::window()?.document()?;
         let loader = Rc::new(RefCell::new(Self {
@@ -119,7 +99,6 @@ impl LoaderState {
             stage,
             expired,
             age_label,
-            paused,
             failed_loads: 0,
             last_loaded_at: 0.0,
             refresh_timer: None,
@@ -246,10 +225,7 @@ fn refresh_tick(weak: &LoaderWeak) {
     let Some(state) = weak.upgrade() else {
         return;
     };
-    let skip = {
-        let borrowed = state.borrow();
-        borrowed.document.hidden() || borrowed.paused.get_untracked()
-    };
+    let skip = state.borrow().document.hidden();
     if !skip {
         begin_load(&state);
     }
@@ -257,11 +233,8 @@ fn refresh_tick(weak: &LoaderWeak) {
 }
 
 fn resume_refresh(state: &Rc<RefCell<LoaderState>>) {
-    {
-        let borrowed = state.borrow();
-        if borrowed.document.hidden() || borrowed.paused.get_untracked() {
-            return;
-        }
+    if state.borrow().document.hidden() {
+        return;
     }
     if let Some(window) = web_sys::window()
         && let Some(timer) = state.borrow_mut().refresh_timer.take()
