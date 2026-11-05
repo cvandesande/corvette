@@ -25,6 +25,9 @@ const MOQ_ATTEMPT_TIMEOUT_MS: i32 = 4_000;
 /// A stalled script request never fires `load` or `error`, so only a timer can end the wait for it.
 const SCRIPT_LOAD_TIMEOUT_MS: i32 = 10_000;
 
+/// Provisional until the device measurement sets it: no picture by now means the untapped start failed and the play prompt should appear.
+const FIRST_FRAME_BOUND_MS: i32 = 5_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LivePath {
     Connecting,
@@ -69,6 +72,7 @@ pub(crate) fn ExpandedView(
         title,
     } = camera;
     let path = RwSignal::new(LivePath::Connecting);
+    let needs_tap = RwSignal::new(false);
     let player_container = NodeRef::<html::Div>::new();
     let close_button = NodeRef::<html::Button>::new();
     // StoredValue::new_local because on_cleanup requires a Send + Sync closure while the session owns non-Send browser objects; sound because a WASM build is single-threaded.
@@ -84,10 +88,11 @@ pub(crate) fn ExpandedView(
         let Some(container) = player_container.get() else {
             return;
         };
-        session.set_value(Some(ExpandedSession::start(
+        session.set_value(Some(ExpandedSession::start_with_play_prompt(
             camera_name.clone(),
             container.unchecked_into(),
             path.write_only(),
+            needs_tap.write_only(),
         )));
     });
 
@@ -133,7 +138,24 @@ pub(crate) fn ExpandedView(
                         "Close"
                     </button>
                 </div>
-                <div class="expanded-player" node_ref=player_container></div>
+                <div class="live-player-frame">
+                    <div class="expanded-player" node_ref=player_container></div>
+                    <button
+                        type="button"
+                        class="live-play-button"
+                        aria-label="Play live video"
+                        hidden=move || !needs_tap.get()
+                        on:click=move |_| {
+                            session.with_value(|session| {
+                                if let Some(session) = session {
+                                    session.replay();
+                                }
+                            });
+                        }
+                    >
+                        "Play"
+                    </button>
+                </div>
             </section>
         </div>
     }
@@ -149,11 +171,30 @@ impl ExpandedSession {
         container: Element,
         set_path: WriteSignal<LivePath>,
     ) -> Self {
+        Self::start_inner(camera_name, container, set_path, None)
+    }
+
+    pub(crate) fn start_with_play_prompt(
+        camera_name: String,
+        container: Element,
+        set_path: WriteSignal<LivePath>,
+        set_needs_tap: WriteSignal<bool>,
+    ) -> Self {
+        Self::start_inner(camera_name, container, set_path, Some(set_needs_tap))
+    }
+
+    fn start_inner(
+        camera_name: String,
+        container: Element,
+        set_path: WriteSignal<LivePath>,
+        set_needs_tap: Option<WriteSignal<bool>>,
+    ) -> Self {
         set_path.set(LivePath::Connecting);
         let state = Rc::new(RefCell::new(SessionState {
             camera_name,
             container,
             set_path,
+            set_needs_tap,
             stopped: false,
             moq: None,
             hls: None,
@@ -168,12 +209,27 @@ impl ExpandedSession {
         state.moq = None;
         state.hls = None;
     }
+
+    pub(crate) fn replay(&self) {
+        {
+            let mut state = self.state.borrow_mut();
+            if state.stopped {
+                return;
+            }
+            if let Some(set_needs_tap) = state.set_needs_tap {
+                set_needs_tap.set(false);
+            }
+            state.hls = None;
+        }
+        mount_hls_fallback(Rc::clone(&self.state));
+    }
 }
 
 struct SessionState {
     camera_name: String,
     container: Element,
     set_path: WriteSignal<LivePath>,
+    set_needs_tap: Option<WriteSignal<bool>>,
     stopped: bool,
     moq: Option<MoqMount>,
     hls: Option<HlsMount>,
@@ -214,6 +270,7 @@ struct HlsMount {
     hls_instance: JsValue,
     _on_fatal_error: Option<Closure<dyn FnMut(JsValue, JsValue)>>,
     _on_video_error: Closure<dyn FnMut(Event)>,
+    _first_frame_watch: Option<FirstFrameWatch>,
 }
 
 impl Drop for HlsMount {
@@ -227,6 +284,47 @@ impl Drop for HlsMount {
         }
         let _ = self.container.remove_child(&self.video);
     }
+}
+
+struct FirstFrameWatch {
+    video: HtmlVideoElement,
+    timeout_id: i32,
+    _on_playing: Closure<dyn FnMut(Event)>,
+}
+
+impl Drop for FirstFrameWatch {
+    fn drop(&mut self) {
+        if let Some(window) = web_sys::window() {
+            window.clear_timeout_with_handle(self.timeout_id);
+        }
+        self.video.set_onplaying(None);
+    }
+}
+
+/// Armed before `play()`: a `playing` event can fire synchronously inside it, so its handler must already be installed.
+fn arm_first_frame_watch(
+    set_needs_tap: WriteSignal<bool>,
+    video: &HtmlVideoElement,
+) -> Option<FirstFrameWatch> {
+    set_needs_tap.set(false);
+    let window = web_sys::window()?;
+    let on_bound = Closure::once_into_js(move || set_needs_tap.set(true));
+    let Ok(timeout_id) = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+        on_bound.unchecked_ref(),
+        FIRST_FRAME_BOUND_MS,
+    ) else {
+        return None;
+    };
+    let on_playing = Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+        window.clear_timeout_with_handle(timeout_id);
+        set_needs_tap.set(false);
+    });
+    video.set_onplaying(Some(on_playing.as_ref().unchecked_ref()));
+    Some(FirstFrameWatch {
+        video: video.clone(),
+        timeout_id,
+        _on_playing: on_playing,
+    })
 }
 
 fn mount_moq(state: &Rc<RefCell<SessionState>>) {
@@ -470,6 +568,9 @@ fn create_hls_video(state: &Rc<RefCell<SessionState>>, camera_name: &str) {
     let Some(video) = create_video_element(&borrowed) else {
         return;
     };
+    let first_frame_watch = borrowed
+        .set_needs_tap
+        .and_then(|set_needs_tap| arm_first_frame_watch(set_needs_tap, &video));
 
     let on_fatal_error = {
         let state = Rc::clone(state);
@@ -524,6 +625,7 @@ fn create_hls_video(state: &Rc<RefCell<SessionState>>, camera_name: &str) {
         hls_instance,
         _on_fatal_error: Some(on_fatal_error),
         _on_video_error: on_video_error,
+        _first_frame_watch: first_frame_watch,
     });
 }
 
@@ -546,6 +648,9 @@ fn try_native_hls_or_give_up(state: &Rc<RefCell<SessionState>>, camera_name: &st
         borrowed.set_path.set(LivePath::None);
         return;
     }
+    let first_frame_watch = borrowed
+        .set_needs_tap
+        .and_then(|set_needs_tap| arm_first_frame_watch(set_needs_tap, &video));
 
     let on_video_error = {
         let state = Rc::clone(state);
@@ -563,6 +668,7 @@ fn try_native_hls_or_give_up(state: &Rc<RefCell<SessionState>>, camera_name: &st
         hls_instance: JsValue::UNDEFINED,
         _on_fatal_error: None,
         _on_video_error: on_video_error,
+        _first_frame_watch: first_frame_watch,
     });
 }
 

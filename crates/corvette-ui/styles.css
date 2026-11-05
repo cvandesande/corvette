@@ -330,6 +330,38 @@ main {
   color: #d6544d;
 }
 
+.live-player-frame {
+  position: relative;
+}
+
+.live-play-button {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: fit-content;
+  height: fit-content;
+  padding: 0.55rem 1.1rem;
+  border: 1px solid #3a4848;
+  border-radius: 0.45rem;
+  color: #dce7e5;
+  background: #1b2425;
+  font-size: 1.05rem;
+  cursor: pointer;
+}
+
+.live-play-button:hover {
+  border-color: #69d1ba;
+}
+
+.live-play-button:focus-visible {
+  outline: 2px solid #69d1ba;
+  outline-offset: -2px;
+}
+
+.live-play-button[hidden] {
+  display: none;
+}
+
 .event-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
