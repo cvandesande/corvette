@@ -14,10 +14,12 @@ pub mod activity;
 pub mod clip_link;
 pub mod config;
 pub mod database;
+pub mod status;
 pub mod still;
 
 use crate::activity::{ActivityQuery, ActivityRows};
 use crate::config::ConfigSource;
+use crate::status::StatusState;
 
 const API_PREFIX: &str = "/corvette/api/v1/";
 
@@ -86,6 +88,7 @@ pub struct ApiServer {
     db_path: PathBuf,
     media_root: PathBuf,
     clock: Clock,
+    status_state: Arc<StatusState>,
 }
 
 impl std::fmt::Debug for ApiServer {
@@ -128,6 +131,7 @@ impl ApiServer {
             db_path: db_path.to_path_buf(),
             media_root: PathBuf::from(activity::DEFAULT_MEDIA_ROOT),
             clock: Arc::new(system_clock),
+            status_state: Arc::new(StatusState::default()),
         })
     }
 
@@ -157,6 +161,7 @@ impl ApiServer {
             db_path,
             media_root,
             clock,
+            status_state,
         } = self;
         tokio::pin!(shutdown);
         loop {
@@ -169,6 +174,7 @@ impl ApiServer {
                         let db_path = db_path.clone();
                         let media_root = media_root.clone();
                         let clock = Arc::clone(&clock);
+                        let status_state = Arc::clone(&status_state);
                         tokio::spawn(async move {
                             handle_connection(
                                 stream,
@@ -177,6 +183,7 @@ impl ApiServer {
                                 &db_path,
                                 &media_root,
                                 &clock,
+                                &status_state,
                             )
                             .await;
                         });
@@ -212,10 +219,18 @@ async fn handle_connection(
     db_path: &Path,
     media_root: &Path,
     clock: &Clock,
+    status_state: &StatusState,
 ) {
     let outcome = tokio::time::timeout(
         timeout,
-        read_route_respond(&mut stream, &config, db_path, media_root, clock),
+        read_route_respond(
+            &mut stream,
+            &config,
+            db_path,
+            media_root,
+            clock,
+            status_state,
+        ),
     )
     .await;
     match outcome {
@@ -244,6 +259,7 @@ async fn read_route_respond(
     db_path: &Path,
     media_root: &Path,
     clock: &Clock,
+    status_state: &StatusState,
 ) -> std::io::Result<Outcome> {
     let block = match read_header_block(stream).await {
         HeaderRead::Complete(block) => block,
@@ -256,7 +272,7 @@ async fn read_route_respond(
         HeaderRead::Closed => return Ok(Outcome::ClosedEarly),
     };
     let response = match parse_request(&block) {
-        Ok(request) => route(&request, config, db_path, media_root, clock).await,
+        Ok(request) => route(&request, config, db_path, media_root, clock, status_state).await,
         Err(reason) => bad_request(&reason),
     };
     write_response(stream, &response).await?;
@@ -441,18 +457,26 @@ pub(crate) fn utf8(bytes: &[u8]) -> Option<&str> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Route {
     Activity,
+    CameraStatus,
     Cameras,
     ClipLink,
     Health,
 }
 
 impl Route {
-    pub const ALL: [Self; 4] = [Self::Activity, Self::Cameras, Self::ClipLink, Self::Health];
+    pub const ALL: [Self; 5] = [
+        Self::Activity,
+        Self::CameraStatus,
+        Self::Cameras,
+        Self::ClipLink,
+        Self::Health,
+    ];
 
     #[must_use]
     pub fn path(self) -> String {
         match self {
             Self::Activity => format!("{API_PREFIX}activity"),
+            Self::CameraStatus => format!("{API_PREFIX}cameras/status"),
             Self::Cameras => format!("{API_PREFIX}cameras"),
             Self::ClipLink => format!("{API_PREFIX}clip-link"),
             Self::Health => format!("{API_PREFIX}health"),
@@ -466,6 +490,7 @@ async fn route(
     db_path: &Path,
     media_root: &Path,
     clock: &Clock,
+    status_state: &StatusState,
 ) -> Response {
     let Some(_user) = request
         .remote_user
@@ -475,7 +500,7 @@ async fn route(
         return unauthorized();
     };
     if let Some(segment) = still::camera_segment(&request.path) {
-        return still_picture(request, config, segment).await;
+        return still_picture(request, config, segment, clock, status_state).await;
     }
     let Some(route) = Route::ALL
         .into_iter()
@@ -485,6 +510,9 @@ async fn route(
     };
     match route {
         Route::Activity => activity(request, config, db_path, media_root, clock).await,
+        Route::CameraStatus => {
+            camera_status(config, status_state, &request.remote_role, clock).await
+        }
         Route::Cameras => cameras(config, &request.remote_role).await,
         Route::ClipLink => clip_link(request, config, db_path).await,
         Route::Health => health(config, db_path).await,
@@ -498,7 +526,36 @@ async fn cameras(config: &ConfigSource, role: &str) -> Response {
     }
 }
 
-async fn still_picture(request: &Request, config: &ConfigSource, segment: &str) -> Response {
+async fn camera_status(
+    config: &ConfigSource,
+    status_state: &StatusState,
+    role: &str,
+    clock: &Clock,
+) -> Response {
+    let entries = match config.camera_entries_for_role(role).await {
+        Ok(entries) => entries,
+        Err(err) => return config_unavailable(&err),
+    };
+    let fps = match status::fetch_camera_fps(config.backing_addr()).await {
+        Ok(fps) => fps,
+        Err(reason) => {
+            log_event("status", "fetch-error", &reason);
+            return status_unavailable();
+        }
+    };
+    Response::json(
+        "200 OK",
+        status::status_body(&entries, &fps, status_state, clock()),
+    )
+}
+
+async fn still_picture(
+    request: &Request,
+    config: &ConfigSource,
+    segment: &str,
+    clock: &Clock,
+    status_state: &StatusState,
+) -> Response {
     let camera = match activity::percent_decode(segment) {
         Ok(camera) => camera,
         Err(reason) => return bad_request(&reason),
@@ -516,8 +573,12 @@ async fn still_picture(request: &Request, config: &ConfigSource, segment: &str) 
         return no_picture();
     }
     match still::fetch_still(config.backing_addr(), &camera, height).await {
-        Ok(bytes) => Response::jpeg(bytes),
+        Ok(bytes) => {
+            status_state.still_delivered(&entry.name);
+            Response::jpeg(bytes)
+        }
         Err(detail) => {
+            status_state.still_failed(&entry.name, clock());
             log_event("still", "fetch-error", &detail);
             picture_unavailable()
         }
@@ -720,6 +781,14 @@ fn picture_unavailable() -> Response {
         "503 Service Unavailable",
         "picture_unavailable",
         "The camera's picture could not be fetched.",
+    )
+}
+
+fn status_unavailable() -> Response {
+    error_response(
+        "503 Service Unavailable",
+        "status_unavailable",
+        "The camera status could not be read.",
     )
 }
 

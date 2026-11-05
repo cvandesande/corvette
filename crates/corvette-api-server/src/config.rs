@@ -96,6 +96,16 @@ impl ConfigSource {
             .collect())
     }
 
+    pub(crate) async fn camera_entries_for_role(
+        &self,
+        role: &str,
+    ) -> Result<Vec<CameraEntry>, ConfigFetchError> {
+        Ok(self
+            .config()
+            .await?
+            .camera_entries_for_role_including_off(role))
+    }
+
     async fn config(&self) -> Result<FrigateConfig, ConfigFetchError> {
         let mut cache = self.cache.lock().await;
         if let Some(cached) = cache.as_ref()

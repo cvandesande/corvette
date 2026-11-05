@@ -749,14 +749,16 @@ body instead. Service errors share one shape, `{"code": ..., "message": ...}`, w
   answering for a camera that does not exist, that the caller's role may not see, or that
   has no recorded footage overlapping the requested range, or the still route answering
   for a camera that does not exist or that the caller's role may not see.
-- `config_unavailable` (`503`): the cameras, activity, range-link or still route has no
-  usable Frigate configuration.
+- `config_unavailable` (`503`): the cameras, activity, range-link, still or status route
+  has no usable Frigate configuration.
 - `database_unavailable` (`503`): the activity or range-link route could not read Frigate's
   database. The underlying error is logged, not returned.
 - `no_picture` (`404`): the still route found a camera the caller may see that is switched
   off.
 - `picture_unavailable` (`503`): the still route could not get a usable picture from the
   backing; the reason is logged, not returned.
+- `status_unavailable` (`503`): the status route could not get a usable stats answer from
+  the backing; the reason is logged, not returned.
 - `unhealthy` (`503`): the health route found failing parts; `message` names each one.
 
 `GET /corvette/api/v1/health` answers `200` `{"database":"ok","config":"ok"}` when both
@@ -993,6 +995,63 @@ stopped makes Frigate answer `200` with its own substituted error image, so the 
 forwards that image as a picture; the answer carries no frame time, so a client cannot
 tell from this route how old a picture is. `height=0` makes Frigate answer the picture
 at its detect-stream size, so the contract enforces its own 1-576 range.
+
+The route accepts `GET` only, with the identity rules "Corvette's own API lives under
+`/corvette/api/v1/`" states for every route.
+
+## The server reports each camera's state
+
+The main page shows which cameras are live, which are off by choice, which have no
+picture and which are stale. The route classifies every camera server-side and answers
+the four states as one Corvette contract.
+
+`GET /corvette/api/v1/cameras/status` answers the state of the caller's cameras. The
+route takes no parameters and ignores the query string.
+
+The answer is `200` `{"cameras":[{"name","state","since"}, ...]}`: one entry per camera
+the caller's role may see, cameras that are switched off included, in the order the
+cameras route lists them; a role that sees no camera gets `{"cameras":[]}`. `state` is
+one of four values:
+
+- `live`: the camera is switched on and frames are arriving.
+- `stale`: the camera is switched on, the backing's stats show frames arriving, and a
+  run of the server's own failed picture fetches for it, with no delivered picture
+  between them, began over 60 seconds ago and has its latest failure at most 60 seconds
+  ago. A delivered picture ends `stale`.
+- `off_by_choice`: the camera is switched off in the configuration; a neutral state, not
+  a fault.
+- `no_picture`: the camera is switched on and no frames are arriving, which includes a
+  camera the backing's stats do not list.
+
+`since` is a JSON number of Unix seconds at which this service first observed the camera
+in its current state. A camera turning `stale` or returning to `live` gets a new `since`.
+The service keeps these times in process memory, so a restart resets every `since` to
+the first observation after the restart.
+
+No usable configuration copy answers `503` `config_unavailable` under the condition the
+cameras route states for it, and the server asks the backing for no stats in that case.
+Otherwise the server reads the backing's stats once per request, and a stats answer
+that is not usable answers `503` `status_unavailable` ("The camera status could not be
+read."); the backing's own status and body never appear in any answer, and the reason
+is logged. A camera that is switched off is classified from the configuration alone.
+A usable stats answer is a plain `200` whose whole response is at most 4 MiB, arrives
+within the fetch's 2-second bound, and carries a body that is a JSON object whose
+`cameras` member is an object in which every camera has a numeric `camera_fps`.
+
+**Current backing**: the state comes from Frigate v0.17.2 (deployed `0.17.2-3d4dd3a`),
+from the configuration's `enabled` flag and from the backing's `GET /api/stats`
+(`cameras.<name>.camera_fps`). The stats list every configured camera, switched-off
+cameras included. The served answer is the stats emitter's last snapshot, appended
+every 15 seconds, so a change shows up to 15 seconds late. Frigate zeroes `camera_fps`
+only after about 20 seconds without frames plus its watchdog cycle (10 seconds by
+default), so `no_picture` can appear up to about 45 seconds after frames stop, computed
+from Frigate's defaults. A camera switched off at runtime keeps its last non-zero frame
+rate in the stats — the deployed `living` camera shows 5.0 there while its configuration
+says `enabled: false` — so the route reads `enabled` and ignores the stats for an off
+camera. The stats body is about 14 KiB and the route reads it on every request. The
+evidence for `stale` is the outcome of the still route's fetches
+(`GET /api/<camera>/latest.jpg` on the backing), recorded in process memory, so a
+camera nobody fetches a picture for is never `stale` and a restart forgets the records.
 
 The route accepts `GET` only, with the identity rules "Corvette's own API lives under
 `/corvette/api/v1/`" states for every route.
