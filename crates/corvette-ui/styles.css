@@ -1483,3 +1483,26 @@ main {
   background: rgb(16 21 22 / 75%);
   border-radius: 0.4rem;
 }
+
+.health-line {
+  margin: 0 0 1rem;
+  padding: 0.45rem 0.75rem;
+  border-left: 3px solid;
+  font-size: 0.95rem;
+}
+
+.health-line-ok {
+  color: #8fa4a1;
+  border-left-color: #69d1ba;
+}
+
+.health-line-amber {
+  color: #e8eeee;
+  border-left-color: #d9973f;
+  background: rgb(217 151 63 / 10%);
+}
+
+.health-line-offline {
+  color: #8fa4a1;
+  border-left-color: #293233;
+}

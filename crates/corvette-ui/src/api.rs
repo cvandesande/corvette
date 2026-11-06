@@ -5,14 +5,16 @@
 
 use crate::activity::MOTION_BUCKET_SECONDS;
 use corvette_api::{
-    ActivityResponse, ActivityReview, Camera, CameraEntry, CameraList, Event, MediaLink,
-    MotionActivity, PreviewClip, RecordingSegment, ReviewEvent, ReviewSegment,
+    ActivityResponse, ActivityReview, Camera, CameraEntry, CameraList, CameraStatus,
+    CameraStatusList, Event, MediaLink, MotionActivity, PreviewClip, RecordingSegment, ReviewEvent,
+    ReviewSegment,
 };
 use gloo_net::http::{Request, RequestBuilder};
 use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 
 const CAMERAS_PATH: &str = "/corvette/api/v1/cameras";
+const CAMERA_STATUS_PATH: &str = "/corvette/api/v1/cameras/status";
 const ACTIVITY_PATH: &str = "/corvette/api/v1/activity";
 const CLIP_LINK_PATH: &str = "/corvette/api/v1/clip-link";
 const EVENTS_PATH: &str = "/api/events?limit=10&sort=date_desc&has_clip=1";
@@ -53,6 +55,12 @@ async fn fetch_json<T: DeserializeOwned>(request: RequestBuilder, path: &str) ->
 
 pub(super) async fn fetch_camera_entries() -> Result<Vec<CameraEntry>, String> {
     let list: CameraList = fetch_json(Request::get(CAMERAS_PATH), CAMERAS_PATH).await?;
+    Ok(list.cameras)
+}
+
+pub(super) async fn fetch_camera_status() -> Result<Vec<CameraStatus>, String> {
+    let list: CameraStatusList =
+        fetch_json(Request::get(CAMERA_STATUS_PATH), CAMERA_STATUS_PATH).await?;
     Ok(list.cameras)
 }
 

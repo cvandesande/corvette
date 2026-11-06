@@ -14,6 +14,7 @@ mod camera_page;
 mod dashboard;
 mod events;
 mod expanded_view;
+mod health_line;
 #[cfg(feature = "split")]
 mod lazy_route;
 mod local_time;

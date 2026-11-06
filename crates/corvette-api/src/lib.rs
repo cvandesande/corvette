@@ -131,6 +131,28 @@ pub struct CameraList {
     pub cameras: Vec<CameraEntry>,
 }
 
+/// One of the four states the camera status route reports for a camera.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CameraState {
+    Live,
+    Stale,
+    OffByChoice,
+    NoPicture,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CameraStatus {
+    pub name: String,
+    pub state: CameraState,
+    pub since: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CameraStatusList {
+    pub cameras: Vec<CameraStatus>,
+}
+
 /// The response body of Corvette's health route; both probe results are `ok` in a `200` answer.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Health {
@@ -700,6 +722,47 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Health>(&json).expect("health body should deserialize"),
             health
+        );
+    }
+
+    #[test]
+    fn camera_status_json_decodes_the_four_states_and_rejects_any_other() {
+        let status: CameraStatusList = serde_json::from_str(
+            r#"{"cameras":[
+                {"name":"front","state":"live","since":1762300000},
+                {"name":"garage","state":"stale","since":1762300060},
+                {"name":"living","state":"off_by_choice","since":1762300120},
+                {"name":"doorbell","state":"no_picture","since":1762300180}
+            ]}"#,
+        )
+        .expect("camera status should deserialize");
+        assert_eq!(
+            status
+                .cameras
+                .iter()
+                .map(|entry| entry.state)
+                .collect::<Vec<_>>(),
+            vec![
+                CameraState::Live,
+                CameraState::Stale,
+                CameraState::OffByChoice,
+                CameraState::NoPicture,
+            ]
+        );
+        assert_eq!(
+            status.cameras[3],
+            CameraStatus {
+                name: "doorbell".to_owned(),
+                state: CameraState::NoPicture,
+                since: 1_762_300_180.0,
+            }
+        );
+        assert!(
+            serde_json::from_str::<CameraStatusList>(
+                r#"{"cameras":[{"name":"front","state":"recording","since":1762300000}]}"#
+            )
+            .is_err(),
+            "a state outside the four is not the contract"
         );
     }
 

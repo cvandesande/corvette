@@ -7,6 +7,7 @@ use crate::activity::{
     ActivityFilter, ActivityFilters, EventListLayout, RECENT_ACTIVITY_HOURS, ReviewEventList,
     recent_activity_empty_heading, review_and_motion_events,
 };
+use crate::health_line::HealthLine;
 use crate::shell::{NAVIGATION, Status, StatusGlyph};
 use crate::still_tile::StillTile;
 
@@ -63,11 +64,14 @@ pub(crate) fn Dashboard() -> impl IntoView {
                         Some(Err(error)) => view! { <Status heading="Cameras unavailable" detail=error glyph=StatusGlyph::Camera/> }.into_any(),
                         Some(Ok(cameras)) if cameras.is_empty() => view! { <Status heading="No cameras configured" detail="Add or enable a camera in Frigate, then reload this page." glyph=StatusGlyph::Camera/> }.into_any(),
                         Some(Ok(cameras)) => view! {
-                            <div class="camera-grid" aria-label="Configured cameras">
-                                {cameras.into_iter().map(|camera| view! {
-                                    <CameraCard camera=camera/>
-                                }).collect_view()}
-                            </div>
+                            <>
+                                <HealthLine cameras=cameras.clone()/>
+                                <div class="camera-grid" aria-label="Configured cameras">
+                                    {cameras.into_iter().map(|camera| view! {
+                                        <CameraCard camera=camera/>
+                                    }).collect_view()}
+                                </div>
+                            </>
                         }.into_any(),
                     }}
                 </section>
