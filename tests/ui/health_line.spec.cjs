@@ -1,10 +1,10 @@
 const { expect, test } = require(process.env.PLAYWRIGHT_TEST_PATH);
 
-// Pins the health line above the dashboard camera grid: it polls the camera
-// status route every 30 seconds, stays quiet while every camera that is on is
-// recording, turns amber for a camera that has had no picture for two minutes,
-// clears only after two healthy polls in a row, and admits an unreachable
-// server instead of letting a stale page look healthy.
+// Pins the dashboard's one camera-status poll and its three readers: the
+// health line above the camera grid, the state line on camera tiles, and the
+// System section's row per camera. The poll runs every 30 seconds, the line
+// turns amber for a camera that has had no picture for two minutes, clears
+// only after two healthy polls, and admits an unreachable server.
 
 const JPEG = Buffer.from(
   "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q==",
@@ -343,6 +343,7 @@ test("a camera with a persisted fault says on its tile that no new picture has a
   await expect(front.locator(".camera-card-state-amber")).toHaveText(
     `No new picture since ${began}.`,
   );
+  await expect(tileFor(page, "Garage")).toHaveCount(1);
   await expect(tileFor(page, "Garage").locator(".camera-card-state")).toHaveCount(0);
 
   await expect(front.locator(".still-tile-image")).toBeVisible();
@@ -437,4 +438,141 @@ test("the page makes one status request per poll however many tiles read it", as
   await settledPolls(page, polls, 2);
   await page.clock.fastForward(30_000);
   await settledPolls(page, polls, 3);
+});
+
+test("the System section gives the System menu entry a place to land and lists every camera with its state in words", async ({
+  page,
+}) => {
+  await page.clock.install({ time: new Date(START) });
+  await stubDashboardApis(page, [FRONT, GARAGE, LIVING]);
+  await stubStatus(page, () =>
+    statusAnswer([
+      { name: "front", state: "no_picture", since: START_SECONDS - 200 },
+      live("garage", START_SECONDS - 3600),
+      { name: "living", state: "off_by_choice", since: START_SECONDS - 7200 },
+    ]),
+  );
+
+  await page.goto("/");
+
+  await expect(page.getByRole("link", { name: "System", exact: true })).toHaveAttribute(
+    "href",
+    "/#system",
+  );
+  await expect(page.locator("#system")).toHaveCount(1);
+  await expect(page.getByRole("heading", { name: "System", exact: true })).toBeVisible();
+
+  const rows = page.locator("#system .system-row");
+  await expect(rows).toHaveCount(3);
+  await expect(page.locator("#system ul.system-list > li.system-row")).toHaveCount(3);
+  const began = await localClock(page, START_SECONDS - 200);
+  await expect(rows.nth(0).locator(".system-name")).toHaveText("Front");
+  await expect(rows.nth(0).locator(".system-state")).toHaveText(`No picture since ${began}`);
+  await expect(rows.nth(1).locator(".system-name")).toHaveText("Garage");
+  await expect(rows.nth(1).locator(".system-state")).toHaveText("Live");
+  await expect(rows.nth(2).locator(".system-name")).toHaveText("Living");
+  await expect(rows.nth(2).locator(".system-state")).toHaveText("Off by choice");
+  await expect(rows.nth(0)).toHaveClass(/system-row-fault/);
+  await expect(rows.nth(1)).not.toHaveClass(/system-row-fault/);
+  await expect(rows.nth(2)).not.toHaveClass(/system-row-fault/);
+});
+
+test("the System section shows a fresh fault that the health line is still quiet about", async ({
+  page,
+}) => {
+  await page.clock.install({ time: new Date(START) });
+  await stubDashboardApis(page, [FRONT, GARAGE]);
+  await stubStatus(page, () =>
+    statusAnswer([
+      { name: "front", state: "stale", since: START_SECONDS - 30 },
+      live("garage"),
+    ]),
+  );
+
+  await page.goto("/");
+
+  await expect(healthGroup(page).locator(".health-line-ok")).toBeVisible();
+
+  const frontRow = page.locator("#system .system-row").nth(0);
+  const began = await localClock(page, START_SECONDS - 30);
+  await expect(frontRow.locator(".system-state")).toHaveText(
+    `Picture not updating since ${began}`,
+  );
+  await expect(frontRow).toHaveClass(/system-row-fault/);
+});
+
+test("a camera that recovers reads Live in the System section at the next poll, with no time", async ({
+  page,
+}) => {
+  await page.clock.install({ time: new Date(START) });
+  let current = statusAnswer([
+    { name: "front", state: "stale", since: START_SECONDS - 30 },
+    live("garage"),
+  ]);
+  const polls = trackStatusPolls(page);
+  await stubDashboardApis(page, [FRONT, GARAGE]);
+  await stubStatus(page, () => current);
+
+  await page.goto("/");
+  await settledPolls(page, polls, 1);
+
+  const frontRow = page.locator("#system .system-row").nth(0);
+  const began = await localClock(page, START_SECONDS - 30);
+  await expect(frontRow.locator(".system-state")).toHaveText(
+    `Picture not updating since ${began}`,
+  );
+
+  current = statusAnswer([live("front"), live("garage")]);
+  await page.clock.fastForward(30_000);
+  await settledPolls(page, polls, 2);
+
+  await expect(frontRow.locator(".system-state")).toHaveText("Live");
+  await expect(frontRow).not.toHaveClass(/system-row-fault/);
+});
+
+test("while the page is offline the System section shows the offline wording instead of the list", async ({
+  page,
+}) => {
+  await page.clock.install({ time: new Date(START) });
+  let failed = false;
+  const polls = trackStatusPolls(page);
+  const failedPolls = { count: 0 };
+  page.on("requestfailed", (request) => {
+    if (new URL(request.url()).pathname === "/corvette/api/v1/cameras/status") {
+      failedPolls.count += 1;
+    }
+  });
+  await stubDashboardApis(page, [FRONT, GARAGE, LIVING]);
+  await stubStatus(page, () =>
+    failed
+      ? null
+      : statusAnswer([
+          live("front"),
+          live("garage"),
+          { name: "living", state: "off_by_choice", since: START_SECONDS - 7200 },
+        ]),
+  );
+
+  await page.goto("/");
+  await settledPolls(page, polls, 1);
+  await expect(page.locator("#system .system-row")).toHaveCount(3);
+
+  // route.abort() fails the request, so the failed poll lands as a
+  // requestfailed, not a finished one: count it to prove it arrived.
+  failed = true;
+  await page.clock.fastForward(30_000);
+  await expect.poll(() => failedPolls.count).toBe(1);
+  await page.evaluate(() => Promise.resolve());
+
+  const updated = await localClock(page, START_SECONDS);
+  await expect(page.locator("#system .system-note-offline")).toHaveText(
+    `Page offline — last updated ${updated}. Retrying.`,
+  );
+  await expect(page.locator("#system .system-row")).toHaveCount(0);
+
+  failed = false;
+  await page.clock.fastForward(5_000);
+  await settledPolls(page, polls, 2);
+  await expect(page.locator("#system .system-row")).toHaveCount(3);
+  await expect(page.locator("#system .system-note-offline")).toHaveCount(0);
 });

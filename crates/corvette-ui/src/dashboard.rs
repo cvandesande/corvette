@@ -8,7 +8,7 @@ use crate::activity::{
     recent_activity_empty_heading, review_and_motion_events,
 };
 use crate::health_line::{
-    CameraStatusFeed, HealthLine, provide_camera_status_feed, tile_state_text,
+    CameraStatusFeed, HealthLine, SystemCameras, provide_camera_status_feed, tile_state_text,
 };
 use crate::shell::{NAVIGATION, Status, StatusGlyph};
 use crate::still_tile::StillTile;
@@ -17,6 +17,8 @@ use crate::still_tile::StillTile;
 pub(crate) fn Dashboard() -> impl IntoView {
     provide_camera_status_feed();
     let cameras = LocalResource::new(crate::api::fetch_camera_entries);
+    let system_cameras =
+        Signal::derive(move || cameras.get().and_then(Result::ok).unwrap_or_default());
     let recent_activity = LocalResource::new(|| {
         let before = js_sys::Date::now() / 1_000.0;
         let after = f64::from(RECENT_ACTIVITY_HOURS).mul_add(-3_600.0, before);
@@ -99,13 +101,20 @@ pub(crate) fn Dashboard() -> impl IntoView {
                         /> }.into_any(),
                     }}
                 </section>
+
+                <section id="system" class="page-section" aria-labelledby="system-heading">
+                    <p class="eyebrow">"Health"</p>
+                    <h1 id="system-heading">"System"</h1>
+                    <SystemCameras cameras=system_cameras/>
+                </section>
             </main>
         </div>
     }
 }
 
 /// One camera tile: a link to the camera's own page carrying its live picture
-/// when the camera is on, or a plain off line when the camera is off.
+/// when the camera is on, or a plain off line when the camera is off, plus a
+/// state line while its camera has a persisted fault.
 #[component]
 fn CameraCard(camera: CameraEntry) -> impl IntoView {
     if camera.enabled {

@@ -1,4 +1,4 @@
-//! The dashboard's one camera-status poll, read by the health line and the camera tiles.
+//! The dashboard's one camera-status poll, read by the health line, the camera tiles and the System section.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -114,10 +114,11 @@ impl HealthTracker {
     }
 }
 
-/// The one camera-status reading, shared by the health line and the camera tiles.
+/// The one camera-status reading, shared by the health line, the camera tiles and the System section.
 #[derive(Clone, Copy)]
 pub(crate) struct CameraStatusFeed {
     reading: RwSignal<HealthReading>,
+    statuses: RwSignal<Vec<CameraStatus>>,
 }
 
 impl CameraStatusFeed {
@@ -135,15 +136,17 @@ impl CameraStatusFeed {
     }
 }
 
-/// Creates the shared camera-status poll for this page and provides its reading to the subtree.
+/// Called once by the dashboard; the poll starts when that scope mounts and stops when it is cleaned up.
 pub(crate) fn provide_camera_status_feed() {
     let reading = RwSignal::new(HealthReading::Checking);
+    let statuses = RwSignal::new(Vec::new());
     let poller = StoredValue::new_local(None::<Rc<RefCell<PollState>>>);
 
     Effect::new(move |_| {
         let started = Rc::new(RefCell::new(PollState {
             tracker: HealthTracker::default(),
             reading,
+            statuses,
             timer: None,
         }));
         poller.set_value(Some(Rc::clone(&started)));
@@ -156,7 +159,7 @@ pub(crate) fn provide_camera_status_feed() {
         }
     });
 
-    provide_context(CameraStatusFeed { reading });
+    provide_context(CameraStatusFeed { reading, statuses });
 }
 
 #[component]
@@ -185,6 +188,36 @@ pub(crate) fn HealthLine(cameras: Vec<CameraEntry>) -> impl IntoView {
     }
 }
 
+#[component]
+pub(crate) fn SystemCameras(cameras: Signal<Vec<CameraEntry>>) -> impl IntoView {
+    let feed = expect_context::<CameraStatusFeed>();
+
+    view! {
+        {move || match feed.reading.get() {
+            HealthReading::Checking => view! {
+                <p class="system-note">"Checking cameras."</p>
+            }.into_any(),
+            HealthReading::Unavailable { last_ok } => view! {
+                <p class="system-note system-note-offline">{offline_text(last_ok)}</p>
+            }.into_any(),
+            HealthReading::Healthy { .. } | HealthReading::Amber(_) => {
+                let cameras = cameras.get();
+                let rows = feed.statuses
+                    .get()
+                    .into_iter()
+                    .map(|status| view! {
+                        <li class="system-row" class:system-row-fault=is_fault(status.state)>
+                            <span class="system-name">{display_name(&cameras, &status.name).to_owned()}</span>
+                            <span class="system-state">{system_state_text(status.state, status.since)}</span>
+                        </li>
+                    })
+                    .collect_view();
+                view! { <ul class="system-list">{rows}</ul> }.into_any()
+            }
+        }}
+    }
+}
+
 fn clock_hhmm(unix_seconds: f64) -> String {
     crate::local_time::format_clock_time(unix_seconds)
         .chars()
@@ -199,11 +232,15 @@ fn healthy_text(updated: f64) -> String {
     )
 }
 
-fn amber_text(cameras: &[CameraEntry], problem: &HealthProblem) -> String {
-    let display = cameras
+fn display_name<'a>(cameras: &'a [CameraEntry], name: &'a str) -> &'a str {
+    cameras
         .iter()
-        .find(|camera| camera.name == problem.name)
-        .map_or(problem.name.as_str(), |camera| camera.display_name.as_str());
+        .find(|camera| camera.name == name)
+        .map_or(name, |camera| camera.display_name.as_str())
+}
+
+fn amber_text(cameras: &[CameraEntry], problem: &HealthProblem) -> String {
+    let display = display_name(cameras, &problem.name);
     format!(
         "{display} has had no picture since {}. Its live view and new recordings are paused.",
         clock_hhmm(problem.since)
@@ -226,9 +263,19 @@ pub(crate) fn tile_state_text(since: f64) -> String {
     format!("No new picture since {}.", clock_hhmm(since))
 }
 
+fn system_state_text(state: CameraState, since: f64) -> String {
+    match state {
+        CameraState::Live => "Live".to_owned(),
+        CameraState::OffByChoice => "Off by choice".to_owned(),
+        CameraState::Stale => format!("Picture not updating since {}", clock_hhmm(since)),
+        CameraState::NoPicture => format!("No picture since {}", clock_hhmm(since)),
+    }
+}
+
 struct PollState {
     tracker: HealthTracker,
     reading: RwSignal<HealthReading>,
+    statuses: RwSignal<Vec<CameraStatus>>,
     timer: Option<i32>,
 }
 
@@ -252,8 +299,11 @@ fn poll_now(poller: &Rc<RefCell<PollState>>) {
         let now = js_sys::Date::now() / 1_000.0;
         let reading = {
             let mut state = alive.borrow_mut();
-            match outcome {
-                Ok(statuses) => state.tracker.record_success(now, &statuses),
+            match &outcome {
+                Ok(statuses) => {
+                    state.statuses.set(statuses.clone());
+                    state.tracker.record_success(now, statuses);
+                }
                 // The offline line is the handling of a failed poll.
                 Err(_) => state.tracker.record_failure(),
             }

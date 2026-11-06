@@ -1519,3 +1519,43 @@ main {
   color: #8fa4a1;
   border-left-color: #293233;
 }
+
+.system-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.system-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid #293233;
+  font-size: 0.95rem;
+}
+
+.system-name {
+  color: #d7e2e0;
+}
+
+.system-state {
+  color: #8fa4a1;
+}
+
+.system-row-fault {
+  padding-left: 0.75rem;
+  border-left: 3px solid #d9973f;
+  background: rgb(217 151 63 / 10%);
+}
+
+.system-note,
+.system-note-offline {
+  margin: 0;
+  color: #8fa4a1;
+  font-size: 0.95rem;
+}
