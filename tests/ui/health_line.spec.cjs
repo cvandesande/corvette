@@ -317,3 +317,124 @@ test("the offline line names the last good update and never shows the healthy li
   );
   await expect(group.locator(".health-line-ok")).toHaveCount(0);
 });
+
+const tileFor = (page, displayName) =>
+  page
+    .locator(".camera-card")
+    .filter({ has: page.getByRole("link", { name: `Open ${displayName} live view` }) });
+
+const offTileFor = (page, displayName) =>
+  page.locator(".camera-card").filter({ hasText: `${displayName}: off` });
+
+test("a camera with a persisted fault says on its tile that no new picture has arrived since the fault began", async ({
+  page,
+}) => {
+  await page.clock.install({ time: new Date(START) });
+  const since = START_SECONDS - 130;
+  await stubDashboardApis(page, [FRONT, GARAGE]);
+  await stubStatus(page, () =>
+    statusAnswer([{ name: "front", state: "stale", since }, live("garage")]),
+  );
+
+  await page.goto("/");
+
+  const began = await localClock(page, since);
+  const front = tileFor(page, "Front");
+  await expect(front.locator(".camera-card-state-amber")).toHaveText(
+    `No new picture since ${began}.`,
+  );
+  await expect(tileFor(page, "Garage").locator(".camera-card-state")).toHaveCount(0);
+
+  await expect(front.locator(".still-tile-image")).toBeVisible();
+  await expect(front.getByRole("link", { name: "Open Front live view" })).toHaveAttribute(
+    "href",
+    "/camera/front",
+  );
+});
+
+test("a fault younger than two minutes puts no line on the tile", async ({ page }) => {
+  await page.clock.install({ time: new Date(START) });
+  const polls = trackStatusPolls(page);
+  await stubDashboardApis(page, [FRONT, GARAGE]);
+  await stubStatus(page, () =>
+    statusAnswer([{ name: "front", state: "stale", since: START_SECONDS - 30 }, live("garage")]),
+  );
+
+  await page.goto("/");
+  await settledPolls(page, polls, 1);
+
+  await expect(page.locator(".camera-card-state")).toHaveCount(0);
+  await expect(healthGroup(page).locator(".health-line-ok")).toBeVisible();
+});
+
+test("a tile's line goes when its camera has been healthy for two polls", async ({ page }) => {
+  await page.clock.install({ time: new Date(START) });
+  const since = START_SECONDS - 130;
+  let current = statusAnswer([{ name: "front", state: "stale", since }, live("garage")]);
+  const polls = trackStatusPolls(page);
+  await stubDashboardApis(page, [FRONT, GARAGE]);
+  await stubStatus(page, () => current);
+
+  await page.goto("/");
+
+  const front = tileFor(page, "Front");
+  await settledPolls(page, polls, 1);
+  await expect(front.locator(".camera-card-state-amber")).toBeVisible();
+
+  current = statusAnswer([live("front"), live("garage")]);
+  await page.clock.fastForward(30_000);
+  await settledPolls(page, polls, 2);
+  await expect(front.locator(".camera-card-state-amber")).toBeVisible();
+
+  await page.clock.fastForward(30_000);
+  await settledPolls(page, polls, 3);
+  await expect(front.locator(".camera-card-state")).toHaveCount(0);
+});
+
+test("an off camera's tile keeps its plain off line and gets no state line", async ({ page }) => {
+  await page.clock.install({ time: new Date(START) });
+  const longOff = START_SECONDS - 86_400;
+  const polls = trackStatusPolls(page);
+  await stubDashboardApis(page, [FRONT, GARAGE, LIVING]);
+  await stubStatus(page, () =>
+    statusAnswer([
+      live("front"),
+      live("garage"),
+      { name: "living", state: "off_by_choice", since: longOff },
+    ]),
+  );
+
+  await page.goto("/");
+  await settledPolls(page, polls, 1);
+
+  const living = offTileFor(page, "Living");
+  await expect(living.locator(".camera-card-off")).toHaveText("Living: off");
+  await expect(living.locator(".camera-card-state")).toHaveCount(0);
+  await expect(page.locator(".camera-card-state")).toHaveCount(0);
+});
+
+test("the page makes one status request per poll however many tiles read it", async ({ page }) => {
+  await page.clock.install({ time: new Date(START) });
+  const since = START_SECONDS - 130;
+  const polls = trackStatusPolls(page);
+  await stubDashboardApis(page, [FRONT, GARAGE]);
+  await stubStatus(page, () =>
+    statusAnswer([
+      { name: "front", state: "stale", since },
+      { name: "garage", state: "stale", since },
+    ]),
+  );
+
+  await page.goto("/");
+
+  const group = healthGroup(page);
+  await settledPolls(page, polls, 1);
+  await expect(group.locator(".health-line-amber")).toHaveCount(2);
+  await expect(tileFor(page, "Front").locator(".camera-card-state-amber")).toHaveCount(1);
+  await expect(tileFor(page, "Garage").locator(".camera-card-state-amber")).toHaveCount(1);
+
+  await page.clock.fastForward(30_000);
+  await settledPolls(page, polls, 2);
+  await page.clock.fastForward(30_000);
+  await settledPolls(page, polls, 3);
+});

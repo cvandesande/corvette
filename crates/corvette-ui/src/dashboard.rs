@@ -7,12 +7,15 @@ use crate::activity::{
     ActivityFilter, ActivityFilters, EventListLayout, RECENT_ACTIVITY_HOURS, ReviewEventList,
     recent_activity_empty_heading, review_and_motion_events,
 };
-use crate::health_line::HealthLine;
+use crate::health_line::{
+    CameraStatusFeed, HealthLine, provide_camera_status_feed, tile_state_text,
+};
 use crate::shell::{NAVIGATION, Status, StatusGlyph};
 use crate::still_tile::StillTile;
 
 #[component]
 pub(crate) fn Dashboard() -> impl IntoView {
+    provide_camera_status_feed();
     let cameras = LocalResource::new(crate::api::fetch_camera_entries);
     let recent_activity = LocalResource::new(|| {
         let before = js_sys::Date::now() / 1_000.0;
@@ -108,6 +111,8 @@ fn CameraCard(camera: CameraEntry) -> impl IntoView {
     if camera.enabled {
         let player_title = format!("{} live video", camera.display_name);
         let page_camera_name = camera.name.clone();
+        let state_camera_name = camera.name.clone();
+        let feed = expect_context::<CameraStatusFeed>();
         view! {
             <article class="camera-card">
                 <a
@@ -119,6 +124,11 @@ fn CameraCard(camera: CameraEntry) -> impl IntoView {
                     <h2>{camera.display_name.clone()}</h2>
                     <p>{camera.name}</p>
                 </a>
+                {move || {
+                    feed.problem_since(&state_camera_name).map(|since| view! {
+                        <p class="camera-card-state camera-card-state-amber">{tile_state_text(since)}</p>
+                    })
+                }}
             </article>
         }
         .into_any()

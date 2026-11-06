@@ -1,4 +1,4 @@
-//! The status line above the dashboard camera grid, fed by the camera status route.
+//! The dashboard's one camera-status poll, read by the health line and the camera tiles.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -114,8 +114,29 @@ impl HealthTracker {
     }
 }
 
-#[component]
-pub(crate) fn HealthLine(cameras: Vec<CameraEntry>) -> impl IntoView {
+/// The one camera-status reading, shared by the health line and the camera tiles.
+#[derive(Clone, Copy)]
+pub(crate) struct CameraStatusFeed {
+    reading: RwSignal<HealthReading>,
+}
+
+impl CameraStatusFeed {
+    /// The time the named camera's persisted fault began, while the current reading flags that camera.
+    pub(crate) fn problem_since(&self, name: &str) -> Option<f64> {
+        match self.reading.get() {
+            HealthReading::Amber(problems) => problems
+                .into_iter()
+                .find(|problem| problem.name == name)
+                .map(|problem| problem.since),
+            HealthReading::Checking
+            | HealthReading::Healthy { .. }
+            | HealthReading::Unavailable { .. } => None,
+        }
+    }
+}
+
+/// Creates the shared camera-status poll for this page and provides its reading to the subtree.
+pub(crate) fn provide_camera_status_feed() {
     let reading = RwSignal::new(HealthReading::Checking);
     let poller = StoredValue::new_local(None::<Rc<RefCell<PollState>>>);
 
@@ -135,9 +156,16 @@ pub(crate) fn HealthLine(cameras: Vec<CameraEntry>) -> impl IntoView {
         }
     });
 
+    provide_context(CameraStatusFeed { reading });
+}
+
+#[component]
+pub(crate) fn HealthLine(cameras: Vec<CameraEntry>) -> impl IntoView {
+    let feed = expect_context::<CameraStatusFeed>();
+
     view! {
         <div class="health-line-group" aria-live="polite">
-            {move || match reading.get() {
+            {move || match feed.reading.get() {
                 HealthReading::Checking => ().into_any(),
                 HealthReading::Healthy { updated } => view! {
                     <p class="health-line health-line-ok">{healthy_text(updated)}</p>
@@ -192,6 +220,10 @@ fn offline_text(last_ok: Option<f64>) -> String {
             )
         },
     )
+}
+
+pub(crate) fn tile_state_text(since: f64) -> String {
+    format!("No new picture since {}.", clock_hhmm(since))
 }
 
 struct PollState {

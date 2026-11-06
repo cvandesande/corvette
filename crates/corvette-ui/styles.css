@@ -1028,6 +1028,19 @@ main {
   color: #d7e2e0;
 }
 
+.camera-card .camera-card-state {
+  margin: 0;
+  padding: 0.45rem 1rem;
+  border-left: 3px solid;
+  font-size: 0.85rem;
+}
+
+.camera-card .camera-card-state-amber {
+  color: #e8eeee;
+  border-left-color: #d9973f;
+  background: rgb(217 151 63 / 10%);
+}
+
 @media (max-width: 44rem) {
   .site-header {
     padding: 0 1rem;
