@@ -52,6 +52,7 @@ corvette-ncnn
 corvette-rtsp-client
 corvette-ui
 corvette-ui-server
+corvette-yolo
 cpufeatures
 crc32fast
 crypto-common

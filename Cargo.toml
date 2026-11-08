@@ -8,6 +8,7 @@ members = [
     "crates/corvette-rtsp-client",
     "crates/corvette-ui",
     "crates/corvette-ui-server",
+    "crates/corvette-yolo",
     "crates/ncnn-sys",
     "crates/ncnn-spike",
     "crates/rtsp-restream",
