@@ -72,6 +72,12 @@ second prints nothing, tell the human in the first reply that the session was no
 started inside `nix develop`, and wrap each toolchain command in
 `nix develop --command` until they restart it.
 
+`.agents/PROGRESS.md` is the resume file. Read it in full at the start of every
+session and again after compaction, before acting on any summary. Keep it within
+8,000 bytes and 400 bytes per line: replace a track's line when its state changes,
+keep its "Now" block true, and leave finished-step narrative in the work's own
+reports under `.agents/issue-N/`. `make check-progress` enforces the limits.
+
 Before committing, compare the staged change with its GitHub issue and
 `docs/design/`. Update or close the issue when its outcome or next step has
 changed; update the design documents when an architectural decision or API

@@ -11,6 +11,7 @@ usage: gate.sh <leg> [args...]
   comment         pct <file>|baseline|check <base>..<tip>|staged|sweep [--base <rev>] <file>...|selftest
   obs             baseline|deps|selftest
   d8              staged|worktree <rev> [<path>...]|range <a>..<b>|selftest
+  progress        check [<file>]|selftest
   selftest        dispatcher reachability check
 USAGE
 }
@@ -153,6 +154,12 @@ obs_fail_help() {
   echo "rule    the project adds no dependency without a recorded decision: every crate name in the Cargo.toml dependency tables and in Cargo.lock is listed in the baseline, and a new name is a new dependency"
   echo "fix     write the small thing by hand or reuse what the repository has; only if a crate is truly needed, regenerate the baseline in the same commit that justifies it: bash docs/standards/gate.sh obs baseline; not a fix: regenerating the baseline to silence the gate without a reason in the commit message"
   echo "see     AGENTS.md \"Dependency gate\" and docs/standards/STYLE.md"
+}
+
+progress_fail_help() {
+  echo "rule    .agents/PROGRESS.md stays within 8000 bytes and 400 bytes per line and keeps the five compaction labels: a fresh or compacted session reads it whole"
+  echo "fix     replace the track's line instead of appending; move finished-step narrative to the item's reports under .agents/issue-N/ or to .agents/PROGRESS-HISTORY.md; not a fix: raising the limits or dropping a label"
+  echo "see     AGENTS.md, the paragraph on .agents/PROGRESS.md"
 }
 
 # One mechanical proof of a comments-only change: print "ok <name>" or
@@ -1057,9 +1064,116 @@ leg_d8() {
   esac
 }
 
+# Sizes and line lengths are bytes; the working-tree file is read as-is, never the index.
+leg_progress() {
+  local PROGRESS_MAX_BYTES=8000 PROGRESS_MAX_LINE=400
+  local PROGRESS_LABELS=('**Current item:**' '**Profile:**' '**Modified files:**' '**Checks so far:**' '**Open human gate:**')
+  case "${1:-}" in
+    check)
+      shift
+      [ "$#" -le 1 ] || { echo "usage: gate.sh progress check [<file>]|selftest"; exit 2; }
+      local FILE="${1:-.agents/PROGRESS.md}" n meas over longest lbl FAIL=0
+      if [ ! -f "$FILE" ]; then
+        printf 'progress: %s absent, nothing to check\n' "$FILE"
+        exit 0
+      fi
+      n="$(( $(wc -c < "$FILE") ))"
+      if [ "$n" -gt "$PROGRESS_MAX_BYTES" ]; then
+        echo "FAIL size $n bytes, limit $PROGRESS_MAX_BYTES"
+        FAIL=1
+      fi
+      # LC_ALL=C keeps gawk counting bytes; under a UTF-8 locale length() is characters.
+      meas="$(LC_ALL=C awk -v limit="$PROGRESS_MAX_LINE" '
+        { len = length($0)
+          if (len > longest) longest = len
+          if (len > limit) { over++
+            if (over <= 10) printf "FAIL line %d is %d bytes, limit %d\n", NR, len, limit } }
+        END { printf "longest %d\n", longest + 0 }' "$FILE")"
+      over="$(printf '%s\n' "$meas" | grep '^FAIL' || true)"
+      [ -n "$over" ] && { printf '%s\n' "$over"; FAIL=1; }
+      longest="$(printf '%s\n' "$meas" | sed -n 's/^longest //p')"
+      for lbl in "${PROGRESS_LABELS[@]}"; do
+        grep -qF -- "$lbl" "$FILE" || { echo "FAIL missing label $lbl"; FAIL=1; }
+      done
+      if [ "$FAIL" -eq 0 ]; then
+        printf 'progress: PASS (%s bytes, longest line %s bytes)\n' "$n" "$longest"
+        exit 0
+      fi
+      echo "progress: FAIL"
+      progress_fail_help
+      exit 1 ;;
+    selftest)
+      local DIR OUT RC have
+      DIR="$(mktemp -d)"
+      # a fixture is the five labels plus filler; a second argument pads the
+      # file to that exact byte total with filler lines of at most 200 bytes
+      progress_fixture() {
+        printf '%s\n' '**Current item:** fix' '**Profile:** Routine' '**Modified files:** none' \
+          '**Checks so far:** none' '**Open human gate:** none' 'filler one' 'filler two' > "$1"
+        [ "$#" -lt 2 ] || {
+          have="$(( $2 - $(wc -c < "$1") ))"
+          awk -v pad="$have" 'BEGIN {
+            line = ""
+            for (i = 0; i < 200; i++) line = line "x"
+            while (pad > 201) { printf "%s\n", line; pad -= 201 }
+            if (pad > 0) printf "%s\n", substr(line, 1, pad - 1)
+          }' >> "$1"
+        }
+      }
+      progress_fixture "$DIR/valid.md"
+      OUT="$("$SELF" progress check "$DIR/valid.md" 2>&1)"; RC=$?
+      { [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q "progress: PASS"; } \
+        || { rm -rf "$DIR"; echo "selftest FAIL: case (a) valid fixture; rc=$RC: $OUT"; exit 1; }
+      progress_fixture "$DIR/size8000.md" 8000
+      [ "$(( $(wc -c < "$DIR/size8000.md") ))" -eq 8000 ] \
+        || { rm -rf "$DIR"; echo "selftest FAIL: case (b) fixture is not exactly 8000 bytes"; exit 1; }
+      OUT="$("$SELF" progress check "$DIR/size8000.md" 2>&1)"; RC=$?
+      { [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q "progress: PASS"; } \
+        || { rm -rf "$DIR"; echo "selftest FAIL: case (b) exactly-8000-byte fixture; rc=$RC: $OUT"; exit 1; }
+      cp "$DIR/size8000.md" "$DIR/size8001.md"
+      printf 'x' >> "$DIR/size8001.md"
+      OUT="$("$SELF" progress check "$DIR/size8001.md" 2>&1)"; RC=$?
+      { [ "$RC" -ne 0 ] && printf '%s\n' "$OUT" | grep -qF "FAIL size 8001 bytes"; } \
+        || { rm -rf "$DIR"; echo "selftest FAIL: case (c) 8001-byte fixture; rc=$RC: $OUT"; exit 1; }
+      { printf '%s\n' '**Current item:** fix' '**Profile:** Routine' '**Modified files:** none' '**Checks so far:** none' '**Open human gate:** none'
+        awk 'BEGIN { for (i = 0; i < 400; i++) printf "x"; printf "\n" }'; } > "$DIR/line400.md"
+      OUT="$("$SELF" progress check "$DIR/line400.md" 2>&1)"; RC=$?
+      { [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -q "progress: PASS"; } \
+        || { rm -rf "$DIR"; echo "selftest FAIL: case (d) 400-byte line fixture; rc=$RC: $OUT"; exit 1; }
+      { printf '%s\n' '**Current item:** fix' '**Profile:** Routine'
+        awk 'BEGIN { for (i = 0; i < 401; i++) printf "x"; printf "\n" }'
+        printf '%s\n' '**Modified files:** none' '**Checks so far:** none' '**Open human gate:** none'; } > "$DIR/line401.md"
+      OUT="$("$SELF" progress check "$DIR/line401.md" 2>&1)"; RC=$?
+      { [ "$RC" -ne 0 ] && printf '%s\n' "$OUT" | grep -qF "FAIL line 3 is 401 bytes"; } \
+        || { rm -rf "$DIR"; echo "selftest FAIL: case (e) 401-byte line fixture; rc=$RC: $OUT"; exit 1; }
+      { printf '%s\n' '**Current item:** fix' '**Profile:** Routine' '**Modified files:** none' '**Checks so far:** none' '**Open human gate:** none'
+        printf '%s\n' "$(printf '—%.0s' {1..200})"; } > "$DIR/emdash.md"
+      OUT="$("$SELF" progress check "$DIR/emdash.md" 2>&1)"; RC=$?
+      { [ "$RC" -ne 0 ] && printf '%s\n' "$OUT" | grep -qF "FAIL line 6 is 600 bytes"; } \
+        || { rm -rf "$DIR"; echo "selftest FAIL: case (f) 200 em dashes are 600 bytes; rc=$RC: $OUT"; exit 1; }
+      grep -vF '**Open human gate:**' "$DIR/valid.md" > "$DIR/nogate.md"
+      OUT="$("$SELF" progress check "$DIR/nogate.md" 2>&1)"; RC=$?
+      { [ "$RC" -ne 0 ] && printf '%s\n' "$OUT" | grep -qF 'FAIL missing label **Open human gate:**'; } \
+        || { rm -rf "$DIR"; echo "selftest FAIL: case (g) missing label; rc=$RC: $OUT"; exit 1; }
+      { printf '%s\n' "$OUT" | grep -q '^rule ' && printf '%s\n' "$OUT" | grep -q '^fix ' && printf '%s\n' "$OUT" | grep -q '^see '; } \
+        || { rm -rf "$DIR"; echo "selftest FAIL: case (i) failing run prints rule, fix and see; rc=$RC: $OUT"; exit 1; }
+      OUT="$("$SELF" progress check "$DIR/absent.md" 2>&1)"; RC=$?
+      { [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -qF "absent, nothing to check"; } \
+        || { rm -rf "$DIR"; echo "selftest FAIL: case (h) absent path; rc=$RC: $OUT"; exit 1; }
+      OUT="$("$SELF" progress bogus 2>&1)"; RC=$?
+      { [ "$RC" -eq 2 ] && printf '%s\n' "$OUT" | grep -qF "usage: gate.sh progress check [<file>]|selftest"; } \
+        || { rm -rf "$DIR"; echo "selftest FAIL: case (j) unknown mode; rc=$RC: $OUT"; exit 1; }
+      rm -rf "$DIR"
+      echo "selftest PASS: progress check — a valid fixture passes, exactly 8000 bytes passes and 8001 fails by size, a 400-byte line passes and a 401-byte line fails by line, em dashes count as bytes, a missing label fails by name, an absent path passes with its note, a failing run prints the rule, fix and see help, and an unknown mode exits 2"
+      exit 0 ;;
+    *)
+      echo "usage: gate.sh progress check [<file>]|selftest"; exit 2 ;;
+  esac
+}
+
 leg_selftest() {
   local leg fn missing=0
-  for leg in comment obs d8; do
+  for leg in comment obs d8 progress; do
     fn="leg_${leg//-/_}"
     type "$fn" >/dev/null 2>&1 || { echo "gate.sh: MISSING leg function for '$leg'"; missing=1; }
   done
@@ -1072,6 +1186,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     comment) shift; leg_comment "$@" ;;
     obs) shift; leg_obs "$@" ;;
     d8) shift; leg_d8 "$@" ;;
+    progress) shift; leg_progress "$@" ;;
     selftest) leg_selftest ;;
     *) usage; exit 2 ;;
   esac

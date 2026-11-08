@@ -1,5 +1,5 @@
 .PHONY: check check-cpp check-nginx-parity check-nix check-no-go2rtc check-no-mutation \
-	check-no-trailing-slash-hrefs check-oci-layout check-rust check-standards \
+	check-no-trailing-slash-hrefs check-oci-layout check-progress check-rust check-standards \
 	check-standards-range check-shell check-site-shape check-ui check-whitespace serve-ui
 
 check: check-rust check-cpp check-shell check-nix check-ui check-whitespace check-site-shape \
@@ -22,16 +22,21 @@ check-standards:
 	bash docs/standards/gate.sh d8 staged
 	bash docs/standards/gate.sh comment staged
 	bash docs/standards/gate.sh obs deps
+	bash docs/standards/gate.sh progress check
 	bash docs/standards/gate.sh selftest
 	bash docs/standards/gate.sh comment selftest
 	bash docs/standards/gate.sh d8 selftest
 	bash docs/standards/gate.sh obs selftest
+	bash docs/standards/gate.sh progress selftest
 
 check-standards-range:
 	@if [ -z '$(BASE)' ]; then echo "check-standards-range: BASE is empty; pass a range base, e.g. make check-standards-range BASE=HEAD~1"; exit 2; fi
 	bash docs/standards/gate.sh d8 range $(BASE)..HEAD
 	bash docs/standards/gate.sh comment check $(BASE)..HEAD
 	bash docs/standards/gate.sh obs deps
+
+check-progress:
+	bash docs/standards/gate.sh progress check
 
 check-nix:
 	nixfmt --check flake.nix
