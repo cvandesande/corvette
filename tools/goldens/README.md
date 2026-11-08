@@ -19,3 +19,5 @@ The shell carries numpy and OpenCV from the locked nixpkgs, so each golden recor
 `versions.py` prints the Python, numpy, and cv2 versions of the shell it runs in, and exits non-zero when a package is missing.
 
 `normalize.py` writes `crates/corvette-yolo/tests/fixtures/normalize_table.txt` and `normalize_spots.txt`: the float32 bits of Frigate's nchw float input transform at every byte value and at 612 sampled positions of a fixed image; it quotes `frigate/object_detection/base.py` and `util.py` at `v0.17.2` verbatim at its top.
+
+`nms.py` writes `crates/corvette-yolo/tests/fixtures/nms_cases.txt`: the kept indices of `cv2.dnn.NMSBoxes` for seeded random sets and hand-built edge cases, with every f32 value written so it reads back bit-exact; it quotes the filter, sort, and suppression lines of OpenCV `4.11.0`'s `nms.inl.hpp` at its top.

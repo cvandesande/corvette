@@ -19,3 +19,5 @@ pub fn normalize(rgb: &[u8; RGB_BYTES]) -> Vec<f32> {
     }
     tensor
 }
+pub mod nms;
+pub use nms::{Candidate, Rect, nms_boxes};
