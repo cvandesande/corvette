@@ -1,4 +1,4 @@
-//! Model input for the detection worker: the channel-first f32 plan built from a region crop.
+//! Detection-model support for the Corvette worker: input normalisation and a port of `OpenCV`'s non-maximum suppression.
 
 pub const WIDTH: usize = 640;
 pub const HEIGHT: usize = 640;

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Detection-model input normalisation: the channel-first f32 plan built from a region crop"
+description = "Detection-model support: input normalisation and OpenCV-compatible non-maximum suppression"
 
 [lints]
 workspace = true

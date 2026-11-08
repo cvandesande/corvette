@@ -19,6 +19,20 @@ const HAND_CASES: [&str; 14] = [
     "overlap_just_above_threshold",
 ];
 const OVERLOAD_CASES: [&str; 2] = ["fractional_double_keeps", "fractional_double_suppresses"];
+const EXTREME_CASES: [&str; 12] = [
+    "neg_width",
+    "neg_height",
+    "tiny_area_pair",
+    "coords_1e30",
+    "touching",
+    "same_box_four",
+    "nt_zero_overlap",
+    "nt_one_overlap",
+    "zero_area_nt_one",
+    "score_exactly_one",
+    "negative_origin_overlap",
+    "negative_origin_disjoint",
+];
 
 struct Case {
     name: String,
@@ -158,10 +172,18 @@ fn nms_boxes_matches_opencv_on_the_cases_where_the_overloads_differ() {
 }
 
 #[test]
+fn nms_boxes_matches_opencv_on_the_degenerate_and_extreme_boxes() {
+    for name in EXTREME_CASES {
+        check(name);
+    }
+}
+
+#[test]
 fn the_fixture_lists_every_case_it_promises() {
     let mut expected = RANDOM_CASES.to_vec();
     expected.extend(HAND_CASES);
     expected.extend(OVERLOAD_CASES);
+    expected.extend(EXTREME_CASES);
     let got: Vec<String> = parse_fixture().into_iter().map(|c| c.name).collect();
     assert_eq!(got, expected);
 }

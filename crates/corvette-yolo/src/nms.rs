@@ -14,9 +14,6 @@ pub struct Candidate {
     pub score: f32,
 }
 
-fn std_max(a: f64, b: f64) -> f64 {
-    if a < b { b } else { a }
-}
 fn std_min(a: f64, b: f64) -> f64 {
     if b < a { b } else { a }
 }
@@ -61,25 +58,44 @@ const fn round_f64_to_f32(value: f64) -> f32 {
     f32::from_bits(sign | result.cast_unsigned() << 23 | fraction)
 }
 
-fn overlap(a: &Rect, b: &Rect) -> f32 {
-    let left = std_max(a.x, b.x);
-    let top = std_max(a.y, b.y);
-    let right = std_min(a.x + a.width, b.x + b.width);
-    let bottom = std_min(a.y + a.height, b.y + b.height);
-    let inter_w = right - left;
-    let inter_h = bottom - top;
-    let intersection = if inter_w > 0.0 && inter_h > 0.0 {
-        inter_w * inter_h
-    } else {
-        0.0
-    };
-    let area_a = a.width * a.height;
-    let area_b = b.width * b.height;
-    let union = area_a + area_b - intersection;
-    1.0f32 - round_f64_to_f32(1.0 - intersection / union)
+fn is_empty(r: &Rect) -> bool {
+    r.width <= 0.0 || r.height <= 0.0
 }
 
-/// Keep the best box of each cluster of overlapping candidates.
+fn intersection_area(a: &Rect, b: &Rect) -> f64 {
+    if is_empty(a) || is_empty(b) {
+        return 0.0;
+    }
+    let (x_min, x_max) = if a.x < b.x { (a, b) } else { (b, a) };
+    let (y_min, y_max) = if a.y < b.y { (a, b) } else { (b, a) };
+    if (x_min.x < 0.0 && x_min.x + x_min.width < x_max.x)
+        || (y_min.y < 0.0 && y_min.y + y_min.height < y_max.y)
+    {
+        return 0.0;
+    }
+    let width = std_min(x_min.width - (x_max.x - x_min.x), x_max.width);
+    let height = std_min(y_min.height - (y_max.y - y_min.y), y_max.height);
+    if width <= 0.0 || height <= 0.0 {
+        return 0.0;
+    }
+    width * height
+}
+
+fn jaccard_distance(a: &Rect, b: &Rect) -> f64 {
+    let area_a = a.width * a.height;
+    let area_b = b.width * b.height;
+    if area_a + area_b <= f64::EPSILON {
+        return 0.0;
+    }
+    let overlap_area = intersection_area(a, b);
+    1.0 - overlap_area / (area_a + area_b - overlap_area)
+}
+
+fn overlap(a: &Rect, b: &Rect) -> f32 {
+    1.0f32 - round_f64_to_f32(jaccard_distance(a, b))
+}
+
+/// The indices into `candidates` to keep, best score first, equal scores in input order, scores strictly above `score_threshold`.
 ///
 /// Reproduces the double (`Rect2d`) overload of `OpenCV` 4.11.0 `NMSBoxes`: `nms.inl.hpp` and `nms.cpp` in `modules/dnn/src`.
 #[must_use]
