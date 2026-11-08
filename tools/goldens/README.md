@@ -1,0 +1,19 @@
+# Golden test vector generators
+
+`tools/goldens` is where the generators of golden test vectors for Corvette's Rust code live. That code will reproduce the arithmetic of OpenCV and numpy routines. Each generator added here quotes the reference source it reproduces verbatim — its path, version, and blob hash — and writes small fixtures that are committed beside the Rust test that reads them.
+
+Generators run in a dedicated dev shell:
+
+```sh
+nix develop .#goldens
+```
+
+Check the shell with:
+
+```sh
+python3 -I tools/goldens/versions.py
+```
+
+The shell carries numpy and OpenCV from the locked nixpkgs, so each golden records the version it was produced under. The OpenCV version inside the deployed Frigate image has not been inspected; a golden is evidence about the locked nixpkgs version.
+
+`versions.py` prints the Python, numpy, and cv2 versions of the shell it runs in, and exits non-zero when a package is missing.

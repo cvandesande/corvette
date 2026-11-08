@@ -149,6 +149,15 @@
           PLAYWRIGHT_TEST_PATH = "${pkgs.playwright-test}/lib/node_modules/@playwright/test";
           PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
         };
+
+        goldens = pkgs.mkShell {
+          packages = [
+            (pkgs.python3.withPackages (ps: [
+              ps.numpy
+              ps.opencv4
+            ]))
+          ];
+        };
       });
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt);
