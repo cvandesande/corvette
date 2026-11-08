@@ -4,6 +4,7 @@ members = [
     "crates/corvette-api",
     "crates/corvette-api-server",
     "crates/corvette-media-bridge",
+    "crates/corvette-ncnn",
     "crates/corvette-rtsp-client",
     "crates/corvette-ui",
     "crates/corvette-ui-server",
@@ -33,15 +34,7 @@ edition = "2024"
 rust-version = "1.97.1"
 license = "MIT"
 
-# Pinned per issue #12 item R1. Consumed by crates/corvette-media-bridge (G1).
-# The commit is the one RESEARCH-d4-ingest-source.md F-1/F-2 actually read
-# source at (2026-08-16), not moq-dev/moq's current HEAD (2026-08-26, 65
-# commits ahead as of the pin date): the diff between the two touches
-# moq-mux's h264/h265/aac Import and Split modules directly (e.g. Import::new
-# now derives its wire container from the caller's config instead of a
-# hardcoded Legacy value), so moving to HEAD would mean shipping against
-# source this issue has not read. See
-# .agents/issue-12/evidence/R1-dependency-pin.md for the full comparison.
+# Pinned to the rev the research read, not HEAD; full comparison: .agents/issue-12/evidence/R1-dependency-pin.md
 [workspace.dependencies]
 moq-net = { git = "https://github.com/moq-dev/moq", rev = "7b73c43381a7f9c309e3045a8f0f858aa32ef48c", package = "moq-net" }
 moq-mux = { git = "https://github.com/moq-dev/moq", rev = "7b73c43381a7f9c309e3045a8f0f858aa32ef48c", package = "moq-mux" }
@@ -50,34 +43,20 @@ hang = { git = "https://github.com/moq-dev/moq", rev = "7b73c43381a7f9c309e3045a
 [profile.release]
 debug = 1
 
-# Leptos still relies on the archived 2.0.1 release. The local copy preserves
-# that release and applies rust-lang/rust#127909's required public re-export.
+# Leptos needs the archived proc-macro-error2 2.0.1; the vendor copy adds rust-lang/rust#127909's re-export.
 [patch.crates-io]
 proc-macro-error2 = { path = "vendor/proc-macro-error2" }
 
-# Everything clippy has that is meant to be enabled as a group. `restriction` is
-# deliberately not among them -- upstream says so itself, since it contains
-# mutually exclusive lints and ones that fight ordinary code -- so the few of its
-# lints that earn their place here are listed individually below.
-#
-# Group entries carry priority = -1 so the specific allows that follow win.
+# Clippy lint groups; `restriction` excluded (upstream says it holds mutually exclusive lints); priority -1 lets the entries below win.
 [workspace.lints.clippy]
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 
-# From `restriction`: this is an FFI crate, so every unsafe block should have to
-# say why it is sound.
 undocumented_unsafe_blocks = "deny"
 
-# From `restriction`, configured via the root `clippy.toml`: corvette-rtsp-client
-# must never block the async runtime with a synchronous socket call (issue #18
-# INV-5). No crate in this workspace currently has a legitimate reason to call
-# any of the denied paths, so this is enabled workspace-wide rather than only
-# for that one crate.
 disallowed_methods = "deny"
 
-# There is no remote yet, so `cargo` cannot have its repository/keywords.
 cargo_common_metadata = "allow"
 
 [workspace.lints.rust]

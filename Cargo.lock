@@ -469,6 +469,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "corvette-ncnn"
+version = "0.1.0"
+dependencies = [
+ "ncnn-sys",
+]
+
+[[package]]
 name = "corvette-rtsp-client"
 version = "0.1.0"
 dependencies = [
@@ -1826,7 +1833,7 @@ checksum = "83c1d679004305ea6e44eb53526da5816934a05b4b5b3b9a470e708a41d70a18"
 name = "ncnn-spike"
 version = "0.1.0"
 dependencies = [
- "ncnn-sys",
+ "corvette-ncnn",
 ]
 
 [[package]]

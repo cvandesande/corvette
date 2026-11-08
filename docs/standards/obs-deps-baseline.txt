@@ -48,6 +48,7 @@ core-foundation-sys
 corvette-api
 corvette-api-server
 corvette-media-bridge
+corvette-ncnn
 corvette-rtsp-client
 corvette-ui
 corvette-ui-server

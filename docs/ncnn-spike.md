@@ -128,3 +128,21 @@ knowing, because both fail silently rather than loudly: ncnn's generated
 `libvulkan.so.1` instead of linking it -- so `fixupPhase`'s RPATH shrinking
 drops the loader and every enumeration comes back empty. `flake.nix` handles
 both.
+
+## Notes moved out of code comments
+
+- `corvette-ncnn` holds all `unsafe` outside `ncnn-sys`, and reads no environment variable and prints nothing.
+- One inference: input Mat over the caller's buffer, fresh extractor, extract, copy out,
+  all released on every path.
+- `Net` is neither `Send` nor `Sync`; keep one net on one thread.
+- `with_blobs` names are not checked against the net; ncnn rejects an unknown name at extract time.
+- ncnn defaults all three fp16 options to enabled, so the getters and a test catch a setter
+  that misses the constant.
+- `ncnn-sys` declares only the surface the detector uses; `ncnn_ext_` entry points are our own.
+- Handles are opaque pointers in ncnn's ABI: no struct layouts are reproduced, so only signatures can drift.
+- Live-handle counters use `Relaxed` ordering: only existence is observed, never an ordering
+  against other memory.
+- The spike reads `INPUT_BLOB`/`OUTPUT_BLOB` in case a model's declared outputs disagree with its last layer.
+- The spike releases the process-wide instance at exit so validation-layer runs stay quiet;
+  the net is already dropped then, so it is not refused.
+- `cargo_common_metadata` is allowed: no crates.io remote yet, so repository/keywords have no target.

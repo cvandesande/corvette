@@ -1,14 +1,4 @@
-//! Raw FFI over ncnn's C API (`src/c_api.h`), plus `c_api_ext` for the GPU
-//! enumeration the C API does not expose.
-//!
-//! Only the surface the detector actually uses is declared, so this file
-//! doubles as the answer to "is the C API wide enough?" -- everything the
-//! Python plugin calls appears below, and the entry points prefixed
-//! `ncnn_ext_` are the ones we had to add.
-//!
-//! Every handle is an opaque pointer in ncnn's ABI, so no struct layouts are
-//! reproduced here and nothing can drift out of sync with a version bump
-//! except the function signatures themselves.
+//! Raw FFI over ncnn's C API (`src/c_api.h`), plus `c_api_ext` for GPU enumeration.
 #![allow(non_camel_case_types)]
 
 use std::os::raw::{c_char, c_int, c_uint, c_void};
@@ -48,12 +38,13 @@ unsafe extern "C" {
 
     pub fn ncnn_option_set_use_vulkan_compute(opt: ncnn_option_t, enable: c_int);
     pub fn ncnn_option_get_use_vulkan_compute(opt: ncnn_option_t) -> c_int;
+    pub fn ncnn_option_get_use_fp16_packed(opt: ncnn_option_t) -> c_int;
+    pub fn ncnn_option_get_use_fp16_storage(opt: ncnn_option_t) -> c_int;
+    pub fn ncnn_option_get_use_fp16_arithmetic(opt: ncnn_option_t) -> c_int;
     pub fn ncnn_option_set_use_fp16_packed(opt: ncnn_option_t, enable: c_int);
     pub fn ncnn_option_set_use_fp16_storage(opt: ncnn_option_t, enable: c_int);
     pub fn ncnn_option_set_use_fp16_arithmetic(opt: ncnn_option_t, enable: c_int);
 
-    /// Borrows `data`, exactly as `ncnn.Mat(numpy_array)` borrows `NumPy`
-    /// storage: the buffer must outlive the Mat.
     pub fn ncnn_mat_create_external_3d(
         w: c_int,
         h: c_int,
@@ -84,7 +75,6 @@ unsafe extern "C" {
         mat: *mut ncnn_mat_t,
     ) -> c_int;
 
-    // csrc/c_api_ext.cpp -- not part of upstream's C API.
     pub fn ncnn_ext_get_gpu_count() -> c_int;
     pub fn ncnn_ext_get_default_gpu_index() -> c_int;
     pub fn ncnn_ext_get_gpu_type(device_index: c_int) -> c_int;
@@ -94,12 +84,6 @@ unsafe extern "C" {
     pub fn ncnn_ext_destroy_gpu_instance();
 }
 
-/// `GpuInfo::type()`.
-///
-/// The software rasterizer is the reason this is exposed: lavapipe reports
-/// [`DeviceType::Cpu`] while every real target reports [`DeviceType::Discrete`]
-/// or [`DeviceType::Integrated`], which is a structural test rather than a
-/// name match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceType {
     Discrete,

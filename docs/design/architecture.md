@@ -36,7 +36,7 @@ Corvette owns both the UI and recording playback.
 
 Everything this repository owns lives in one Cargo workspace, as separate crates
 — `crates/corvette-api`, `crates/corvette-ui`, `crates/corvette-ui-server`,
-`crates/ncnn-sys`, `crates/ncnn-spike` today. This keeps one shared
+`crates/ncnn-sys`, `crates/corvette-ncnn`, `crates/ncnn-spike` today. This keeps one shared
 `rust-toolchain.toml` and Nix devShell, and one issue-linked design/planning
 apparatus (`AGENTS.md`, `.agents/issue-*/`), covering every component. A
 workspace member crate can still be published to crates.io on its own version

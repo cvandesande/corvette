@@ -1,0 +1,13 @@
+[package]
+name = "corvette-ncnn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Safe layer over ncnn's C API: counted handle guards, device choice, and inference as values"
+
+[dependencies]
+ncnn-sys = { path = "../ncnn-sys" }
+
+[lints]
+workspace = true
