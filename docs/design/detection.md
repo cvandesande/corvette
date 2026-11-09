@@ -44,11 +44,11 @@ flowchart TB
 
 **The inference worker** is one process. It owns the ncnn Vulkan device, loads
 the model once, runs one request at a time, decodes the network output (score
-gate, box conversion, non-maximum suppression) and returns rows. Its only state
-is the loaded model, so a restart costs the request in flight. It ends itself on
-an engine failure, which it reports as a lost device, or when a request outlives
-its deadline, because ncnn's Vulkan instance is process-wide and a new device
-needs a new process.
+gate, box conversion, non-maximum suppression) and returns rows. Its state is
+the loaded model and its sockets, so a restart costs the request in flight. It
+ends itself on an engine failure, which it reports as a lost device, or when a
+request outlives its deadline, because ncnn's Vulkan instance is process-wide
+and a new device needs a new process.
 
 **The detection service** owns the camera-facing and stateful work: one ffmpeg
 child per camera, motion, regions, filters and merge, the tracker, zones and
@@ -95,8 +95,9 @@ stateDiagram-v2
 
 - **Startup order.** Device, model, serving socket, health socket, then a ready
   line. An answering health socket therefore means the model is loaded.
-- **Socket files.** A socket file left by an earlier run is replaced. Any other
-  kind of file at a socket path stops startup and stays untouched.
+- **Socket files.** Any socket file at a socket path is replaced, so a file left
+  by an earlier run does not block a restart. Any other kind of file at a socket
+  path stops startup and stays untouched.
 - **Fatal paths.** An engine failure (reported as a lost device) and a deadline
   overrun each end the process with their own exit code. One function, `fatal`,
   takes the exit action as a `Terminator`; the process-exit implementation of
@@ -121,7 +122,7 @@ stateDiagram-v2
 | `unsafe` code lives in `ncnn-sys` and `corvette-ncnn`; every other detection crate forbids it | the compiler: `#![forbid(unsafe_code)]` in each crate root |
 | ncnn runs in full precision; the half-precision options are set in one function | `configure_options` in `corvette-ncnn`; `fixture_loads_with_declared_blobs_and_fp32_options` reads the options back |
 | The protocol's sizes match the decoder's | a compile-time assertion in the worker's crate root |
-| A malformed frame is refused and never served as a request: an unknown version, an unknown kind byte or an oversize length from its header alone, before any body is allocated; a wrong length, a wrong direction or a truncated frame by the decoder, after a body no larger than the maximum is read | `corvette-detect-proto` tests (`malformed.rs`) |
+| A malformed frame is refused and never served as a request: an unknown version, an unknown kind byte or an oversize length from its header alone, before any body is allocated; a wrong length or a wrong direction by the decoder, after a body no larger than the maximum is read; a frame cut short on the wire ends the connection | `corvette-detect-proto` tests (`malformed.rs`) |
 | A failed inference is an error value on every path, and no path turns it into an empty detection list | worker tests, for example `an_engine_failure_answers_device_lost_and_ends_the_server` |
 | One call of process exit serves every fatal path; ordinary exits return a status from `main` | review of each change that touches `fatal.rs` or adds a `process::exit` |
 | The protocol and decoder crates read no clock and perform no I/O | review of each change to those crates |
