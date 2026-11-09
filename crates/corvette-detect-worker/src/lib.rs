@@ -3,6 +3,7 @@
 
 mod engine;
 mod fatal;
+mod health;
 mod ncnn;
 mod serve;
 
@@ -10,6 +11,7 @@ pub use engine::{Engine, EngineError};
 pub use fatal::{
     EXIT_DEADLINE_OVERRUN, EXIT_DEVICE_LOST, FatalReason, ProcessExit, Terminator, fatal,
 };
+pub use health::serve_health;
 pub use ncnn::NcnnEngine;
 pub use serve::{ServeEnd, serve};
 
