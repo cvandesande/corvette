@@ -135,7 +135,7 @@ is the compiler or a test.
 ## Decisions of record
 
 Adopted 2026-11-08 at the design gate for issue #6, under the human's
-delegation.
+delegation, except a decision that names its own date and adopter.
 
 - **Process split.** The worker is its own container and the kubelet is its
   supervisor. A restart replaces the process and so the Vulkan instance, the
@@ -155,13 +155,22 @@ delegation.
 - **Public surface.** The detection service serves read-only routes on a local
   socket, and the API server relays them under `/corvette/api/v1/`. The API
   server stays the single public door.
+- **Decode is the user's choice** (the human, 2026-11-09). CPU decode is
+  acceptable where ffmpeg's decoders can use the host's vector instructions,
+  which is expected to take little CPU and leave it for other work; the
+  CPU-decode measurement on recorded footage tests that expectation and is
+  tracked in [issue #6][detection-issue]. Where the GPU is faster and has
+  capacity, GPU decode is used too. The choice is the user's: Corvette checks
+  which vector instructions the host supports and presents the user with
+  configuration options for decode.
 
 ## Open
 
-- **Where ffmpeg decodes.** The pod's GPU claim sits on one container, so GPU
-  decode would move the ffmpeg children into the worker's container and change
-  the process split. The CPU-decode measurement that settles it is tracked in
-  [issue #6][detection-issue].
+- **The GPU decode path.** The pod's GPU claim sits on one container, today the
+  current backing's, so in the target GPU decode would move the ffmpeg children
+  into the worker's container and change the process split. That design is
+  written before the option is built, and the service ships CPU decode only
+  until then.
 
 ## Where each fact lives
 
