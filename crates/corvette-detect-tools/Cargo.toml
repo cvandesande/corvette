@@ -1,0 +1,13 @@
+[package]
+name = "corvette-detect-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Input tensor generators and output comparers for inference worker parity runs"
+
+[dependencies]
+corvette-detect-proto = { path = "../corvette-detect-proto" }
+
+[lints]
+workspace = true
