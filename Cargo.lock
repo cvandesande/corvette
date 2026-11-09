@@ -447,6 +447,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "corvette-detect-proto"
+version = "0.1.0"
+
+[[package]]
 name = "corvette-media-bridge"
 version = "0.1.0"
 dependencies = [

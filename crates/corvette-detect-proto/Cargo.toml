@@ -1,0 +1,10 @@
+[package]
+name = "corvette-detect-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Wire frames, types and codecs for the Corvette inference worker's socket conversation"
+
+[lints]
+workspace = true
