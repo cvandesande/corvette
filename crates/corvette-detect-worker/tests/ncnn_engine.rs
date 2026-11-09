@@ -33,6 +33,8 @@ const PARAM: &str = concat!(
     "Reshape out 1 1 crop0 out0 0=8400 1=50 2=1\n",
 );
 
+const MAX_DEADLINE: Duration = Duration::from_mins(1);
+
 fn write_net(tag: &str, param: &str) -> (PathBuf, PathBuf) {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(tag);
     fs::create_dir_all(&dir).unwrap();
@@ -210,7 +212,7 @@ fn the_worker_answers_infer_and_infer_raw_with_the_real_engine_over_a_socket() {
             stream.write_all(&frame).unwrap();
             assert_eq!(read_reply(&mut stream), Some(Reply::Health { id: 31 }));
         });
-        let end = serve(&listener, &mut engine, &recorder, &stop);
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
         assert_eq!(end.unwrap(), ServeEnd::Stopped);
     });
     assert_eq!(recorder.codes(), Vec::<i32>::new());

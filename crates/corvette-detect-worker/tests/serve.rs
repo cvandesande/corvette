@@ -131,6 +131,8 @@ fn boxed(values: Vec<f32>) -> Box<[f32; RAW_VALUES]> {
 
 static ZERO_TENSOR: [u8; TENSOR_BYTES] = [0u8; TENSOR_BYTES];
 
+const MAX_DEADLINE: Duration = Duration::from_mins(1);
+
 fn mapped_rows(raw: &[f32; corvette_yolo::decode::RAW_LEN]) -> Vec<Row> {
     corvette_yolo::decode(raw, 0.4, 0.4)
         .into_iter()
@@ -163,7 +165,7 @@ fn a_health_request_is_answered_with_its_id_and_never_reaches_the_engine() {
             stream.write_all(&frame).unwrap();
             assert_eq!(read_reply(&mut stream), Some(Reply::Health { id: 7 }));
         });
-        let end = serve(&listener, &mut engine, &recorder, &stop);
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
         assert_eq!(end.unwrap(), ServeEnd::Stopped);
     });
     assert_eq!(engine.calls(), 0);
@@ -212,7 +214,7 @@ fn an_infer_request_returns_the_decoded_rows() {
             assert_eq!(row.x_max.to_bits(), 0.625f32.to_bits());
             assert_eq!(rows, expected_rows);
         });
-        let end = serve(&listener, &mut engine, &recorder, &stop);
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
         assert_eq!(end.unwrap(), ServeEnd::Stopped);
     });
     assert_eq!(recorder.codes(), Vec::<i32>::new());
@@ -249,7 +251,7 @@ fn an_infer_raw_request_returns_the_exact_values() {
                 assert_eq!(got.to_bits(), want.to_bits(), "value {i} differs");
             }
         });
-        let end = serve(&listener, &mut engine, &recorder, &stop);
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
         assert_eq!(end.unwrap(), ServeEnd::Stopped);
     });
     assert_eq!(recorder.codes(), Vec::<i32>::new());
@@ -291,7 +293,7 @@ fn an_engine_failure_answers_device_lost_and_ends_the_server() {
             );
             assert!(is_closed(&mut stream));
         });
-        let end = serve(&listener, &mut engine, &recorder, &stop);
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
         assert_eq!(end.unwrap(), ServeEnd::Fatal(FatalReason::DeviceLost));
         assert_eq!(recorder.codes(), vec![EXIT_DEVICE_LOST]);
     });
@@ -328,7 +330,7 @@ fn a_decode_failure_answers_bad_request_and_the_connection_survives() {
             stream.write_all(&health).unwrap();
             assert_eq!(read_reply(&mut stream), Some(Reply::Health { id: 6 }));
         });
-        let end = serve(&listener, &mut engine, &recorder, &stop);
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
         assert_eq!(end.unwrap(), ServeEnd::Stopped);
     });
     assert_eq!(engine.calls(), 0);
@@ -385,7 +387,7 @@ fn a_bad_header_answers_bad_request_and_closes_the_connection() {
             stream.write_all(&health).unwrap();
             assert_eq!(read_reply(&mut stream), Some(Reply::Health { id: 8 }));
         });
-        let end = serve(&listener, &mut engine, &recorder, &stop);
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
         assert_eq!(end.unwrap(), ServeEnd::Stopped);
     });
     assert_eq!(recorder.codes(), Vec::<i32>::new());
@@ -408,7 +410,7 @@ fn connections_are_served_one_after_another() {
                 assert_eq!(read_reply(&mut stream), Some(Reply::Health { id }));
             }
         });
-        let end = serve(&listener, &mut engine, &recorder, &stop);
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
         assert_eq!(end.unwrap(), ServeEnd::Stopped);
     });
     assert_eq!(recorder.codes(), Vec::<i32>::new());
@@ -421,7 +423,7 @@ fn a_stop_request_ends_an_idle_server() {
     let stop = AtomicBool::new(true);
     let recorder = Recorder::new();
     let mut engine = Scripted::new(Vec::new());
-    let end = serve(&listener, &mut engine, &recorder, &stop);
+    let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
     assert_eq!(end.unwrap(), ServeEnd::Stopped);
     assert_eq!(recorder.codes(), Vec::<i32>::new());
     assert_eq!(engine.calls(), 0);

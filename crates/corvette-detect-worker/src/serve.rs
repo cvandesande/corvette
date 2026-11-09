@@ -21,7 +21,7 @@ pub enum ServeEnd {
     Fatal(FatalReason),
 }
 
-/// Serves one connection at a time until the stop flag ends it or an engine failure is fatal.
+/// Serves one connection at a time until the stop flag ends it or an engine failure is fatal; no request runs longer than `max_deadline`.
 /// # Errors
 /// Returns the I/O error of setting the listener non-blocking, of starting the watchdog thread or of a failed accept.
 pub fn serve<E: Engine>(
@@ -29,9 +29,10 @@ pub fn serve<E: Engine>(
     engine: &mut E,
     terminator: &dyn Terminator,
     stop: &AtomicBool,
+    max_deadline: Duration,
 ) -> Result<ServeEnd, io::Error> {
     listener.set_nonblocking(true)?;
-    let watchdog = Watchdog::new();
+    let watchdog = Watchdog::new(max_deadline);
     thread::scope(|scope| {
         thread::Builder::new()
             .name("corvette-detect-watchdog".to_string())
@@ -259,10 +260,11 @@ struct State {
 struct Watchdog {
     state: Mutex<State>,
     wake: Condvar,
+    cap: Duration,
 }
 
 impl Watchdog {
-    const fn new() -> Self {
+    const fn new(cap: Duration) -> Self {
         Self {
             state: Mutex::new(State {
                 armed: None,
@@ -270,10 +272,12 @@ impl Watchdog {
                 quit: false,
             }),
             wake: Condvar::new(),
+            cap,
         }
     }
 
     fn arm(&self, budget: Duration) {
+        let budget = budget.min(self.cap);
         let Some(deadline) = Instant::now().checked_add(budget) else {
             return;
         };

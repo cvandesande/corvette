@@ -166,6 +166,8 @@ fn wait_for_codes(recorder: &Recorder) -> Vec<i32> {
 
 static ZERO_TENSOR: [u8; TENSOR_BYTES] = [0u8; TENSOR_BYTES];
 
+const MAX_DEADLINE: Duration = Duration::from_mins(1);
+
 #[test]
 fn a_request_that_outlives_its_deadline_ends_the_server_with_the_deadline_code() {
     let path = socket_path("dl-overrun");
@@ -201,7 +203,55 @@ fn a_request_that_outlives_its_deadline_ends_the_server_with_the_deadline_code()
             );
             assert!(is_closed(&mut stream));
         });
-        let end = serve(&listener, &mut engine, &recorder, &stop);
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
+        assert_eq!(end.unwrap(), ServeEnd::Fatal(FatalReason::DeadlineOverrun));
+    });
+    assert_eq!(recorder.codes(), vec![EXIT_DEADLINE_OVERRUN]);
+    assert_eq!(engine.calls(), 1);
+}
+
+#[test]
+fn a_cap_shorter_than_the_request_deadline_ends_the_server_at_the_cap() {
+    let path = socket_path("dl-cap");
+    let listener = UnixListener::bind(&path).unwrap();
+    let stop = AtomicBool::new(false);
+    let recorder = Recorder::new();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut engine = Gated::new(receiver);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            let _guard = StopGuard(&stop);
+            let mut stream = connect(&path);
+            let tensor = &ZERO_TENSOR;
+            stream
+                .write_all(
+                    &Request::InferRequest {
+                        id: 13,
+                        deadline_ms: 60_000,
+                        tensor,
+                    }
+                    .encode(),
+                )
+                .unwrap();
+            let codes = wait_for_codes(&recorder);
+            sender.send(()).unwrap();
+            assert_eq!(codes, vec![EXIT_DEADLINE_OVERRUN]);
+            assert_eq!(
+                read_reply(&mut stream),
+                Some(Reply::Error {
+                    id: 13,
+                    code: ErrorCode::DeadlineOverrun
+                })
+            );
+            assert!(is_closed(&mut stream));
+        });
+        let end = serve(
+            &listener,
+            &mut engine,
+            &recorder,
+            &stop,
+            Duration::from_millis(50),
+        );
         assert_eq!(end.unwrap(), ServeEnd::Fatal(FatalReason::DeadlineOverrun));
     });
     assert_eq!(recorder.codes(), vec![EXIT_DEADLINE_OVERRUN]);
@@ -243,7 +293,7 @@ fn an_infer_raw_request_that_outlives_its_deadline_does_the_same() {
             );
             assert!(is_closed(&mut stream));
         });
-        let end = serve(&listener, &mut engine, &recorder, &stop);
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
         assert_eq!(end.unwrap(), ServeEnd::Fatal(FatalReason::DeadlineOverrun));
     });
     assert_eq!(recorder.codes(), vec![EXIT_DEADLINE_OVERRUN]);
@@ -302,7 +352,7 @@ fn requests_within_their_deadline_are_served_and_the_watchdog_stays_quiet() {
                     .all(|value| value.to_bits() == 0.0f32.to_bits())
             );
         });
-        let end = serve(&listener, &mut engine, &recorder, &stop);
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
         assert_eq!(end.unwrap(), ServeEnd::Stopped);
     });
     assert_eq!(recorder.codes(), Vec::<i32>::new());
@@ -345,7 +395,7 @@ fn a_finished_request_is_not_cut_off_by_its_old_deadline() {
                 .unwrap();
             assert_eq!(read_reply(&mut stream), Some(Reply::Health { id: 2 }));
         });
-        let end = serve(&listener, &mut engine, &recorder, &stop);
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
         assert_eq!(end.unwrap(), ServeEnd::Stopped);
     });
     assert_eq!(recorder.codes(), Vec::<i32>::new());
@@ -408,7 +458,7 @@ fn a_zero_deadline_infer_or_infer_raw_request_answers_bad_request_without_reachi
                 .unwrap();
             assert_eq!(read_reply(&mut stream), Some(Reply::Health { id: 23 }));
         });
-        let end = serve(&listener, &mut engine, &recorder, &stop);
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
         assert_eq!(end.unwrap(), ServeEnd::Stopped);
     });
     assert_eq!(engine.calls(), 0);
@@ -422,7 +472,7 @@ fn a_panic_in_the_engine_ends_serve_instead_of_hanging_it() {
     let server = thread::spawn(move || {
         let stop = AtomicBool::new(false);
         let recorder = Recorder::new();
-        serve(&listener, &mut Panicking, &recorder, &stop)
+        serve(&listener, &mut Panicking, &recorder, &stop, MAX_DEADLINE)
     });
     let mut stream = connect(&path);
     stream

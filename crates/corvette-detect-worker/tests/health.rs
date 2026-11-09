@@ -16,6 +16,8 @@ const HEALTH_REPLY: [u8; 14] = [1, 0x83, 8, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1];
 const REFUSAL: [u8; 15] = [1, 0x8F, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3];
 static ZERO_TENSOR: [u8; TENSOR_BYTES] = [0u8; TENSOR_BYTES];
 
+const MAX_DEADLINE: Duration = Duration::from_mins(1);
+
 struct Recorder(Mutex<Vec<i32>>);
 
 impl Recorder {
@@ -227,7 +229,14 @@ fn a_health_request_is_answered_while_the_serving_loop_is_inside_a_slow_engine_c
         scope.spawn(|| {
             serve_health(&health_listener, &stop, Duration::from_secs(5)).unwrap();
         });
-        let end = serve(&infer_listener, &mut engine, &*recorder, &stop).unwrap();
+        let end = serve(
+            &infer_listener,
+            &mut engine,
+            &*recorder,
+            &stop,
+            MAX_DEADLINE,
+        )
+        .unwrap();
         assert_eq!(end, ServeEnd::Stopped);
     });
     assert_eq!(recorder.codes(), Vec::<i32>::new());
