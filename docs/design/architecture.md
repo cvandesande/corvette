@@ -35,9 +35,7 @@ Corvette owns both the UI and recording playback.
 ## Crate structure
 
 Everything this repository owns lives in one Cargo workspace, as separate crates
-— `crates/corvette-api`, `crates/corvette-ui`, `crates/corvette-ui-server`,
-`crates/ncnn-sys`, `crates/corvette-ncnn`, `crates/corvette-yolo`,
-`crates/ncnn-spike` today. This keeps one shared
+(the members of the root `Cargo.toml`). This keeps one shared
 `rust-toolchain.toml` and Nix devShell, and one issue-linked design/planning
 apparatus (`AGENTS.md`, `.agents/issue-*/`), covering every component. A
 workspace member crate can still be published to crates.io on its own version
@@ -181,8 +179,11 @@ server; sharing Rust does not justify sending raw storage telemetry to browsers.
 ## Detection process
 
 ncnn's Vulkan instance is process-wide. A lost device therefore requires a new
-process rather than rebuilding one detector object. The detection service must
-run under supervision that can restart it.
+process rather than rebuilding one detector object. The inference worker, which
+owns the Vulkan instance, runs under supervision that can restart it.
+[Detection](detection.md) states the boundary between the inference worker and
+the detection service, the rules both sides keep and the decisions behind that
+shape.
 
 ncnn exposes model input and output names through its C API, so Corvette reads
 them directly instead of carrying Frigate's model-file blob-name parser. GPU
