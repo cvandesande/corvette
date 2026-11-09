@@ -34,4 +34,19 @@ impl Flags {
     pub(crate) fn required(&self, name: &str) -> Result<&str, Failure> {
         self.get(name).ok_or(Failure::Usage)
     }
+
+    pub(crate) fn bounded(
+        &self,
+        name: &str,
+        low: u32,
+        high: u32,
+        default: u32,
+    ) -> Result<u32, Failure> {
+        self.get(name).map_or(Ok(default), |text| {
+            text.parse::<u32>()
+                .ok()
+                .filter(|value| (low..=high).contains(value))
+                .ok_or(Failure::Usage)
+        })
+    }
 }

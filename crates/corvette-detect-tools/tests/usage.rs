@@ -52,13 +52,55 @@ fn usage_errors_exit_2_and_print_the_usage_on_stderr() {
         ],
         vec!["compare", "--a", "d", "--b", "e", "--tolerance", "-1"],
         vec!["compare", "--a", "d", "--b", "e", "--tolerance", "nan"],
+        vec!["run", "--in", "i", "--out", "o"],
+        vec!["run", "--socket", "s", "--out", "o"],
+        vec!["run", "--socket", "s", "--in", "i"],
+        vec![
+            "run",
+            "--socket",
+            "s",
+            "--in",
+            "i",
+            "--out",
+            "o",
+            "--deadline-ms",
+            "0",
+        ],
+        vec![
+            "run",
+            "--socket",
+            "s",
+            "--in",
+            "i",
+            "--out",
+            "o",
+            "--deadline-ms",
+            "600001",
+        ],
+        vec![
+            "run",
+            "--socket",
+            "s",
+            "--in",
+            "i",
+            "--out",
+            "o",
+            "--deadline-ms",
+            "abc",
+        ],
+        vec![
+            "run", "--socket", "s", "--socket", "t", "--in", "i", "--out", "o",
+        ],
+        vec![
+            "run", "--socket", "s", "--in", "i", "--out", "o", "--bogus", "x",
+        ],
     ];
     for case in cases {
         let output = run(&case);
         assert_eq!(code(&output), 2, "{case:?}");
         assert!(stdout_text(&output).is_empty(), "{case:?}");
         let usage = stderr_text(&output);
-        for needle in ["tensors", "compare", "0", "1", "2", "3"] {
+        for needle in ["tensors", "run", "compare", "0", "1", "2", "3"] {
             assert!(usage.contains(needle), "{case:?} names no {needle}");
         }
     }

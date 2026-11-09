@@ -455,6 +455,8 @@ name = "corvette-detect-tools"
 version = "0.1.0"
 dependencies = [
  "corvette-detect-proto",
+ "corvette-detect-worker",
+ "corvette-ncnn",
 ]
 
 [[package]]

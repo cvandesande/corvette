@@ -4,6 +4,7 @@ pub mod args;
 pub mod compare;
 pub mod files;
 pub mod latency;
+pub mod run;
 pub mod tensors;
 
 use std::io::Write;
@@ -18,6 +19,7 @@ const USAGE: &str = "\
 usage: corvette-detect-tools COMMAND [flags]
   corvette-detect-tools tensors synthetic --out DIR --count N [--seed S]
   corvette-detect-tools tensors raw-rgb --in FILE --out DIR
+  corvette-detect-tools run --socket PATH --in DIR --out DIR [--deadline-ms D]
   corvette-detect-tools compare --a DIR --b DIR [--tolerance T]
 flags are --name value pairs in any order
 exit codes:
@@ -57,6 +59,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, Failure> {
     let tail = args.get(1..).unwrap_or(&[]);
     match command {
         "tensors" => tensors::dispatch(tail),
+        "run" => run::run(tail),
         "compare" => compare::run(tail),
         _ => Err(Failure::Usage),
     }
