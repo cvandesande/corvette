@@ -4,6 +4,7 @@ members = [
     "crates/corvette-api",
     "crates/corvette-api-server",
     "crates/corvette-detect-proto",
+    "crates/corvette-detect-worker",
     "crates/corvette-media-bridge",
     "crates/corvette-ncnn",
     "crates/corvette-rtsp-client",

@@ -48,6 +48,7 @@ core-foundation-sys
 corvette-api
 corvette-api-server
 corvette-detect-proto
+corvette-detect-worker
 corvette-media-bridge
 corvette-ncnn
 corvette-rtsp-client

@@ -451,6 +451,15 @@ name = "corvette-detect-proto"
 version = "0.1.0"
 
 [[package]]
+name = "corvette-detect-worker"
+version = "0.1.0"
+dependencies = [
+ "corvette-detect-proto",
+ "corvette-ncnn",
+ "corvette-yolo",
+]
+
+[[package]]
 name = "corvette-media-bridge"
 version = "0.1.0"
 dependencies = [

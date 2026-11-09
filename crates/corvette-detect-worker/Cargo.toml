@@ -1,0 +1,15 @@
+[package]
+name = "corvette-detect-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Engine contract, fatal exit path and socket serve loop of the Corvette detection worker"
+
+[dependencies]
+corvette-detect-proto = { path = "../corvette-detect-proto" }
+corvette-ncnn = { path = "../corvette-ncnn" }
+corvette-yolo = { path = "../corvette-yolo" }
+
+[lints]
+workspace = true
