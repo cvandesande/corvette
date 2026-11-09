@@ -1,4 +1,5 @@
 //! Detection-model support for the Corvette worker: input normalisation and a port of `OpenCV`'s non-maximum suppression.
+#![forbid(unsafe_code)]
 
 pub const WIDTH: usize = 640;
 pub const HEIGHT: usize = 640;
