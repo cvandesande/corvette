@@ -40,6 +40,12 @@ FROM rust-builder AS lint
 RUN cargo clippy --locked --all-targets --all-features -p corvette-detect-worker -p corvette-ncnn -p corvette-yolo -p corvette-detect-proto -p ncnn-sys -- -D warnings \
     && cargo fmt --all --check
 
+FROM rust-builder AS tools-build
+RUN cargo build --release --locked --bin corvette-detect-tools
+
+FROM scratch AS tools
+COPY --from=tools-build /src/target/release/corvette-detect-tools /corvette-detect-tools
+
 FROM ${DEBIAN_IMAGE} AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
