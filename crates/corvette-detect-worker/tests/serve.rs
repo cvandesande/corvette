@@ -190,7 +190,7 @@ fn an_infer_request_returns_the_decoded_rows() {
             let tensor = &ZERO_TENSOR;
             let frame = request_frame(&Request::InferRequest {
                 id: 3,
-                deadline_ms: 0,
+                deadline_ms: 10_000,
                 tensor,
             });
             stream.write_all(&frame).unwrap();
@@ -235,7 +235,7 @@ fn an_infer_raw_request_returns_the_exact_values() {
             let tensor = &ZERO_TENSOR;
             let frame = request_frame(&Request::InferRawRequest {
                 id: 9,
-                deadline_ms: 0,
+                deadline_ms: 10_000,
                 tensor,
             });
             stream.write_all(&frame).unwrap();
@@ -275,7 +275,7 @@ fn an_engine_failure_answers_device_lost_and_ends_the_server() {
             for id in [11u64, 12] {
                 let frame = request_frame(&Request::InferRequest {
                     id,
-                    deadline_ms: 0,
+                    deadline_ms: 10_000,
                     tensor,
                 });
                 stream.write_all(&frame).unwrap();

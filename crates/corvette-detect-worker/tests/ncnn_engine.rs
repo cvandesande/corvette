@@ -170,7 +170,7 @@ fn the_worker_answers_infer_and_infer_raw_with_the_real_engine_over_a_socket() {
             let tensor = <&[u8; TENSOR_BYTES]>::try_from(pattern.as_slice()).unwrap();
             let frame = Request::InferRawRequest {
                 id: 33,
-                deadline_ms: 0,
+                deadline_ms: 10_000,
                 tensor,
             }
             .encode();
@@ -187,7 +187,7 @@ fn the_worker_answers_infer_and_infer_raw_with_the_real_engine_over_a_socket() {
             let tensor = <&[u8; TENSOR_BYTES]>::try_from(ones.as_slice()).unwrap();
             let frame = Request::InferRequest {
                 id: 32,
-                deadline_ms: 0,
+                deadline_ms: 10_000,
                 tensor,
             }
             .encode();
