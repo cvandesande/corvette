@@ -155,6 +155,7 @@
             (pkgs.python3.withPackages (ps: [
               ps.numpy
               ps.opencv4
+              ps.pyyaml
             ]))
           ];
         };

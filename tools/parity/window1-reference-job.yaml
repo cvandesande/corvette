@@ -1,0 +1,102 @@
+# Draft only: never applied by an agent. A human applies it in a test
+# window while Frigate is down.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: parity-reference
+  namespace: icams
+  labels:
+    app.kubernetes.io/name: parity-reference
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 7200
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: parity-reference
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: regcred
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      tolerations:
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/control-plane
+          operator: Exists
+      containers:
+        - name: reference
+          image: cvandesande/frigate-vulkan:py313-20261106@sha256:a8164fa8384b05bfd130d006f77aacb5918a646aa2a1b14fe1626281781a798a
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: false
+            runAsNonRoot: false
+          env:
+            - name: RADV_PERFTEST
+              value: transfer_queue
+            - name: HOME
+              value: /tmp
+          resources:
+            limits:
+              amd.com/gpu: 1
+            requests:
+              amd.com/gpu: 1
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: work
+              mountPath: /work
+            - name: script
+              mountPath: /scripts
+              readOnly: true
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              # The human stages the tensors under /work/in/tensors, then creates /work/in/READY.
+              model=/config/model_cache/yolov9t-640-20260715.ncnn.param
+              wait_seconds=2400
+              hold_seconds=1800
+              waited=0
+              while [[ ! -f /work/in/READY ]]; do
+                if [[ "$waited" -ge "$wait_seconds" ]]; then
+                  echo "timeout waiting for /work/in/READY" > /work/STATUS
+                  exit 1
+                fi
+                sleep 5
+                waited=$((waited + 5))
+              done
+              if [[ ! -f "$model" || ! -f "${model%.param}.bin" ]]; then
+                echo "missing model" > /work/STATUS
+                exit 1
+              fi
+              status=0
+              python3 -I /scripts/python_reference.py --in /work/in/tensors --out /work/out --param "$model" > /work/reference.log 2>&1 || status=$?
+              if [[ "$status" -eq 0 ]]; then
+                echo "done" > /work/STATUS
+              else
+                echo "failed $status" > /work/STATUS
+              fi
+              sleep "$hold_seconds"
+              exit "$status"
+          args:
+            - parity-reference
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: frigate-config
+        - name: work
+          emptyDir: {}
+        - name: script
+          configMap:
+            name: parity-reference-script
+            defaultMode: 0444
