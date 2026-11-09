@@ -1091,3 +1091,26 @@ declare a `camera` field, so `serde` silently dropped the column on deserializat
 Corvette's contract: `ReviewSegment.camera` is Frigate's own `camera` column verbatim, carried the
 same way `ReviewEvent.camera` and `PreviewClip.camera` already are, so a future consumer needing
 per-camera review attribution has the data without a wire-format change.
+
+## Overlapping detections are suppressed on corner coordinates read as position and size
+
+Frigate `v0.17.2`'s `__post_process_nms_yolo` (`frigate/util/model.py`, lines 187 to 226) turns
+each candidate from centre-and-size into corners `(x1, y1, x2, y2)` (lines 200 to 206) and hands
+that array to `cv2.dnn.NMSBoxes` (line 209). OpenCV's rectangles carry a position and a size
+(`Rect_` fields `x`, `y`, `width`, `height`), so the suppression compares the rectangles
+`[x1, x1 + x2] x [y1, y1 + y2]`. The width and height of a compared rectangle are the far
+corner's coordinates, so a box far from the top left corner of the frame is compared as a much
+larger rectangle than it is, and which detections survive depends on where in the frame they lie.
+
+Two 40 by 40 boxes centred at `(100, 100)` and `(130, 100)` overlap by about 14% (`400 / 2800`)
+as drawn, while the reading compares `(80, 80, 120, 120)` against `(110, 80, 150, 120)` and
+measures exactly 50% (`10800 / 21600`), above the 0.4 suppression threshold, so Frigate returns
+one row for the pair.
+
+Corvette's contract: `corvette_yolo::decode` builds the suppression rectangles from the corner
+coordinates `(x1, y1, x2, y2)` read as position and size, so Corvette and the current backing
+return the same rows for the same model output; the test
+`decode_feeds_the_suppression_corner_coordinates_as_frigate_does` and the fixture case
+`quirk_nms_suppression` hold the behaviour. Suppressing on the real boxes returns different
+rows, so Corvette makes that change only as its own separate, measured step after Frigate's
+detector is retired, and a human decides when.
