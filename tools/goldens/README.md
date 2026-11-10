@@ -31,3 +31,5 @@ The shell carries numpy, OpenCV and scipy from the locked nixpkgs, so each golde
 `motion_blur.py` writes `crates/corvette-motion/tests/fixtures/blur_cases.txt`: the bytes of `scipy.ndimage.gaussian_filter(sigma=1, radius=1)` on seeded, ramp, checkerboard and flat pictures, and the kernel weights' bit patterns; it quotes the Frigate call lines and the scipy `v1.16.0` lines verbatim at its top.
 
 `motion_contrast_bounds.py` writes `crates/corvette-motion/tests/fixtures/contrast_bounds_cases.txt`: the pair of 4th and 96th percentiles numpy returns, truncated to 8 bits, for seeded, two-level and hand-built pictures; it quotes the Frigate lines and the numpy 1.26.4 and 2.5.1 percentile code verbatim at its top.
+
+`motion_contrast_history.py` writes `crates/corvette-motion/tests/fixtures/contrast_history_cases.txt`: the pictures numpy produces for the contrast stretch with its 50-pair history on seeded picture sequences that wrap the history and hold flat pictures; it quotes the Frigate lines and numpy's mean code verbatim at its top.
