@@ -29,3 +29,5 @@ The shell carries numpy, OpenCV and scipy from the locked nixpkgs, so each golde
 `motion_resize.py` writes `crates/corvette-motion/tests/fixtures/resize_cases.txt`: the bytes `cv2.INTER_NEAREST` produces for seeded random grey pictures at sample source and destination sizes; it quotes the resize call lines of `frigate/motion/improved_motion.py` at `v0.17.2` and the nearest-neighbor index lines of OpenCV `4.11.0`'s `resize.cpp` verbatim at its top.
 
 `motion_blur.py` writes `crates/corvette-motion/tests/fixtures/blur_cases.txt`: the bytes of `scipy.ndimage.gaussian_filter(sigma=1, radius=1)` on seeded, ramp, checkerboard and flat pictures, and the kernel weights' bit patterns; it quotes the Frigate call lines and the scipy `v1.16.0` lines verbatim at its top.
+
+`motion_contrast_bounds.py` writes `crates/corvette-motion/tests/fixtures/contrast_bounds_cases.txt`: the pair of 4th and 96th percentiles numpy returns, truncated to 8 bits, for seeded, two-level and hand-built pictures; it quotes the Frigate lines and the numpy 1.26.4 and 2.5.1 percentile code verbatim at its top.

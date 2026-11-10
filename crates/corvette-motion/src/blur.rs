@@ -10,7 +10,7 @@ pub const GAUSSIAN_CENTRE_WEIGHT: f64 = 0.451_862_761_877_606_05;
 #[must_use]
 pub fn gaussian_blur(src: Plane<'_>) -> Image {
     let shape = src.shape();
-    let levels: Vec<f64> = (0..=255_u8).map(f64::from).collect();
+    let levels = level_table();
     let mut first = Image::zeroed(shape);
     blur_axis(
         src.data(),
@@ -57,7 +57,11 @@ fn blur_axis(
     }
 }
 
-fn truncated(levels: &[f64], value: f64) -> u8 {
+pub(crate) fn level_table() -> Vec<f64> {
+    (0..=255_u8).map(f64::from).collect()
+}
+
+pub(crate) fn truncated(levels: &[f64], value: f64) -> u8 {
     let at_or_below = levels.partition_point(|&level| level <= value);
     u8::try_from(at_or_below.saturating_sub(1)).unwrap_or(255)
 }
