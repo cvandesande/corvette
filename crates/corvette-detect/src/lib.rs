@@ -2,9 +2,11 @@
 #![forbid(unsafe_code)]
 
 mod backoff;
+mod ffmpeg;
 mod supervised;
 
 pub use backoff::{BACKOFF_INITIAL, BACKOFF_MAX, Backoff, DEFAULT_POLICY, HEALTHY_RUN, Policy};
+pub use ffmpeg::{Decode, FrameSpec, Input, SpecError, decode_command};
 pub use supervised::{Status, Supervised};
 
 pub(crate) fn log_event(unit: &str, event: &str, detail: impl std::fmt::Display) {
