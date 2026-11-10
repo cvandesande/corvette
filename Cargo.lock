@@ -498,6 +498,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "corvette-motion"
+version = "0.1.0"
+
+[[package]]
 name = "corvette-ncnn"
 version = "0.1.0"
 dependencies = [

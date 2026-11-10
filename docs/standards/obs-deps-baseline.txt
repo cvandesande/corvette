@@ -52,6 +52,7 @@ corvette-detect-proto
 corvette-detect-tools
 corvette-detect-worker
 corvette-media-bridge
+corvette-motion
 corvette-ncnn
 corvette-rtsp-client
 corvette-ui
