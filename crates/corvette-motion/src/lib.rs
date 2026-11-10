@@ -1,6 +1,7 @@
 //! Pure image primitives for the Corvette motion detector.
 #![forbid(unsafe_code)]
 
+pub mod average;
 pub mod blur;
 pub mod contrast;
 pub mod contrast_history;
@@ -10,6 +11,7 @@ pub mod plane;
 pub mod resize;
 pub mod shape;
 
+pub use average::RunningAverage;
 pub use blur::{GAUSSIAN_CENTRE_WEIGHT, GAUSSIAN_OUTER_WEIGHT, gaussian_blur};
 pub use contrast::contrast_bounds;
 pub use contrast_history::ContrastHistory;
