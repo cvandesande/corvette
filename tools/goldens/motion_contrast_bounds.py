@@ -45,9 +45,8 @@ Reference: the numpy repository, path numpy/lib/_function_base_impl.py, version
             next = arr[next_indexes]
 
 The numbers are what the goldens shell's numpy writes, version 2.5.1 as printed
-by versions.py. The numpy 1.26.4 code above was read and does the same
-arithmetic for these inputs (two-level, ramp, checkerboard and seeded uint8
-pictures at 4 and 96); the deployed pin numpy 1.26 was not run.
+by versions.py. The same generator run under numpy 1.26.4, the deployed pin, in
+a separate Python 3.12 environment writes a byte-identical fixture.
 
 Writes the fixture read by crates/corvette-motion/tests/contrast_bounds.rs: one
 line per record, first field the kind. "counts 84 480 12 15" first. "seeded <sw>
