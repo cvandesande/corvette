@@ -39,64 +39,70 @@
       ncnnTag = "20260526";
     in
     {
-      packages = forAllSystems (pkgs: rec {
-        default = ncnn-spike;
-
-        # Built from source rather than taken from nixpkgs: nixpkgs is on an
-        # older tag, and this one has been soaked. System glslang, so no
-        # submodules are needed.
-        ncnn = pkgs.stdenv.mkDerivation {
-          pname = "ncnn";
-          version = ncnnTag;
-          src = pkgs.fetchFromGitHub {
-            owner = "Tencent";
-            repo = "ncnn";
-            rev = ncnnTag;
-            hash = "sha256-4osyxUbnge4Zjecw0t+dJSDqfQf2u0vY3DwUVlluoxU=";
+      packages = forAllSystems (
+        pkgs:
+        let
+          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = toolchain;
+            rustc = toolchain;
           };
-          nativeBuildInputs = [ pkgs.cmake ];
-          buildInputs = [
-            pkgs.glslang
-            pkgs.vulkan-headers
-            pkgs.vulkan-loader
-          ];
-          cmakeFlags = [
-            "-DNCNN_VULKAN=ON"
-            "-DNCNN_SHARED_LIB=ON"
-            "-DNCNN_SYSTEM_GLSLANG=ON"
-            "-DNCNN_BUILD_EXAMPLES=OFF"
-            "-DNCNN_BUILD_TOOLS=OFF"
-            "-DNCNN_BUILD_BENCHMARK=OFF"
-            "-DNCNN_BUILD_TESTS=OFF"
-          ];
-          # ncnn's ncnn.pc joins ''${prefix} with paths that are already
-          # absolute, which nixpkgs rejects. See NixOS/nixpkgs#144170.
-          postInstall = ''
-            substituteInPlace $out/lib/pkgconfig/ncnn.pc \
-              --replace-fail '=''${prefix}/' '='
-          '';
-          # ncnn dlopens libvulkan.so.1 instead of linking it, so there is no
-          # DT_NEEDED entry and fixupPhase's RPATH shrinking drops the loader.
-          # Without this every device enumeration comes back empty.
-          postFixup = ''
-            patchelf --add-rpath ${pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader ]} \
-              "$(readlink -f $out/lib/libncnn.so)"
-          '';
-        };
+          # The lockfile's moq packages are git dependencies pinned by rev, so Nix fetches them by that rev.
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+            allowBuiltinFetchGit = true;
+          };
+        in
+        rec {
+          default = ncnn-spike;
 
-        ncnn-spike =
-          let
-            toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-            rustPlatform = pkgs.makeRustPlatform {
-              cargo = toolchain;
-              rustc = toolchain;
+          # Built from source rather than taken from nixpkgs: nixpkgs is on an
+          # older tag, and this one has been soaked. System glslang, so no
+          # submodules are needed.
+          ncnn = pkgs.stdenv.mkDerivation {
+            pname = "ncnn";
+            version = ncnnTag;
+            src = pkgs.fetchFromGitHub {
+              owner = "Tencent";
+              repo = "ncnn";
+              rev = ncnnTag;
+              hash = "sha256-4osyxUbnge4Zjecw0t+dJSDqfQf2u0vY3DwUVlluoxU=";
             };
-          in
-          rustPlatform.buildRustPackage {
+            nativeBuildInputs = [ pkgs.cmake ];
+            buildInputs = [
+              pkgs.glslang
+              pkgs.vulkan-headers
+              pkgs.vulkan-loader
+            ];
+            cmakeFlags = [
+              "-DNCNN_VULKAN=ON"
+              "-DNCNN_SHARED_LIB=ON"
+              "-DNCNN_SYSTEM_GLSLANG=ON"
+              "-DNCNN_BUILD_EXAMPLES=OFF"
+              "-DNCNN_BUILD_TOOLS=OFF"
+              "-DNCNN_BUILD_BENCHMARK=OFF"
+              "-DNCNN_BUILD_TESTS=OFF"
+            ];
+            # ncnn's ncnn.pc joins ''${prefix} with paths that are already
+            # absolute, which nixpkgs rejects. See NixOS/nixpkgs#144170.
+            postInstall = ''
+              substituteInPlace $out/lib/pkgconfig/ncnn.pc \
+                --replace-fail '=''${prefix}/' '='
+            '';
+            # ncnn dlopens libvulkan.so.1 instead of linking it, so there is no
+            # DT_NEEDED entry and fixupPhase's RPATH shrinking drops the loader.
+            # Without this every device enumeration comes back empty.
+            postFixup = ''
+              patchelf --add-rpath ${pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader ]} \
+                "$(readlink -f $out/lib/libncnn.so)"
+            '';
+          };
+
+          ncnn-spike = rustPlatform.buildRustPackage {
             pname = "ncnn-spike";
             version = "0.1.0";
             src = self;
-            cargoLock.lockFile = ./Cargo.lock;
+            inherit cargoLock;
             buildInputs = [
               ncnn
               pkgs.vulkan-loader
@@ -110,7 +116,31 @@
               platforms = systems;
             };
           };
-      });
+
+          corvette-detect-worker = rustPlatform.buildRustPackage {
+            pname = "corvette-detect-worker";
+            version = "0.1.0";
+            src = self;
+            inherit cargoLock;
+            cargoBuildFlags = [
+              "-p"
+              "corvette-detect-worker"
+            ];
+            # The tests run under `make check-rust`.
+            doCheck = false;
+            buildInputs = [
+              ncnn
+              pkgs.vulkan-loader
+            ];
+            env.NCNN_DIR = "${ncnn}";
+            meta = {
+              description = "Detection worker: ncnn inference behind a Unix socket";
+              mainProgram = "corvette-detect-worker";
+              platforms = systems;
+            };
+          };
+        }
+      );
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
