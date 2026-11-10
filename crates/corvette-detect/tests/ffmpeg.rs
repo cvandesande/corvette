@@ -1,7 +1,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
-use corvette_detect::{Decode, FrameSpec, Input, SpecError, decode_command};
+use corvette_detect::{Decode, FrameSpec, Input, MAX_FRAME_BYTES, SpecError, decode_command};
 
 const LIVE_ARGS: [&str; 17] = [
     "-hide_banner",
@@ -101,6 +101,50 @@ fn the_error_messages_name_the_cause() {
         "frame size must be non-zero and even in both directions"
     );
     assert_eq!(SpecError::Rate.to_string(), "frame rate must be non-zero");
+    assert_eq!(
+        SpecError::TooLarge.to_string(),
+        "frame size is over the 67108864 byte limit"
+    );
+}
+
+#[test]
+fn a_frame_spec_reports_its_frame_size_and_refuses_one_over_the_limit() {
+    assert_eq!(
+        FrameSpec::new(704, 576, 5, Decode::Cpu)
+            .expect("valid spec")
+            .frame_bytes(),
+        608_256
+    );
+    assert_eq!(
+        FrameSpec::new(640, 480, 5, Decode::Cpu)
+            .expect("valid spec")
+            .frame_bytes(),
+        460_800
+    );
+    assert_eq!(
+        FrameSpec::new(4, 2, 5, Decode::Cpu)
+            .expect("valid spec")
+            .frame_bytes(),
+        12
+    );
+    assert!(FrameSpec::new(7680, 4320, 5, Decode::Cpu).is_ok());
+    assert_eq!(
+        FrameSpec::new(8192, 8192, 5, Decode::Cpu),
+        Err(SpecError::TooLarge)
+    );
+    assert_eq!(
+        FrameSpec::new(4_294_967_294, 4_294_967_294, 5, Decode::Cpu),
+        Err(SpecError::TooLarge)
+    );
+    assert_eq!(
+        FrameSpec::new(0, 8192, 5, Decode::Cpu),
+        Err(SpecError::Size)
+    );
+    assert_eq!(
+        FrameSpec::new(8192, 8192, 0, Decode::Cpu),
+        Err(SpecError::Rate)
+    );
+    assert_eq!(MAX_FRAME_BYTES, 67_108_864);
 }
 
 #[tokio::test]

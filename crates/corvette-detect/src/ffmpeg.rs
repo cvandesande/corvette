@@ -16,10 +16,13 @@ pub enum Input {
     Segment { path: PathBuf },
 }
 
+pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpecError {
     Size,
     Rate,
+    TooLarge,
 }
 
 impl std::fmt::Display for SpecError {
@@ -27,6 +30,7 @@ impl std::fmt::Display for SpecError {
         match self {
             Self::Size => f.write_str("frame size must be non-zero and even in both directions"),
             Self::Rate => f.write_str("frame rate must be non-zero"),
+            Self::TooLarge => f.write_str("frame size is over the 67108864 byte limit"),
         }
     }
 }
@@ -39,24 +43,41 @@ pub struct FrameSpec {
     height: u32,
     fps: u32,
     decode: Decode,
+    frame_bytes: usize,
 }
 
 impl FrameSpec {
     /// # Errors
-    /// Returns [`SpecError`] naming the first refused part: a size that is zero or odd, else a zero rate.
-    pub const fn new(width: u32, height: u32, fps: u32, decode: Decode) -> Result<Self, SpecError> {
+    /// Returns [`SpecError`] naming the first refused part: a size that is zero or odd, else a zero rate, else a frame over [`MAX_FRAME_BYTES`].
+    pub fn new(width: u32, height: u32, fps: u32, decode: Decode) -> Result<Self, SpecError> {
         if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
             return Err(SpecError::Size);
         }
         if fps == 0 {
             return Err(SpecError::Rate);
         }
+        let half = u64::from(width) * u64::from(height) / 2;
+        let Some(bytes) = half
+            .checked_mul(3)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+        else {
+            return Err(SpecError::TooLarge);
+        };
+        if bytes > MAX_FRAME_BYTES {
+            return Err(SpecError::TooLarge);
+        }
         Ok(Self {
             width,
             height,
             fps,
             decode,
+            frame_bytes: bytes,
         })
+    }
+
+    #[must_use]
+    pub const fn frame_bytes(self) -> usize {
+        self.frame_bytes
     }
 
     #[must_use]
