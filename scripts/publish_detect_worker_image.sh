@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Builds the detection worker image as a local OCI layout and never contacts a registry.
-# With --push it publishes only when CORVETTE_DETECT_WORKER_PUSH_CONFIRM equals this
-# run's exact dated tag.
+# Builds the detection worker image with podman, saves it as a local OCI archive and checks its layout.
+# With --push it then publishes, only when CORVETTE_DETECT_WORKER_PUSH_CONFIRM equals this
+# run's exact dated tag; the push comes after the layout check passes.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,20 +24,19 @@ esac
 cd "$REPO"
 
 if [[ "$push_requested" -eq 0 ]]; then
+  podman build --file "$DOCKERFILE" --tag "$TAG" "$REPO"
   mkdir -p "$(dirname "$OCI_DEST")"
-  docker buildx build --file "$DOCKERFILE" --tag "$TAG" \
-    --output "type=oci,dest=$OCI_DEST" "$REPO"
+  podman save --format oci-archive --output "$OCI_DEST" "$TAG"
   ./scripts/check_detect_worker_oci_layout.sh "$OCI_DEST"
-  echo "publish_detect_worker_image: built local OCI layout at $OCI_DEST (tag $TAG, not pushed)"
+  echo "publish_detect_worker_image: built local OCI archive at $OCI_DEST (tag $TAG, not pushed)"
   exit 0
 fi
 
-publish_flag="--push"
-build_args=(docker buildx build --file "$DOCKERFILE" --tag "$TAG")
-build_args+=("$publish_flag" "$REPO")
-
 echo "publish_detect_worker_image: push mode requested for $TAG" >&2
-echo "publish_detect_worker_image: command that would run: ${build_args[*]} --metadata-file <tempfile>" >&2
+echo "publish_detect_worker_image: command that would run: podman build --file $DOCKERFILE --tag $TAG $REPO" >&2
+echo "publish_detect_worker_image: command that would run: podman save --format oci-archive --output $OCI_DEST $TAG" >&2
+echo "publish_detect_worker_image: command that would run: ./scripts/check_detect_worker_oci_layout.sh $OCI_DEST" >&2
+echo "publish_detect_worker_image: command that would run: podman push --digestfile <tempfile> $TAG" >&2
 
 confirm="${CORVETTE_DETECT_WORKER_PUSH_CONFIRM:-}"
 if [[ "$confirm" != "$TAG" ]]; then
@@ -45,13 +44,17 @@ if [[ "$confirm" != "$TAG" ]]; then
   exit 1
 fi
 
-metadata_file="$(mktemp)"
-trap 'rm -f "$metadata_file"' EXIT
-"${build_args[@]}" --metadata-file "$metadata_file"
+podman build --file "$DOCKERFILE" --tag "$TAG" "$REPO"
+mkdir -p "$(dirname "$OCI_DEST")"
+podman save --format oci-archive --output "$OCI_DEST" "$TAG"
+./scripts/check_detect_worker_oci_layout.sh "$OCI_DEST"
 
-digest="$(jq -r '."containerimage.digest"' "$metadata_file")"
+digestfile="$(mktemp)"
+trap 'rm -f "$digestfile"' EXIT
+podman push --digestfile "$digestfile" "$TAG"
+digest="$(tr -d '[:space:]' <"$digestfile")"
 if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-  echo "publish_detect_worker_image: pushed but buildx metadata had no usable digest: $digest" >&2
+  echo "publish_detect_worker_image: pushed but podman wrote no usable digest: $digest" >&2
   exit 1
 fi
 
