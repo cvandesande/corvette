@@ -25,3 +25,5 @@ The shell carries numpy and OpenCV from the locked nixpkgs, so each golden recor
 `decode.py` writes `crates/corvette-yolo/tests/fixtures/decode_cases.txt`: the detection rows of Frigate's `__post_process_nms_yolo` for seeded random tensors and hand-built cases, f32 values bit-exact; it quotes `frigate/util/model.py` at `v0.17.2` verbatim at its top.
 
 `motion_shape.py` writes `crates/corvette-motion/tests/fixtures/shape_cases.txt`: the motion frame sizes for sample frame sizes and frame heights; it quotes the motion-frame-size and gray-plane lines of `frigate/motion/improved_motion.py` at `v0.17.2` verbatim at its top.
+
+`motion_resize.py` writes `crates/corvette-motion/tests/fixtures/resize_cases.txt`: the bytes `cv2.INTER_NEAREST` produces for seeded random grey pictures at sample source and destination sizes; it quotes the resize call lines of `frigate/motion/improved_motion.py` at `v0.17.2` and the nearest-neighbor index lines of OpenCV `4.11.0`'s `resize.cpp` verbatim at its top.
