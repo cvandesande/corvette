@@ -10,6 +10,7 @@ description = "Supervises one operating-system child process, restarting it with
 tokio = { version = "1.53.1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
 
 [dev-dependencies]
+corvette-motion = { path = "../corvette-motion" }
 tokio = { version = "1.53.1", features = ["macros", "rt"] }
 
 [lints]
