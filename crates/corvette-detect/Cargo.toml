@@ -1,0 +1,16 @@
+[package]
+name = "corvette-detect"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Supervises one operating-system child process, restarting it with a doubling delay"
+
+[dependencies]
+tokio = { version = "1.53.1", features = ["process", "rt", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "rt"] }
+
+[lints]
+workspace = true

@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/corvette-api",
     "crates/corvette-api-server",
+    "crates/corvette-detect",
     "crates/corvette-detect-proto",
     "crates/corvette-detect-tools",
     "crates/corvette-detect-worker",

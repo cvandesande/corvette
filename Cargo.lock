@@ -447,6 +447,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "corvette-detect"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "corvette-detect-proto"
 version = "0.1.0"
 
