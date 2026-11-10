@@ -7,7 +7,7 @@ license.workspace = true
 description = "Supervises one operating-system child process, restarting it with a doubling delay"
 
 [dependencies]
-tokio = { version = "1.53.1", features = ["io-util", "process", "rt", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["macros", "rt"] }

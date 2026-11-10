@@ -5,12 +5,14 @@ mod backoff;
 mod clock;
 mod ffmpeg;
 mod reader;
+mod source;
 mod supervised;
 
 pub use backoff::{BACKOFF_INITIAL, BACKOFF_MAX, Backoff, DEFAULT_POLICY, HEALTHY_RUN, Policy};
 pub use clock::FrameClock;
 pub use ffmpeg::{Decode, FrameSpec, Input, MAX_FRAME_BYTES, SpecError, decode_command};
 pub use reader::{Frame, FrameReader, ReadError};
+pub use source::{FrameSource, STREAM_QUEUE_CAPACITY, SourceError};
 pub use supervised::{Status, Supervised};
 
 pub(crate) fn log_event(unit: &str, event: &str, detail: impl std::fmt::Display) {
