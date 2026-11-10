@@ -47,6 +47,19 @@ impl Image {
     }
 
     #[must_use]
+    pub(crate) fn zeroed(shape: Shape) -> Self {
+        Self {
+            data: vec![0u8; shape.pixels()],
+            shape,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+
+    #[must_use]
     pub fn data(&self) -> &[u8] {
         &self.data
     }

@@ -186,6 +186,7 @@
               ps.numpy
               ps.opencv4
               ps.pyyaml
+              ps.scipy
             ]))
           ];
         };

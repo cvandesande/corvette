@@ -14,9 +14,9 @@ Check the shell with:
 python3 -I tools/goldens/versions.py
 ```
 
-The shell carries numpy and OpenCV from the locked nixpkgs, so each golden records the version it was produced under. The OpenCV version inside the deployed Frigate image has not been inspected; a golden is evidence about the locked nixpkgs version.
+The shell carries numpy, OpenCV and scipy from the locked nixpkgs, so each golden records the version it was produced under. The OpenCV version inside the deployed Frigate image has not been inspected; a golden is evidence about the locked nixpkgs version.
 
-`versions.py` prints the Python, numpy, and cv2 versions of the shell it runs in, and exits non-zero when a package is missing.
+`versions.py` prints the Python, numpy, cv2 and scipy versions of the shell it runs in, and exits non-zero when a package is missing.
 
 `normalize.py` writes `crates/corvette-yolo/tests/fixtures/normalize_table.txt` and `normalize_spots.txt`: the float32 bits of Frigate's nchw float input transform at every byte value and at 612 sampled positions of a fixed image; it quotes `frigate/object_detection/base.py` and `util.py` at `v0.17.2` verbatim at its top.
 
@@ -27,3 +27,5 @@ The shell carries numpy and OpenCV from the locked nixpkgs, so each golden recor
 `motion_shape.py` writes `crates/corvette-motion/tests/fixtures/shape_cases.txt`: the motion frame sizes for sample frame sizes and frame heights; it quotes the motion-frame-size and gray-plane lines of `frigate/motion/improved_motion.py` at `v0.17.2` verbatim at its top.
 
 `motion_resize.py` writes `crates/corvette-motion/tests/fixtures/resize_cases.txt`: the bytes `cv2.INTER_NEAREST` produces for seeded random grey pictures at sample source and destination sizes; it quotes the resize call lines of `frigate/motion/improved_motion.py` at `v0.17.2` and the nearest-neighbor index lines of OpenCV `4.11.0`'s `resize.cpp` verbatim at its top.
+
+`motion_blur.py` writes `crates/corvette-motion/tests/fixtures/blur_cases.txt`: the bytes of `scipy.ndimage.gaussian_filter(sigma=1, radius=1)` on seeded, ramp, checkerboard and flat pictures, and the kernel weights' bit patterns; it quotes the Frigate call lines and the scipy `v1.16.0` lines verbatim at its top.
