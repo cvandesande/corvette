@@ -93,8 +93,10 @@ class NcnnEngine:
         self.infer(np.zeros((3, 640, 640), dtype=np.float32))
 
     def infer(self, chw):
-        # ncnn.Mat borrows chw's buffer, so chw stays referenced through extract.
-        mat = self.ncnn.Mat(chw)
+        # ncnn.Mat reads the buffer as channel planes and borrows it, so planes
+        # stays referenced through extract.
+        planes = np.ascontiguousarray(chw)
+        mat = self.ncnn.Mat(planes)
         extractor = self.net.create_extractor()
         if extractor.input(self.input_name, mat) != 0:
             raise RunFailure(f"ncnn input {self.input_name} was refused")

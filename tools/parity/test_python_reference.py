@@ -320,6 +320,22 @@ class ReferenceTests(unittest.TestCase):
         with self.assertRaises(REFERENCE.RunFailure):
             REFERENCE.NcnnEngine(fake_ncnn(tight_rec, gpu_count=1), param_path, 1, False)
 
+    def test_the_array_handed_to_ncnn_is_contiguous_channel_planes(self):
+        net_dir = scratch("planes-net")
+        param_path, _ = write_net_files(net_dir)
+        in_dir, out_dir = net_dirs("planes")
+        write_tensors(in_dir, 1)
+        rec = new_rec()
+        engine = REFERENCE.NcnnEngine(fake_ncnn(rec, extract_value=np.zeros(420000, dtype=np.float32)), param_path, None, False)
+        REFERENCE.run(engine, in_dir, out_dir)
+        sent = rec.mats[-1]
+        self.assertEqual(sent.dtype, np.float32)
+        self.assertEqual(sent.shape, (3, 640, 640))
+        self.assertTrue(sent.flags.c_contiguous)
+        self.assertEqual(sent.strides, (1638400, 2560, 4))
+        expected = expected_values(np.frombuffer(tensor_bytes(0), dtype=np.uint8))
+        self.assertTrue(np.array_equal(sent.reshape(-1)[:420000], expected))
+
     def test_engine_failures_are_failures_and_a_failed_run_leaves_nothing_behind(self):
         net_dir = scratch("engine-failures")
         param_path, _ = write_net_files(net_dir)
