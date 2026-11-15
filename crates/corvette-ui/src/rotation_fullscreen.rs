@@ -17,6 +17,7 @@ struct Module {
     entered: bool,
     pending: bool,
     button: Option<web_sys::Element>,
+    native: Option<web_sys::HtmlVideoElement>,
 }
 
 pub(crate) fn install() {
@@ -25,9 +26,11 @@ pub(crate) fn install() {
         entered: false,
         pending: false,
         button: None,
+        native: None,
     }));
     listen_for_orientation(Rc::clone(&state));
-    listen_for_fullscreen_exit(state);
+    listen_for_fullscreen_exit(Rc::clone(&state));
+    listen_for_native_fullscreen_exit(state);
 }
 
 fn listen_for_orientation(state: Rc<RefCell<Module>>) {
@@ -72,6 +75,26 @@ fn listen_for_fullscreen_exit(state: Rc<RefCell<Module>>) {
     listener.forget();
 }
 
+fn listen_for_native_fullscreen_exit(state: Rc<RefCell<Module>>) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let listener = Closure::<dyn FnMut()>::new(move || {
+        let mut module = state.borrow_mut();
+        module.entered = false;
+        module.native = None;
+    });
+    // Media events do not bubble, so a document-wide listener must capture.
+    document
+        .add_event_listener_with_callback_and_bool(
+            "webkitendfullscreen",
+            listener.as_ref().unchecked_ref(),
+            true,
+        )
+        .ok();
+    listener.forget();
+}
+
 fn orientation_from_type(text: &str) -> Orientation {
     if text.starts_with("landscape") {
         Orientation::Landscape
@@ -108,7 +131,28 @@ fn current_orientation() -> Orientation {
     Orientation::Portrait
 }
 
-fn fullscreen_capability(entered: bool) -> Fullscreen {
+fn native_video(player: &web_sys::Element) -> Option<web_sys::HtmlVideoElement> {
+    let video = player
+        .dyn_ref::<web_sys::HtmlVideoElement>()
+        .cloned()
+        .or_else(|| {
+            player
+                .query_selector("video")
+                .ok()
+                .flatten()?
+                .dyn_into::<web_sys::HtmlVideoElement>()
+                .ok()
+        })?;
+    js_sys::Reflect::get(video.as_ref(), &"webkitEnterFullscreen".into())
+        .is_ok_and(|member| member.is_function())
+        .then_some(video)
+}
+
+fn fullscreen_capability(
+    entered: bool,
+    player: Option<&web_sys::Element>,
+    native: Option<&web_sys::HtmlVideoElement>,
+) -> Fullscreen {
     let Some(document) = web_sys::window().and_then(|window| window.document()) else {
         return Fullscreen::Unavailable;
     };
@@ -117,7 +161,18 @@ fn fullscreen_capability(entered: bool) -> Fullscreen {
             .is_ok_and(|value| value.is_function())
     });
     if !document.fullscreen_enabled() || !requestable {
-        return Fullscreen::Unavailable;
+        if entered
+            && let Some(video) = native
+            && js_sys::Reflect::get(video.as_ref(), &"webkitDisplayingFullscreen".into())
+                .is_ok_and(|value| value.as_bool() == Some(true))
+        {
+            return Fullscreen::Entered;
+        }
+        return if player.is_some_and(|element| native_video(element).is_some()) {
+            Fullscreen::Available
+        } else {
+            Fullscreen::Unavailable
+        };
     }
     if entered && document.fullscreen_element().is_some() {
         Fullscreen::Entered
@@ -167,9 +222,14 @@ fn eligible_player() -> Option<web_sys::Element> {
 fn evaluate(state: &Rc<RefCell<Module>>) {
     let orientation = current_orientation();
     let player = eligible_player();
-    let (outcome, entered, button_shown) = {
+    let (outcome, entered, button_shown, native) = {
         let module = state.borrow();
-        (module.outcome, module.entered, module.button.is_some())
+        (
+            module.outcome,
+            module.entered,
+            module.button.is_some(),
+            module.native.clone(),
+        )
     };
     let action = decide(RotationState {
         orientation,
@@ -178,7 +238,7 @@ fn evaluate(state: &Rc<RefCell<Module>>) {
         } else {
             Player::Idle
         },
-        fullscreen: fullscreen_capability(entered),
+        fullscreen: fullscreen_capability(entered, player.as_ref(), native.as_ref()),
         outcome,
         button: if button_shown {
             Button::Shown
@@ -195,8 +255,21 @@ fn evaluate(state: &Rc<RefCell<Module>>) {
             }
         }
         RotationAction::ExitFullscreen => {
-            if let Some(document) = web_sys::window().and_then(|window| window.document()) {
-                document.exit_fullscreen();
+            let video = state.borrow_mut().native.take();
+            match video {
+                Some(video) => {
+                    if let Ok(method) =
+                        js_sys::Reflect::get(video.as_ref(), &"webkitExitFullscreen".into())
+                        && let Some(function) = method.dyn_ref::<js_sys::Function>()
+                    {
+                        function.call0(video.as_ref()).ok();
+                    }
+                }
+                None => {
+                    if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+                        document.exit_fullscreen();
+                    }
+                }
             }
             let mut module = state.borrow_mut();
             module.entered = false;
@@ -222,6 +295,19 @@ fn reject(state: &Rc<RefCell<Module>>) {
 
 fn request(state: &Rc<RefCell<Module>>, target: &web_sys::Element) {
     state.borrow_mut().pending = true;
+    let route_available = web_sys::window()
+        .and_then(|window| window.document())
+        .is_some_and(|document| {
+            document.fullscreen_enabled()
+                && document.document_element().is_some_and(|element| {
+                    js_sys::Reflect::get(element.as_ref(), &"requestFullscreen".into())
+                        .is_ok_and(|value| value.is_function())
+                })
+        });
+    if !route_available {
+        request_native(state, target);
+        return;
+    }
     let Ok(method) = js_sys::Reflect::get(target.as_ref(), &"requestFullscreen".into()) else {
         reject(state);
         return;
@@ -254,6 +340,34 @@ fn request(state: &Rc<RefCell<Module>>, target: &web_sys::Element) {
     let _ = promise.then2(&on_fulfilled, &on_rejected);
     on_fulfilled.forget();
     on_rejected.forget();
+}
+
+fn request_native(state: &Rc<RefCell<Module>>, target: &web_sys::Element) {
+    let Some(video) = native_video(target) else {
+        reject(state);
+        return;
+    };
+    let Ok(method) = js_sys::Reflect::get(video.as_ref(), &"webkitEnterFullscreen".into()) else {
+        reject(state);
+        return;
+    };
+    let Some(function) = method.dyn_ref::<js_sys::Function>() else {
+        reject(state);
+        return;
+    };
+    // The native request call is synchronous and returns no promise to await.
+    if function.call0(video.as_ref()).is_err() {
+        reject(state);
+        return;
+    }
+    {
+        let mut module = state.borrow_mut();
+        module.outcome = Outcome::Resolved;
+        module.entered = true;
+        module.pending = false;
+        module.native = Some(video);
+    }
+    evaluate(state);
 }
 
 fn show_button(state: &Rc<RefCell<Module>>) {

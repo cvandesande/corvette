@@ -145,8 +145,11 @@ async function stubAlertModal(page, firstActivityAnswer) {
   });
 }
 
-const openAlertWithLink = async (page) => {
+const openAlertWithLink = async (page, beforeVisit) => {
   await installHarness(page);
+  if (beforeVisit) {
+    await beforeVisit();
+  }
   let link = null;
   await stubAlertModal(page, (route, modalFixture) => {
     const start = modalFixture.bounds.start;
@@ -162,6 +165,48 @@ const openAlertWithLink = async (page) => {
   await expect(playback.locator("video")).toHaveAttribute("data-clip-url", link);
   return link;
 };
+
+// The video's own fullscreen methods, the route a browser offers without the standard one.
+const installNativeVideoFullscreenStub = (page) =>
+  page.addInitScript(() => {
+    window.__nativeMode = "accept";
+    window.__nativeRequests = [];
+    window.__nativeExits = 0;
+    let displaying = null;
+    HTMLVideoElement.prototype.webkitEnterFullscreen = function webkitEnterFullscreen() {
+      window.__nativeRequests.push({
+        tagName: this.tagName, className: String(this.className || ""), clipUrl: this.getAttribute("data-clip-url"),
+      });
+      if (window.__nativeMode === "throw") {
+        throw new DOMException("refused", "InvalidStateError");
+      }
+      displaying = this;
+    };
+    Object.defineProperty(HTMLVideoElement.prototype, "webkitDisplayingFullscreen", {
+      configurable: true,
+      get() {
+        return this === displaying;
+      },
+    });
+    HTMLVideoElement.prototype.webkitExitFullscreen = function webkitExitFullscreen() {
+      window.__nativeExits += 1;
+      displaying = null;
+      this.dispatchEvent(new Event("webkitendfullscreen"));
+    };
+  });
+
+const installNativeOnlyFullscreen = (page) =>
+  Promise.all([
+    page.addInitScript(() => {
+      delete Element.prototype.requestFullscreen;
+      Object.defineProperty(document, "fullscreenEnabled", { configurable: true, get: () => false });
+    }),
+    installNativeVideoFullscreenStub(page),
+  ]);
+
+const recordedNativeRequests = (page) => page.evaluate(() => window.__nativeRequests);
+
+const nativeExitCalls = (page) => page.evaluate(() => window.__nativeExits);
 
 test("a sideways turn takes the playing live view fullscreen", async ({ page }) => {
   test.setTimeout(30_000);
@@ -295,4 +340,109 @@ test("without screen.orientation the window's own event drives the page", async 
   const requests = await recordedRequests(page);
   expect(requests).toHaveLength(1);
   expect(requests[0].className).toContain("expanded-player");
+});
+
+test("a sideways turn takes the playing live view fullscreen through the video's own call", async ({ page }) => {
+  test.setTimeout(30_000);
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error));
+  await openLiveView(page, () => installNativeOnlyFullscreen(page));
+  expect(await recordedNativeRequests(page)).toHaveLength(0);
+  await turn(page, "landscape-primary");
+  const requests = await recordedNativeRequests(page);
+  expect(requests).toHaveLength(1);
+  expect(requests[0].tagName).toBe("VIDEO");
+  expect(await recordedRequests(page)).toHaveLength(0);
+  await expect(page.locator(".rotation-fullscreen-button")).toHaveCount(0);
+  expect(pageErrors).toHaveLength(0);
+});
+
+test("a native request that throws shows one Full screen button, and one tap asks again", async ({ page }) => {
+  test.setTimeout(30_000);
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error));
+  await openLiveView(page, () => installNativeOnlyFullscreen(page));
+  await page.evaluate(() => { window.__nativeMode = "throw"; });
+  await turn(page, "landscape-primary");
+  expect(await recordedNativeRequests(page)).toHaveLength(1);
+  const button = page.locator(".rotation-fullscreen-button");
+  await expect(button).toHaveCount(1);
+  await expect(button).toBeVisible();
+  await expect(button).toHaveText("Full screen");
+  await page.evaluate(() => { window.__nativeMode = "accept"; });
+  await button.click();
+  expect(await recordedNativeRequests(page)).toHaveLength(2);
+  await expect(button).toHaveCount(0);
+  expect(pageErrors).toHaveLength(0);
+});
+
+test("turning upright leaves a native fullscreen through the video's own exit", async ({ page }) => {
+  test.setTimeout(30_000);
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error));
+  await openLiveView(page, () => installNativeOnlyFullscreen(page));
+  await turn(page, "landscape-primary");
+  expect(await recordedNativeRequests(page)).toHaveLength(1);
+  await turn(page, "portrait-primary");
+  expect(await nativeExitCalls(page)).toBe(1);
+  await turn(page, "portrait-primary");
+  expect(await nativeExitCalls(page)).toBe(1);
+  expect(await recordedNativeRequests(page)).toHaveLength(1);
+  expect(pageErrors).toHaveLength(0);
+});
+
+test("a native fullscreen the user left is not exited again on an upright turn", async ({ page }) => {
+  test.setTimeout(30_000);
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error));
+  await openLiveView(page, () => installNativeOnlyFullscreen(page));
+  await turn(page, "landscape-primary");
+  expect(await recordedNativeRequests(page)).toHaveLength(1);
+  await page.evaluate(() => {
+    document.querySelector(".expanded-player video").dispatchEvent(new Event("webkitendfullscreen"));
+  });
+  await turn(page, "portrait-primary");
+  expect(await nativeExitCalls(page)).toBe(0);
+  expect(pageErrors).toHaveLength(0);
+});
+
+test("a sideways turn takes the marked alert clip fullscreen through the video's own call", async ({ page }) => {
+  test.setTimeout(30_000);
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error));
+  const link = await openAlertWithLink(page, () => installNativeOnlyFullscreen(page));
+  await turn(page, "landscape-primary");
+  const requests = await recordedNativeRequests(page);
+  expect(requests).toHaveLength(1);
+  expect(requests[0].tagName).toBe("VIDEO");
+  expect(requests[0].clipUrl).toBe(link);
+  await page.evaluate(() => document.querySelector("video.recording-player").removeAttribute("data-rotate-fullscreen"));
+  await turn(page, "landscape-primary");
+  expect(await recordedNativeRequests(page)).toHaveLength(1);
+  expect(pageErrors).toHaveLength(0);
+});
+
+test("with both fullscreen routes the page uses the standard call only", async ({ page }) => {
+  test.setTimeout(30_000);
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error));
+  await openLiveView(page, () => installNativeVideoFullscreenStub(page));
+  await turn(page, "landscape-primary");
+  expect(await recordedRequests(page)).toHaveLength(1);
+  expect(await recordedNativeRequests(page)).toHaveLength(0);
+  expect(pageErrors).toHaveLength(0);
+});
+
+test("without any fullscreen route the turn does nothing", async ({ page }) => {
+  test.setTimeout(30_000);
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error));
+  await openLiveView(page, () => page.addInitScript(() => {
+    delete Element.prototype.requestFullscreen;
+    Object.defineProperty(document, "fullscreenEnabled", { configurable: true, get: () => false });
+  }));
+  await turn(page, "landscape-primary");
+  expect(await recordedRequests(page)).toHaveLength(0);
+  await expect(page.locator(".rotation-fullscreen-button")).toHaveCount(0);
+  expect(pageErrors).toHaveLength(0);
 });
