@@ -330,6 +330,23 @@ main {
   object-fit: contain;
 }
 
+.expanded-player.rotation-fullscreen-layout {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100dvw;
+  height: 100dvh;
+  max-height: none;
+  aspect-ratio: auto;
+  border-radius: 0;
+  z-index: 120;
+}
+
+.expanded-player.rotation-fullscreen-layout video,
+.expanded-player.rotation-fullscreen-layout canvas {
+  object-fit: contain;
+}
+
 .live-path-indicator {
   margin: 0.35rem 0 0;
   color: #8fa09e;

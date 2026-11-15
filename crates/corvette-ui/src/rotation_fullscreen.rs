@@ -11,6 +11,7 @@ use crate::rotation::{
 };
 
 const PLAYER_SELECTOR: &str = "[data-rotate-fullscreen]";
+const LAYOUT_CLASS: &str = "rotation-fullscreen-layout";
 
 struct Module {
     outcome: Outcome,
@@ -18,6 +19,7 @@ struct Module {
     pending: bool,
     button: Option<web_sys::Element>,
     native: Option<web_sys::HtmlVideoElement>,
+    layout: Option<web_sys::Element>,
 }
 
 pub(crate) fn install() {
@@ -27,6 +29,7 @@ pub(crate) fn install() {
         pending: false,
         button: None,
         native: None,
+        layout: None,
     }));
     listen_for_orientation(Rc::clone(&state));
     listen_for_fullscreen_exit(Rc::clone(&state));
@@ -152,6 +155,7 @@ fn fullscreen_capability(
     entered: bool,
     player: Option<&web_sys::Element>,
     native: Option<&web_sys::HtmlVideoElement>,
+    layout: Option<&web_sys::Element>,
 ) -> Fullscreen {
     let Some(document) = web_sys::window().and_then(|window| window.document()) else {
         return Fullscreen::Unavailable;
@@ -168,13 +172,22 @@ fn fullscreen_capability(
         {
             return Fullscreen::Entered;
         }
-        return if player.is_some_and(|element| native_video(element).is_some()) {
-            Fullscreen::Available
-        } else {
-            Fullscreen::Unavailable
-        };
-    }
-    if entered && document.fullscreen_element().is_some() {
+        if player.is_some_and(|element| native_video(element).is_some()) {
+            return Fullscreen::Available;
+        }
+        if entered
+            && layout.is_some_and(|element| {
+                element.is_connected() && element.class_list().contains(LAYOUT_CLASS)
+            })
+        {
+            return Fullscreen::Entered;
+        }
+        // A player with neither fullscreen call takes the layout route.
+        if player.is_some() {
+            return Fullscreen::Available;
+        }
+        Fullscreen::Unavailable
+    } else if entered && document.fullscreen_element().is_some() {
         Fullscreen::Entered
     } else {
         Fullscreen::Available
@@ -220,15 +233,27 @@ fn eligible_player() -> Option<web_sys::Element> {
 }
 
 fn evaluate(state: &Rc<RefCell<Module>>) {
+    {
+        let mut module = state.borrow_mut();
+        if let Some(layout) = &module.layout
+            && !layout.is_connected()
+        {
+            // The player the class was put on is gone; a fresh one must be asked again.
+            module.layout = None;
+            module.entered = false;
+            module.outcome = Outcome::NotAttempted;
+        }
+    }
     let orientation = current_orientation();
     let player = eligible_player();
-    let (outcome, entered, button_shown, native) = {
+    let (outcome, entered, button_shown, native, layout) = {
         let module = state.borrow();
         (
             module.outcome,
             module.entered,
             module.button.is_some(),
             module.native.clone(),
+            module.layout.clone(),
         )
     };
     let action = decide(RotationState {
@@ -238,7 +263,12 @@ fn evaluate(state: &Rc<RefCell<Module>>) {
         } else {
             Player::Idle
         },
-        fullscreen: fullscreen_capability(entered, player.as_ref(), native.as_ref()),
+        fullscreen: fullscreen_capability(
+            entered,
+            player.as_ref(),
+            native.as_ref(),
+            layout.as_ref(),
+        ),
         outcome,
         button: if button_shown {
             Button::Shown
@@ -256,20 +286,18 @@ fn evaluate(state: &Rc<RefCell<Module>>) {
         }
         RotationAction::ExitFullscreen => {
             let video = state.borrow_mut().native.take();
-            match video {
-                Some(video) => {
-                    if let Ok(method) =
-                        js_sys::Reflect::get(video.as_ref(), &"webkitExitFullscreen".into())
-                        && let Some(function) = method.dyn_ref::<js_sys::Function>()
-                    {
-                        function.call0(video.as_ref()).ok();
-                    }
+            let layout = state.borrow_mut().layout.take();
+            if let Some(video) = video {
+                if let Ok(method) =
+                    js_sys::Reflect::get(video.as_ref(), &"webkitExitFullscreen".into())
+                    && let Some(function) = method.dyn_ref::<js_sys::Function>()
+                {
+                    function.call0(video.as_ref()).ok();
                 }
-                None => {
-                    if let Some(document) = web_sys::window().and_then(|window| window.document()) {
-                        document.exit_fullscreen();
-                    }
-                }
+            } else if let Some(element) = layout {
+                element.class_list().remove_1(LAYOUT_CLASS).ok();
+            } else if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+                document.exit_fullscreen();
             }
             let mut module = state.borrow_mut();
             module.entered = false;
@@ -305,7 +333,11 @@ fn request(state: &Rc<RefCell<Module>>, target: &web_sys::Element) {
                 })
         });
     if !route_available {
-        request_native(state, target);
+        if native_video(target).is_some() {
+            request_native(state, target);
+        } else {
+            request_layout(state, target);
+        }
         return;
     }
     let Ok(method) = js_sys::Reflect::get(target.as_ref(), &"requestFullscreen".into()) else {
@@ -366,6 +398,22 @@ fn request_native(state: &Rc<RefCell<Module>>, target: &web_sys::Element) {
         module.entered = true;
         module.pending = false;
         module.native = Some(video);
+    }
+    evaluate(state);
+}
+
+// The third route, for a player with no fullscreen call at all: CSS fills the viewport, no promise is awaited.
+fn request_layout(state: &Rc<RefCell<Module>>, target: &web_sys::Element) {
+    if target.class_list().add_1(LAYOUT_CLASS).is_err() {
+        reject(state);
+        return;
+    }
+    {
+        let mut module = state.borrow_mut();
+        module.outcome = Outcome::Resolved;
+        module.entered = true;
+        module.pending = false;
+        module.layout = Some(target.clone());
     }
     evaluate(state);
 }
