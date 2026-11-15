@@ -22,6 +22,8 @@ mod media;
 mod monitor;
 mod monitor_layout;
 mod recordings;
+#[cfg(test)]
+mod rotation;
 mod shell;
 mod still_tile;
 mod timeline;
