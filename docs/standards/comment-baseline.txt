@@ -1,4 +1,3 @@
-28.2 24 85 Cargo.toml
 90.9 10 11 clippy.toml
 16.3 27 166 crates/corvette-api-server/src/database.rs
 55.0 44 80 crates/corvette-media-bridge/Cargo.toml
@@ -41,9 +40,7 @@
 22.9 78 341 crates/corvette-ui/src/monitor_layout.rs
 36.3 123 339 crates/corvette-ui/src/monitor.rs
 8.3 109 1310 crates/corvette-ui/src/timeline.rs
-11.0 58 526 crates/ncnn-spike/src/main.rs
 22.5 9 40 crates/ncnn-sys/build.rs
-14.5 19 131 crates/ncnn-sys/src/lib.rs
 53.5 23 43 crates/rtsp-restream/Cargo.toml
 66.7 22 33 crates/rtsp-restream/src/lib.rs
 16.6 29 175 crates/rtsp-restream/src/packetize/aac.rs
@@ -72,9 +69,6 @@
 45.5 15 33 scripts/check_no_trailing_slash_hrefs.sh
 12.7 9 71 scripts/check_oci_layout.sh
 11.8 6 51 scripts/check_site_shape.sh
-5.9 4 68 scripts/publish_api_server_image.sh
-14.9 11 74 scripts/publish_media_bridge_image.sh
-11.1 8 72 scripts/publish_site_image.sh
 22.7 77 339 scripts/route_parity.sh
 14.9 11 74 scripts/run_g2_fmp4_ws_browser_check.sh
 14.1 11 78 scripts/run_g3_hls_browser_check.sh
@@ -83,4 +77,7 @@
 16.3 14 86 scripts/run_u1_live_view_browser_check.sh
 27.0 48 178 scripts/run_u2_expanded_view_browser_check.sh
 # SAFETY counts
-18	crates/ncnn-spike/src/main.rs
+9	crates/corvette-ncnn/src/net.rs
+4	crates/corvette-ncnn/src/handle.rs
+3	crates/corvette-ncnn/src/device.rs
+2	crates/corvette-ncnn/src/lib.rs

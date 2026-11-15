@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Builds Corvette's own read-only API-service image to a local OCI layout (issue #4 A5).
-# Push needs CORVETTE_API_SERVER_PUSH_CONFIRM set to this run's dated tag.
+# Builds the API-server image with podman, saves it as a local OCI archive and checks its layout.
+# With --push it then publishes, only when CORVETTE_API_SERVER_PUSH_CONFIRM equals this
+# run's exact dated tag; see publish_site_image.sh for why it must be today's exact tag.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,11 +24,9 @@ esac
 cd "$REPO"
 
 if [[ "$push_requested" -eq 0 ]]; then
+  podman build --file "$DOCKERFILE" --tag "$TAG" "$REPO"
   mkdir -p "$(dirname "$OCI_DEST")"
-  docker buildx build --file "$DOCKERFILE" --tag "$TAG" \
-    --output "type=oci,dest=$OCI_DEST" "$REPO"
-  # buildx writes the OCI layout as one tar (as publish_media_bridge_image.sh
-  # already learned), so the layout members are checked inside the archive.
+  podman save --format oci-archive --output "$OCI_DEST" "$TAG"
   if ! tar -tf "$OCI_DEST" index.json oci-layout >/dev/null 2>&1; then
     echo "publish_api_server_image: $OCI_DEST is not an OCI layout: index.json or oci-layout missing" >&2
     exit 1
@@ -36,10 +35,9 @@ if [[ "$push_requested" -eq 0 ]]; then
   exit 0
 fi
 
-build_args=(docker buildx build --file "$DOCKERFILE" --tag "$TAG" --push "$REPO")
-
 echo "publish_api_server_image: push mode requested for $TAG" >&2
-echo "publish_api_server_image: command that would run: ${build_args[*]} --metadata-file <tempfile>" >&2
+echo "publish_api_server_image: command that would run: podman build --file $DOCKERFILE --tag $TAG $REPO" >&2
+echo "publish_api_server_image: command that would run: podman push --digestfile <tempfile> $TAG" >&2
 
 confirm="${CORVETTE_API_SERVER_PUSH_CONFIRM:-}"
 if [[ "$confirm" != "$TAG" ]]; then
@@ -47,13 +45,14 @@ if [[ "$confirm" != "$TAG" ]]; then
   exit 1
 fi
 
-metadata_file="$(mktemp)"
-trap 'rm -f "$metadata_file"' EXIT
-"${build_args[@]}" --metadata-file "$metadata_file"
+podman build --file "$DOCKERFILE" --tag "$TAG" "$REPO"
 
-digest="$(jq -r '."containerimage.digest"' "$metadata_file")"
+digestfile="$(mktemp)"
+trap 'rm -f "$digestfile"' EXIT
+podman push --digestfile "$digestfile" "$TAG"
+digest="$(tr -d '[:space:]' <"$digestfile")"
 if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-  echo "publish_api_server_image: pushed but buildx metadata had no usable digest: $digest" >&2
+  echo "publish_api_server_image: pushed but podman wrote no usable digest: $digest" >&2
   exit 1
 fi
 

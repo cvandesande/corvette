@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
-# Builds the site's publish tree into an OCI image and, only when a human
-# explicitly confirms, publishes it to the tagged registry repository.
-#
-# Default mode never contacts a registry: it stages the publish tree, checks
-# its shape, and builds a local OCI layout under out/. Push mode additionally
-# requires CORVETTE_UI_PUSH_CONFIRM in the environment to equal this run's
-# exact dated tag -- a value nobody sets by accident, and one that expires
-# the moment the date rolls over, so a leftover confirmation left set from an
-# earlier day cannot authorize today's push.
+# Builds the site image with podman and saves it as a local OCI archive under out/.
+# With --push it publishes only when CORVETTE_UI_PUSH_CONFIRM equals this run's exact
+# dated tag: that tag rolls over daily, so a stale confirmation cannot authorize a push.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,19 +26,16 @@ cd "$REPO"
 ./scripts/check_site_shape.sh target/site-publish
 
 if [[ "$push_requested" -eq 0 ]]; then
+  podman build --file "$DOCKERFILE" --tag "$TAG" "$REPO"
   mkdir -p "$(dirname "$OCI_DEST")"
-  docker buildx build --file "$DOCKERFILE" --tag "$TAG" \
-    --output "type=oci,dest=$OCI_DEST" "$REPO"
+  podman save --format oci-archive --output "$OCI_DEST" "$TAG"
   echo "publish_site_image: built local OCI layout at $OCI_DEST (tag $TAG, not pushed)"
   exit 0
 fi
 
-publish_flag="--push"
-build_args=(docker buildx build --file "$DOCKERFILE" --tag "$TAG")
-build_args+=("$publish_flag" "$REPO")
-
 echo "publish_site_image: push mode requested for $TAG" >&2
-echo "publish_site_image: command that would run: ${build_args[*]} --metadata-file <tempfile>" >&2
+echo "publish_site_image: command that would run: podman build --file $DOCKERFILE --tag $TAG $REPO" >&2
+echo "publish_site_image: command that would run: podman push --digestfile <tempfile> $TAG" >&2
 
 confirm="${CORVETTE_UI_PUSH_CONFIRM:-}"
 if [[ "$confirm" != "$TAG" ]]; then
@@ -52,13 +43,14 @@ if [[ "$confirm" != "$TAG" ]]; then
   exit 1
 fi
 
-metadata_file="$(mktemp)"
-trap 'rm -f "$metadata_file"' EXIT
-"${build_args[@]}" --metadata-file "$metadata_file"
+podman build --file "$DOCKERFILE" --tag "$TAG" "$REPO"
 
-digest="$(jq -r '."containerimage.digest"' "$metadata_file")"
+digestfile="$(mktemp)"
+trap 'rm -f "$digestfile"' EXIT
+podman push --digestfile "$digestfile" "$TAG"
+digest="$(tr -d '[:space:]' <"$digestfile")"
 if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-  echo "publish_site_image: pushed but buildx metadata had no usable digest: $digest" >&2
+  echo "publish_site_image: pushed but podman wrote no usable digest: $digest" >&2
   exit 1
 fi
 
