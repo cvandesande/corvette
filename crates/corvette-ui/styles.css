@@ -319,6 +319,17 @@ main {
   height: 100%;
 }
 
+.expanded-player:fullscreen {
+  max-height: none;
+  aspect-ratio: auto;
+  border-radius: 0;
+}
+
+.expanded-player:fullscreen video,
+.expanded-player:fullscreen canvas {
+  object-fit: contain;
+}
+
 .live-path-indicator {
   margin: 0.35rem 0 0;
   color: #8fa09e;
@@ -337,7 +348,8 @@ main {
   position: relative;
 }
 
-.live-play-button {
+.live-play-button,
+.rotation-fullscreen-button {
   position: absolute;
   inset: 0;
   margin: auto;
@@ -352,17 +364,26 @@ main {
   cursor: pointer;
 }
 
-.live-play-button:hover {
+.live-play-button:hover,
+.rotation-fullscreen-button:hover {
   border-color: #69d1ba;
 }
 
-.live-play-button:focus-visible {
+.live-play-button:focus-visible,
+.rotation-fullscreen-button:focus-visible {
   outline: 2px solid #69d1ba;
   outline-offset: -2px;
 }
 
 .live-play-button[hidden] {
   display: none;
+}
+
+.rotation-fullscreen-button {
+  position: fixed;
+  inset: auto 1rem 1rem auto;
+  margin: 0;
+  z-index: 110;
 }
 
 .event-grid {

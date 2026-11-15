@@ -283,6 +283,7 @@ fn ClipVideo(url: String, failed: RwSignal<bool>) -> impl IntoView {
     view! {
         <video
             class="recording-player"
+            data-rotate-fullscreen=""
             data-clip-url=url
             controls
             autoplay

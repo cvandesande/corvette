@@ -22,8 +22,8 @@ mod media;
 mod monitor;
 mod monitor_layout;
 mod recordings;
-#[cfg(test)]
 mod rotation;
+mod rotation_fullscreen;
 mod shell;
 mod still_tile;
 mod timeline;
@@ -43,6 +43,7 @@ struct RecordingsRoute;
 
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn mount() {
+    rotation_fullscreen::install();
     leptos::mount::mount_to_body(App);
 }
 

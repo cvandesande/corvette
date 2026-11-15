@@ -139,7 +139,7 @@ pub(crate) fn ExpandedView(
                     </button>
                 </div>
                 <div class="live-player-frame">
-                    <div class="expanded-player" node_ref=player_container></div>
+                    <div class="expanded-player" data-rotate-fullscreen="" node_ref=player_container></div>
                     <button
                         type="button"
                         class="live-play-button"
