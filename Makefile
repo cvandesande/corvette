@@ -49,6 +49,7 @@ check-ui:
 check-site-shape:
 	./scripts/build_site.sh
 	./scripts/check_site_shape.sh target/site-publish
+	./scripts/check_app_manifest.sh target/site-publish index.html
 
 # Runs after check-site-shape, which stages the publish tree this serves.
 check-nginx-parity:

@@ -52,6 +52,11 @@ static path needs: Frigate's `/auth`, so `auth_request` resolves, and go2rtc's
 player page. Every other path on those upstreams answers 404 with a body naming
 the stub.
 
+`web_app_assets.spec.cjs` fetches the web app manifest and the three icons
+through the same nginx and checks the content type, the manifest's
+`Cache-Control` and the bytes: a missing file under the catch-all is answered
+with the shell at status 200, so the status alone proves nothing.
+
 ## What it cannot prove
 
 - **Nothing about `/vod/`.** The flake's nginx has neither nginx-vod-module nor
@@ -69,6 +74,9 @@ the stub.
 - **Nothing about authentication.** The stub answers every `/auth` subrequest
   202. Frigate's real answer depends on the port the request arrived on and on
   session state, neither of which is modelled here.
+- **Nothing about the deployed pod's MIME table.** The manifest and icon
+  content types here come from the development shell's `mime.types`; the
+  deployed pod's is read after a deploy, with HEAD requests.
 - **Nothing about the deployment's own state** — its media tree, its cameras,
   or its configuration. The media root is a fixture.
 - **Nothing about a deployment that sets a base path.** `base_path.conf` is
