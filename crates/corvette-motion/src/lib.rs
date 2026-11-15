@@ -11,6 +11,7 @@ pub mod detector;
 pub mod difference;
 pub mod dilate;
 pub mod plane;
+pub mod polygon;
 pub mod resize;
 pub mod shape;
 
@@ -24,5 +25,6 @@ pub use detector::MotionDetector;
 pub use difference::{absolute_difference, threshold_above};
 pub use dilate::dilate_3x3;
 pub use plane::{Image, Plane};
+pub use polygon::fill_polygons;
 pub use resize::resize_nearest;
 pub use shape::{Shape, motion_shape};

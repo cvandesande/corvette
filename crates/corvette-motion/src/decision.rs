@@ -155,7 +155,7 @@ fn scaled_length(length: usize, factor: f64) -> usize {
 }
 
 /// The largest whole number `n` with `f64::from(n) <= product`, saturating at `u32::MAX`.
-fn trunc_to_whole(product: f64) -> usize {
+pub(crate) fn trunc_to_whole(product: f64) -> usize {
     if product >= f64::from(u32::MAX) || product.is_nan() {
         return usize::try_from(u32::MAX).unwrap_or(usize::MAX);
     }
