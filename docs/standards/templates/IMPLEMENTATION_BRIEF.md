@@ -27,6 +27,8 @@ behavior:
 verify:
   - <exact command and expected evidence>
 mutation: <exact defect injection and expected fail/pass, or not required with reason>
+claims_checked:
+  - <stated line number, count, output, mutation outcome or feasibility: the command and its output, or UNCHECKED with the command that settles it>
 stop_if:
   - <topic-anchored gate>
 environment:
