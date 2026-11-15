@@ -1,65 +1,77 @@
 //! The bookmarkable camera wall: one tile per enabled camera, each running
-//! its own MoQ-first/HLS-fallback live session (issue #20 item M3, reusing
-//! `expanded_view`'s own [`ExpandedSession`]/[`LivePath`] verbatim) and
-//! placed by `monitor_layout`'s aspect-ratio-aware packing (item M4) to
-//! exactly fill the viewport with no scrolling.
-//!
-//! Reached by direct bookmark at `/monitor`, not from primary navigation.
-//! Selecting a tile fullscreens it in place via the standard Fullscreen API
-//! (item M5, D-1 in `.agents/issue-20/DESIGN-monitor-mode.md`) -- the same
-//! DOM element that already hosts the tile's live session, so entering or
-//! leaving fullscreen never re-mounts or reconnects it. A small, persistent
-//! top-left button on first load (issue #21's own follow-up, shrunk from an
-//! earlier full-viewport one-time prompt) supplies the single real user
-//! gesture Chromium's transient-activation model requires before any
-//! `requestFullscreen()` call can succeed (D-4); `RESEARCH-tvbro-
-//! fullscreen.md` found no gesture-free path on tv-bro/Android `WebView`.
-//! Exiting fullscreen relies primarily on the
-//! browser's own default Fullscreen-API behavior (Escape, or the platform's
-//! own remote-control equivalent) -- whether tv-bro's own remote Back button
-//! honors that default the same way is real-device-only and stays
-//! UNVERIFIED until item V1 checks -- plus a real on-page button on the
-//! fullscreened tile itself that calls `exitFullscreen()` directly, as a
-//! defensive fallback independent of that unverified pathway. The button's
-//! visibility is gated purely by CSS's own `:fullscreen` pseudo-class
-//! (`styles.css`'s `.monitor-tile:fullscreen`), not any Rust-side
-//! `fullscreenchange` tracking.
+//! its own live session, placed to fill the viewport exactly with no scrolling.
 
 use corvette_api::Camera;
 use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 
 use crate::expanded_view::{ExpandedSession, LivePath};
 use crate::monitor_layout::{TileRect, pack_tiles};
 use crate::shell::{Status, StatusGlyph};
 
-/// Delay applied to each tile's initial dial, scaled by the tile's position
-/// in the fetched camera list (`tile_index * STAGGER_MS`), so `/monitor`
-/// never opens N simultaneous relay connections at once -- D-3's own
-/// mitigation for `RESEARCH-moq-relay-concurrency.md`'s unverified
-/// under-load behavior (`.agents/issue-20/DESIGN-monitor-mode.md`). 200ms
-/// comfortably exceeds a healthy local handshake's own setup cost, so
-/// tiles visibly settle one after another rather than in a burst, while
-/// staying small enough that even a double-digit camera wall's last tile
-/// still starts its dial well inside `expanded_view`'s own multi-second
-/// per-tile timeout budget.
+// Each tile's dial is delayed by its index so the wall opens its relay connections one at a time.
 const STAGGER_MS: i32 = 200;
 
-/// The tv-bro Direct Navigation Mode hint (D-1 in
-/// `.agents/issue-21/DESIGN-tv-remote-navigation.md`), shared by
-/// `EnterFullscreenButton`'s own `title` attribute and its adjacent visible
-/// hint span so the two stay identical.
 const TV_BRO_HINT: &str = "tv-bro's long-press menu also has a Direct Navigation Mode toggle, for D-pad/keyboard navigation instead of its default touch-emulating cursor.";
 
-/// True for the two keys a `role="button"` element must treat as activation
-/// per the WAI-ARIA button pattern this wall's custom (non-`<button>`)
-/// clickable tiles follow -- `Enter` and `Space` (`" "` is the modern
-/// `KeyboardEvent.key` value; no browser this crate targets still reports
-/// the legacy `"Spacebar"`).
 fn is_activation_key(key: &str) -> bool {
     key == "Enter" || key == " "
+}
+
+const FULLSCREEN_DISPLAY_MODE: &str = "(display-mode: fullscreen)";
+
+/// True when the browser reports the page already fullscreen: by display mode, fullscreen element, or viewport coverage.
+fn page_is_fullscreen() -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    if js_sys::Reflect::get(window.as_ref(), &"matchMedia".into())
+        .ok()
+        .filter(JsValue::is_function)
+        .is_some_and(|match_media| {
+            match_media
+                .dyn_into::<js_sys::Function>()
+                .ok()
+                .and_then(|match_media| {
+                    match_media
+                        .call1(window.as_ref(), &FULLSCREEN_DISPLAY_MODE.into())
+                        .ok()
+                })
+                .and_then(|query| js_sys::Reflect::get(&query, &"matches".into()).ok())
+                .is_some_and(|matches| matches.as_bool() == Some(true))
+        })
+    {
+        return true;
+    }
+    if window
+        .document()
+        .is_some_and(|document| document.fullscreen_element().is_some())
+    {
+        return true;
+    }
+    let Ok(screen) = window.screen() else {
+        return false;
+    };
+    let (Ok(width), Ok(height)) = (screen.width(), screen.height()) else {
+        return false;
+    };
+    if width <= 0 || height <= 0 {
+        return false;
+    }
+    let (Some(inner_width), Some(inner_height)) = (
+        js_sys::Reflect::get(window.as_ref(), &"innerWidth".into())
+            .ok()
+            .and_then(|value| value.as_f64()),
+        js_sys::Reflect::get(window.as_ref(), &"innerHeight".into())
+            .ok()
+            .and_then(|value| value.as_f64()),
+    ) else {
+        return false;
+    };
+    inner_width + 1.0 >= f64::from(width) && inner_height + 1.0 >= f64::from(height)
 }
 
 #[component]
@@ -78,17 +90,6 @@ pub(crate) fn Monitor() -> impl IntoView {
     }
 }
 
-/// Lays out and mounts one tile per camera inside `.monitor-grid`, sized by
-/// `monitor_layout::pack_tiles` to exactly tile the grid's own real pixel
-/// box the moment that box and every camera's resolution are both known.
-///
-/// This does not wait on any tile's own MoQ/HLS connection state (D-6,
-/// `.agents/issue-20/DESIGN-monitor-mode.md`): `Camera.width`/`height` are
-/// already known from the same fetch that produced `cameras`, so layout
-/// runs once, right after this element mounts, and is never recomputed on
-/// a later connection event. It is also not recomputed on a browser
-/// window resize -- the wall's real deployment target is a fixed-size TV
-/// display loaded once per bookmark open, not a resizable desktop window.
 #[component]
 fn MonitorGrid(cameras: Vec<Camera>) -> impl IntoView {
     let grid_container = NodeRef::<html::Div>::new();
@@ -97,10 +98,14 @@ fn MonitorGrid(cameras: Vec<Camera>) -> impl IntoView {
         .map(|camera| (camera.width, camera.height))
         .collect();
     let layout = RwSignal::new(Vec::<TileRect>::new());
-    // Starts unarmed on every fresh page load; the prompt below is the only
-    // way to set it, and once set it stays set for the rest of this page's
-    // own lifetime (D-4) -- there is no code path that clears it back.
-    let armed = RwSignal::new(false);
+    let armed = RwSignal::new(page_is_fullscreen());
+    // Some browsers enter fullscreen a moment after load, so arming is re-checked on resize.
+    let fullscreen_watch = window_event_listener(leptos::ev::resize, move |_| {
+        if page_is_fullscreen() {
+            armed.set(true);
+        }
+    });
+    on_cleanup(move || fullscreen_watch.remove());
 
     Effect::new(move |_| {
         let Some(container) = grid_container.get() else {
@@ -123,36 +128,9 @@ fn MonitorGrid(cameras: Vec<Camera>) -> impl IntoView {
     }
 }
 
-/// The small top-left button that supplies the one real user gesture (click,
-/// or `Enter`/`Space`) D-4 accepted as the unavoidable cost of Chromium's
-/// transient-activation model on a browser (`RESEARCH-tvbro-fullscreen.md`)
-/// that offers no gesture-free path to the Fullscreen API. Issue #21's own
-/// follow-up: previously a full-viewport modal reading "Press OK to enter
-/// fullscreen", now sized and positioned like `MonitorTile`'s own
-/// `.monitor-tile-exit-fullscreen` button so the required gesture reads as
-/// an on-page control rather than a blocking dialog. A real `<button>`
-/// (mirroring that exit button's own markup), so `Enter`/`Space` activation
-/// is native and needs no manual keydown handling. Auto-focuses itself so a
-/// TV remote's very first "OK" press -- with nothing else yet focused on the
-/// page -- actually reaches it. Clicking it sets `armed` and this component
-/// stops rendering; nothing sets `armed` back to `false`, so it does not
-/// reappear for the rest of this page load.
-///
-/// The tv-bro Direct Navigation Mode hint (D-1 in
-/// `.agents/issue-21/DESIGN-tv-remote-navigation.md`) is carried two ways: as
-/// this button's `title`, for a mouse user hovering it, and as the adjacent
-/// `.monitor-enter-fullscreen-hint` span, shown only while the button itself
-/// has focus (`styles.css`'s `.monitor-enter-fullscreen:focus-visible +
-/// .monitor-enter-fullscreen-hint`). `title` alone is not enough: Chromium
-/// only ever shows it on mouse hover, never on keyboard/programmatic focus,
-/// so a sighted TV-remote/D-pad viewer -- who has no mouse and is exactly
-/// who this hint is for -- could never see it that way. The focus-visible
-/// span fixes that without permanently occupying screen space, and because
-/// this button auto-focuses on mount, it is also the first thing a fresh
-/// page load shows. The span is `aria-hidden` since a screen reader already
-/// gets the same text as this button's accessible description (`title`,
-/// per the HTML-AAM description computation, given `aria-label` already
-/// supplies the name) -- without it, the hint would be announced twice.
+/// The small top-left button supplying the one real user gesture a browser
+/// requires before `requestFullscreen()` can succeed, shown only until it has
+/// been pressed. Auto-focuses so a remote's first "OK" press reaches it.
 #[component]
 fn EnterFullscreenButton(armed: RwSignal<bool>) -> impl IntoView {
     let button_ref = NodeRef::<html::Button>::new();
@@ -178,9 +156,6 @@ fn EnterFullscreenButton(armed: RwSignal<bool>) -> impl IntoView {
     }
 }
 
-/// Renders `rect`'s placement as an inline `style` value, in the same
-/// convention `timeline.rs`'s own `timeline_segment_style` uses for its
-/// reactive per-element positioning.
 fn tile_placement_style(rect: TileRect) -> String {
     format!(
         "left: {:.4}px; top: {:.4}px; width: {:.4}px; height: {:.4}px",
@@ -188,10 +163,6 @@ fn tile_placement_style(rect: TileRect) -> String {
     )
 }
 
-/// One wall tile: names its camera, runs its own live session (staggered by
-/// `index * STAGGER_MS` on initial mount), and positions itself at
-/// `layout`'s entry for `index`, which `MonitorGrid` fills in once the
-/// wall's own packed layout is computed.
 #[component]
 fn MonitorTile(
     camera: Camera,
@@ -209,10 +180,6 @@ fn MonitorTile(
     let tile_container = NodeRef::<html::Div>::new();
     let player_container = NodeRef::<html::Div>::new();
     let path = RwSignal::new(LivePath::Connecting);
-    // Non-`Send`/non-`Sync` browser objects live behind these; `on_cleanup`
-    // still requires a `Send + Sync` closure regardless of target, which is
-    // sound here because a WASM build is always single-threaded -- see
-    // `expanded_view.rs`'s own `ExpandedView` for the identical rationale.
     let session = StoredValue::new_local(None::<ExpandedSession>);
     let pending_start = StoredValue::new(None::<i32>);
 
@@ -261,17 +228,6 @@ fn MonitorTile(
         }
     });
 
-    // Fullscreens this tile's own outer element in place (D-1) -- the same
-    // element that already hosts `player_container`/`session` above, so
-    // this touches neither: no re-mount, no reconnect, just a standard
-    // `Element.requestFullscreen()` call. The outer element (rather than
-    // `player_container` alone) is deliberate: it keeps the camera-name
-    // heading below visible over the video while fullscreened, via the
-    // existing `.monitor-tile h2` overlay style, matching how the tile
-    // already looks on the wall. Gated on `armed` (D-4): before the
-    // one-time prompt is dismissed, a tile click/keydown is a no-op rather
-    // than an attempted `requestFullscreen()` call that would silently
-    // fail for lack of a qualifying gesture.
     let enter_fullscreen = move || {
         if !armed.get_untracked() {
             return;
@@ -281,10 +237,6 @@ fn MonitorTile(
         }
     };
 
-    // The defensive on-page exit affordance this module's top doc describes
-    // (D-4). Unlike `request_fullscreen()`, `web_sys`'s `exit_fullscreen()`
-    // returns `()`, not a `Result` -- nothing to ignore, so this just calls
-    // it directly.
     let exit_fullscreen = move || {
         if let Some(document) = web_sys::window().and_then(|window| window.document()) {
             document.exit_fullscreen();
@@ -311,17 +263,6 @@ fn MonitorTile(
             }
         >
             <h2>{display_name}</h2>
-            // A real `<button>`, always mounted (never conditionally
-            // rendered), so there is no Rust-side `fullscreenchange` state to
-            // race -- `.monitor-tile-exit-fullscreen` in `styles.css` is what
-            // hides it outside `:fullscreen` and draws its glyph (kept out of
-            // this element's own text content, via `::before`, so it does
-            // not show up in `.monitor-tile`'s own aggregate text -- the
-            // camera name `<h2>` above is the tile's only real text).
-            // `stop_propagation` on both handlers keeps a click/Enter/Space
-            // aimed at this button from also bubbling into the tile's own
-            // `on:click`/`on:keydown` above and re-triggering
-            // `enter_fullscreen` (verified in `monitor.spec.cjs`).
             <button
                 type="button"
                 class="monitor-tile-exit-fullscreen"

@@ -98,6 +98,31 @@ const installLivePathLog = (page) => {
   });
 };
 
+// The wall treats a viewport that covers the screen as fullscreen; this runner
+// keeps `screen` equal to the viewport (its screen context option is ignored),
+// so every test defines a desktop-sized screen before any page loads.
+const useDesktopScreen = (page) =>
+  page.addInitScript(() => {
+    Object.defineProperty(window.screen, "width", { configurable: true, get: () => 1920 });
+    Object.defineProperty(window.screen, "height", { configurable: true, get: () => 1080 });
+  });
+
+// The video element's two failed-HLS-fallback messages are this harness's
+// documented rest state, not a page defect; any other page error is one.
+const unexpectedPageErrors = (page) => {
+  const errors = [];
+  page.on("pageerror", (error) => {
+    if (!/play\(\) request was interrupted|Failed to load because no supported source/.test(error.message)) {
+      errors.push(error.message);
+    }
+  });
+  return errors;
+};
+
+test.beforeEach(async ({ page }) => {
+  await useDesktopScreen(page);
+});
+
 test("visiting /monitor renders one placeholder tile per enabled camera", async ({ page }) => {
   await mockCameraList(page, [
     {
@@ -583,5 +608,105 @@ test.describe("on-page fullscreen-exit control", () => {
       await page.evaluate(() => window.__realRequestFullscreenCalls),
       "Enter's keydown did not also bubble into the tile's own on:keydown and re-enter fullscreen",
     ).toBe(1);
+  });
+});
+
+// When the browser already reports a fullscreen page -- its display mode, a
+// fullscreen element, or a viewport covering the whole screen -- the wall arms
+// itself at once and the gesture-arming button is never rendered.
+test.describe("when the page is already fullscreen", () => {
+  test.describe("the viewport covers the screen", () => {
+    test("the button is never shown, and one tile click requests fullscreen on that tile", async ({ page }) => {
+      const errors = unexpectedPageErrors(page);
+      await page.addInitScript(() => {
+        Object.defineProperty(window.screen, "width", { configurable: true, get: () => window.innerWidth });
+        Object.defineProperty(window.screen, "height", { configurable: true, get: () => window.innerHeight });
+      });
+      await installFullscreenMock(page);
+      await mockCameraList(page, nCameras(1));
+
+      await page.goto("/monitor");
+
+      await expect(page.getByRole("button", { name: "Enter fullscreen" })).toHaveCount(0);
+      await page.locator(".monitor-tile").first().click();
+      const requestedThatTile = await page.evaluate(
+        () =>
+          window.__fullscreenRequests.length === 1 &&
+          window.__fullscreenRequests[0] === document.querySelector(".monitor-tile"),
+      );
+      expect(requestedThatTile, "one tile click asked to fullscreen that tile").toBe(true);
+      expect(errors, "no page error").toEqual([]);
+    });
+  });
+
+  test("the fullscreen display mode is reported: the button is never shown, and one tile click requests fullscreen", async ({ page }) => {
+    const errors = unexpectedPageErrors(page);
+    await page.addInitScript(() => {
+      const realMatchMedia = window.matchMedia.bind(window);
+      window.matchMedia = (query) =>
+        query === "(display-mode: fullscreen)" ? { matches: true } : realMatchMedia(query);
+    });
+    await installFullscreenMock(page);
+    await mockCameraList(page, nCameras(1));
+
+    await page.goto("/monitor");
+
+    await expect(page.getByRole("button", { name: "Enter fullscreen" })).toHaveCount(0);
+    await page.locator(".monitor-tile").first().click();
+    expect(await page.evaluate(() => window.__fullscreenRequests.length)).toBe(1);
+    expect(errors, "no page error").toEqual([]);
+  });
+
+  test("a fullscreen element is set: the button is never shown", async ({ page }) => {
+    const errors = unexpectedPageErrors(page);
+    await page.addInitScript(() => {
+      Object.defineProperty(document, "fullscreenElement", {
+        configurable: true,
+        get: () => document.documentElement,
+      });
+    });
+    await mockCameraList(page, nCameras(1));
+
+    await page.goto("/monitor");
+
+    await expect(page.getByRole("button", { name: "Enter fullscreen" })).toHaveCount(0);
+    expect(errors, "no page error").toEqual([]);
+  });
+
+  test("the page goes fullscreen after load: the button disappears and does not come back when it stops", async ({ page }) => {
+    const errors = unexpectedPageErrors(page);
+    await mockCameraList(page, nCameras(1));
+
+    await page.goto("/monitor");
+    const button = page.getByRole("button", { name: "Enter fullscreen" });
+    await expect(button).toBeVisible();
+
+    await page.evaluate(() => {
+      Object.defineProperty(window.screen, "width", { configurable: true, get: () => window.innerWidth });
+      Object.defineProperty(window.screen, "height", { configurable: true, get: () => window.innerHeight });
+      window.dispatchEvent(new Event("resize"));
+    });
+    await expect(button, "the late fullscreen arms the wall and removes the button").toHaveCount(0);
+
+    await page.evaluate(() => {
+      Object.defineProperty(window.screen, "width", { configurable: true, get: () => 1920 });
+      Object.defineProperty(window.screen, "height", { configurable: true, get: () => 1080 });
+      window.dispatchEvent(new Event("resize"));
+    });
+    await expect(button, "the button does not come back once the wall is armed").toHaveCount(0);
+    expect(errors, "no page error").toEqual([]);
+  });
+
+  test("the page is not fullscreen: the button is shown, and a tile click before pressing it requests nothing", async ({ page }) => {
+    const errors = unexpectedPageErrors(page);
+    await installFullscreenMock(page);
+    await mockCameraList(page, nCameras(1));
+
+    await page.goto("/monitor");
+
+    await expect(page.getByRole("button", { name: "Enter fullscreen" })).toBeVisible();
+    await page.locator(".monitor-tile").first().dispatchEvent("click");
+    expect(await page.evaluate(() => window.__fullscreenRequests.length)).toBe(0);
+    expect(errors, "no page error").toEqual([]);
   });
 });
