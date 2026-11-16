@@ -169,6 +169,11 @@ pub fn cluster_region(
     cluster: &[usize],
     boxes: &[Region],
 ) -> Option<Region> {
+    let bounds = bounding_region(frame, cluster, boxes)?;
+    calculate_region(frame, bounds, floor, Margin::Cluster)
+}
+
+pub(crate) fn bounding_region(frame: Shape, cluster: &[usize], boxes: &[Region]) -> Option<Region> {
     let mut min_x = i64::try_from(frame.width()).ok()?;
     let mut min_y = i64::try_from(frame.height()).ok()?;
     let mut max_x: i64 = 0;
@@ -180,13 +185,12 @@ pub fn cluster_region(
         max_x = max_x.max(i64::from(picked.x2));
         max_y = max_y.max(i64::from(picked.y2));
     }
-    let bounds = Region {
+    Some(Region {
         x1: i32::try_from(min_x).ok()?,
         y1: i32::try_from(min_y).ok()?,
         x2: i32::try_from(max_x).ok()?,
         y2: i32::try_from(max_y).ok()?,
-    };
-    calculate_region(frame, bounds, floor, Margin::Cluster)
+    })
 }
 
 pub(crate) const fn within_domain(value: i64) -> bool {
