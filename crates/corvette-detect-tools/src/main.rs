@@ -6,6 +6,7 @@ pub mod compare;
 pub mod files;
 pub mod latency;
 pub mod motion_detect;
+pub mod regions;
 pub mod run;
 pub mod tensors;
 
@@ -26,6 +27,7 @@ usage: corvette-detect-tools COMMAND [flags]
   corvette-detect-tools motion-detect --luma FILE --width W --height H --out FILE
     motion-detect optional: --threshold --contour-area --improve-contrast --lightning-threshold --frame-alpha --frame-height --mask
   corvette-detect-tools annotate --luma FILE --width W --height H --boxes FILE --frames LIST --out DIR
+  corvette-detect-tools regions --boxes FILE --width W --height H --out FILE [--model-size S]
 flags are --name value pairs in any order
 exit codes:
   0  success; for compare, the maximum absolute error is not above the tolerance
@@ -68,6 +70,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, Failure> {
         "compare" => compare::run(tail),
         "motion-detect" => motion_detect::run(tail),
         "annotate" => annotate::run(tail),
+        "regions" => regions::run(tail),
         _ => Err(Failure::Usage),
     }
 }

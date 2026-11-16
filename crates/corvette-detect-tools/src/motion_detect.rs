@@ -103,14 +103,14 @@ fn finite_number(text: &str) -> Result<f64, Failure> {
         .ok_or(Failure::Usage)
 }
 
-fn shape_from(flags: &Flags) -> Result<Shape, Failure> {
+pub(crate) fn shape_from(flags: &Flags) -> Result<Shape, Failure> {
     let width = side(flags, "width")?;
     let height = side(flags, "height")?;
     Shape::new(width, height)
         .ok_or_else(|| Failure::Input(format!("no picture shape for {width} by {height}")))
 }
 
-fn side(flags: &Flags, name: &str) -> Result<usize, Failure> {
+pub(crate) fn side(flags: &Flags, name: &str) -> Result<usize, Failure> {
     flags
         .required(name)?
         .parse::<usize>()
