@@ -16,6 +16,7 @@ pub mod mask;
 pub mod plane;
 pub mod polygon;
 pub mod resize;
+pub mod resize_rgb;
 pub mod shape;
 pub mod shrink;
 
@@ -34,5 +35,6 @@ pub use mask::motion_keep_mask;
 pub use plane::{Image, Plane};
 pub use polygon::fill_polygons;
 pub use resize::resize_nearest;
+pub use resize_rgb::resize_linear_rgb;
 pub use shape::{Shape, motion_shape};
 pub use shrink::shrink_keep_mask;
