@@ -8,6 +8,7 @@ description = "Input tensor generators and output comparers for inference worker
 
 [dependencies]
 corvette-detect-proto = { path = "../corvette-detect-proto" }
+corvette-motion = { path = "../corvette-motion" }
 
 [dev-dependencies]
 corvette-detect-worker = { path = "../corvette-detect-worker" }
