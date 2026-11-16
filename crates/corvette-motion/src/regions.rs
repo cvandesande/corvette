@@ -114,12 +114,12 @@ pub fn cluster_region(
     calculate_region(frame, bounds, floor, Margin::Cluster)
 }
 
-const fn within_domain(value: i64) -> bool {
+pub(crate) const fn within_domain(value: i64) -> bool {
     value.abs() <= DOMAIN_LIMIT
 }
 
 /// Returns `None` unless `value` is finite, non-negative and below `2_147_483_648.0`.
-fn truncated(value: f64) -> Option<i32> {
+pub(crate) fn truncated(value: f64) -> Option<i32> {
     if !(0.0..2_147_483_648.0).contains(&value) {
         return None;
     }

@@ -23,6 +23,19 @@ with margin the word cluster (multiplier 1.35) or motion (multiplier 2). Random
 draws use a linear congruential rule: state = seed; each draw state = (state *
 6364136223846793005 + 1442695040888963407) mod 2**64, value = state >> 33, and
 randint(lo, hi) = lo + value % (hi - lo + 1).
+
+Fixture crates/corvette-motion/tests/fixtures/cluster_cases.txt, one case per line
+(box is x1 y1 x2 y2):
+
+    inside <box1> <box2> <0|1>
+    area <box> <result>
+    boundary <box> <floor> <rx1> <ry1> <rx2> <ry2>
+    candidates <frame_width> <frame_height> <floor> <x1,y1,x2,y2;...|-> <i,j;k;...|->
+
+with box1 the outer box and the candidate clusters sorted by their first member. The
+functions box_inside, area, get_cluster_boundary and get_cluster_candidates are
+extracted from object.py 313-317 and 376-443 and from image.py 719-720 of the same
+revision and run unchanged in the same namespace.
 """
 
 import hashlib
@@ -33,10 +46,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "crates/corvette-motion/tests/fixtures/region_cases.txt"
+FIXTURE2 = REPO / "crates/corvette-motion/tests/fixtures/cluster_cases.txt"
 IMAGE_BLOB = "ea9fb0a0a7f166d7b145c6c3af9941de673aebe3"
 OBJECT_BLOB = "b8f41e2c3214c22980f5227055aad348c9d6cd10"
 SEED = 20261116
 SEED2 = 20261117
+SEED3 = 20261118
 FRAMES = [(64, 48), (160, 120), (640, 480), (704, 576), (1280, 720), (1920, 1080), (100, 300)]
 FLOORS = [4, 32, 224, 252, 320, 640]
 
@@ -81,8 +96,14 @@ def frigate_namespace(frigate_dir):
     image = source_lines(frigate_dir, "frigate/util/image.py", IMAGE_BLOB)
     extract(image, 291, "def calculate_region", 314,
             "return (x_offset, y_offset, x_offset + size, y_offset + size)", namespace)
+    extract(image, 719, "def area(box):", 720,
+            "return (box[2] - box[0] + 1) * (box[3] - box[1] + 1)", namespace)
     obj = source_lines(frigate_dir, "frigate/util/object.py", OBJECT_BLOB)
     extract(obj, 270, "def get_min_region_size", 284, "return 320", namespace)
+    extract(obj, 313, "def box_inside(b1, b2):", 317, "return False", namespace)
+    extract(obj, 376, "def get_cluster_boundary(box, min_region):", 393, "]", namespace)
+    extract(obj, 396, "def get_cluster_candidates(frame_shape, min_region, boxes):", 443,
+            "return [list(tup) for tup in unique]", namespace)
     extract(obj, 446, "def get_cluster_region", 458, ")", namespace)
     return namespace
 
@@ -212,6 +233,96 @@ def main():
 
     FIXTURE.parent.mkdir(parents=True, exist_ok=True)
     FIXTURE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rng3 = Lcg(SEED3)
+    box_inside = namespace["box_inside"]
+    area = namespace["area"]
+    boundary = namespace["get_cluster_boundary"]
+    candidates = namespace["get_cluster_candidates"]
+    lines2 = []
+
+    def fmt(box):
+        return " ".join(str(v) for v in box)
+
+    def emit_inside(first, second):
+        verdict = 1 if box_inside(first, second) else 0
+        lines2.append(f"inside {fmt(first)} {fmt(second)} {verdict}")
+
+    for counter in range(300):
+        frame = FRAMES[rng3.randint(0, len(FRAMES) - 1)]
+        first = draw_box(rng3, frame)
+        lo_x, hi_x = min(first[0], first[2]), max(first[0], first[2])
+        lo_y, hi_y = min(first[1], first[3]), max(first[1], first[3])
+        part = counter % 5
+        if part == 0:
+            second = first
+        elif part == 1:
+            x1, y1 = rng3.randint(lo_x, hi_x), rng3.randint(lo_y, hi_y)
+            second = (x1, y1, rng3.randint(x1, hi_x), rng3.randint(y1, hi_y))
+        elif part == 2:
+            x1 = first[2] + rng3.randint(0, 1)
+            second = (x1, first[1], x1 + rng3.randint(1, 50), first[3])
+        elif part == 3:
+            x1 = hi_x + rng3.randint(100, 500)
+            second = (x1, first[1], x1 + 10, first[3] + 10)
+        else:
+            second = draw_box(rng3, frame)
+        emit_inside(first, second)
+
+    for counter in range(200):
+        frame = FRAMES[rng3.randint(0, len(FRAMES) - 1)]
+        part = counter % 4
+        if part == 0:
+            x, y = rng3.randint(-50, 2000), rng3.randint(-50, 2000)
+            box = (x, y, x, y)
+        elif part == 1:
+            x, y = rng3.randint(-2000, -1), rng3.randint(-2000, -1)
+            box = (x, y, x - rng3.randint(1, 500), y - rng3.randint(1, 500))
+        elif part == 2:
+            box = draw_inside_box(rng3, frame)
+        else:
+            x, y = rng3.randint(0, 1000), rng3.randint(0, 1000)
+            box = (x, y, x - rng3.randint(0, 300), y + rng3.randint(0, 300))
+        lines2.append(f"area {fmt(box)} {area(box)}")
+
+    for counter in range(500):
+        if counter % 4 == 0:
+            wide, high = rng3.randint(0, 1500), rng3.randint(0, 1500)
+        else:
+            wide, high = rng3.randint(0, 200), rng3.randint(0, 200)
+        dx = -wide if counter % 8 == 3 else wide
+        dy = -high if counter % 9 == 4 else high
+        x1, y1 = rng3.randint(-50, 2000), rng3.randint(-50, 2000)
+        box = (x1, y1, x1 + dx, y1 + dy)
+        floor = FLOORS[rng3.randint(0, len(FLOORS) - 1)]
+        result = " ".join(str(v) for v in boundary(box, floor))
+        lines2.append(f"boundary {fmt(box)} {floor} {result}")
+
+    for counter in range(400):
+        frame = FRAMES[rng3.randint(0, len(FRAMES) - 1)]
+        wide, high = frame
+        floor = FLOORS[rng3.randint(0, len(FLOORS) - 1)]
+        boxes = []
+        if counter % 3 < 2:
+            for _ in range(rng3.randint(2, 3)):
+                anchor_x = rng3.randint(0, wide - 1)
+                anchor_y = rng3.randint(0, high - 1)
+                size = rng3.randint(20, 250)
+                for _ in range(rng3.randint(1, 3)):
+                    x1 = anchor_x + rng3.randint(-size, size)
+                    y1 = anchor_y + rng3.randint(-size, size)
+                    boxes.append((x1, y1, x1 + rng3.randint(0, size), y1 + rng3.randint(0, size)))
+        else:
+            for _ in range(rng3.randint(0, 10)):
+                x1 = rng3.randint(0, wide - 1)
+                y1 = rng3.randint(0, high - 1)
+                boxes.append((x1, y1, x1 + rng3.randint(0, wide - 1 - x1), y1 + rng3.randint(0, high - 1 - y1)))
+        result = sorted(sorted(cluster) for cluster in candidates((high, wide), floor, boxes))
+        box_text = ";".join(",".join(str(v) for v in b) for b in boxes) if boxes else "-"
+        cluster_text = ";".join(",".join(str(i) for i in c) for c in result) if result else "-"
+        lines2.append(f"candidates {wide} {high} {floor} {box_text} {cluster_text}")
+
+    FIXTURE2.write_text("\n".join(lines2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

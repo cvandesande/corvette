@@ -3,6 +3,7 @@
 
 pub mod average;
 pub mod blur;
+pub mod clusters;
 pub mod colour;
 pub mod contours;
 pub mod contrast;
@@ -24,6 +25,7 @@ pub mod tensor;
 
 pub use average::RunningAverage;
 pub use blur::{GAUSSIAN_CENTRE_WEIGHT, GAUSSIAN_OUTER_WEIGHT, gaussian_blur};
+pub use clusters::{box_area, box_inside, cluster_boundary, cluster_candidates};
 pub use colour::i420_to_rgb;
 pub use contours::{Contour, external_contours};
 pub use contrast::contrast_bounds;
