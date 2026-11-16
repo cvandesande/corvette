@@ -19,6 +19,7 @@ pub mod resize;
 pub mod resize_rgb;
 pub mod shape;
 pub mod shrink;
+pub mod tensor;
 
 pub use average::RunningAverage;
 pub use blur::{GAUSSIAN_CENTRE_WEIGHT, GAUSSIAN_OUTER_WEIGHT, gaussian_blur};
@@ -38,3 +39,4 @@ pub use resize::resize_nearest;
 pub use resize_rgb::resize_linear_rgb;
 pub use shape::{Shape, motion_shape};
 pub use shrink::shrink_keep_mask;
+pub use tensor::{TensorError, region_tensor};
