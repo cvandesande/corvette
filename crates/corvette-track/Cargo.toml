@@ -1,0 +1,10 @@
+[package]
+name = "corvette-track"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure tracking logic for the Corvette detector: the object filters"
+
+[lints]
+workspace = true

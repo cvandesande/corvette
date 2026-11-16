@@ -55,6 +55,7 @@ corvette-media-bridge
 corvette-motion
 corvette-ncnn
 corvette-rtsp-client
+corvette-track
 corvette-ui
 corvette-ui-server
 corvette-yolo

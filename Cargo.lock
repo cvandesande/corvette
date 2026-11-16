@@ -524,6 +524,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "corvette-track"
+version = "0.1.0"
+
+[[package]]
 name = "corvette-ui"
 version = "0.1.0"
 dependencies = [
