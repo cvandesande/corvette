@@ -142,6 +142,10 @@ delegation, except a decision that names its own date and adopter.
   GPU stack stays in the worker's image, and supervision is the kubelet's
   alone. The split moves to one container with an in-service supervisor
   only if the kubelet's restart back-off proves too slow in a test window.
+  Revised by the human on 2026-11-16, amendment pending: the pod runs three
+  containers (serving, relay, detection) and the detection service supervises
+  the worker as its child. Until the amendment lands, this paragraph and the
+  worker's container, probe and kubelet-restart statements are superseded.
 - **Detection configuration.** Corvette owns its detection configuration file.
   A converter seeds it once from a snapshot of the current backing's resolved
   configuration (Frigate), and the file is Corvette's from then on. Comparison
