@@ -141,11 +141,11 @@ fn mask_from(flags: &Flags, shape: Shape, frame_height: usize) -> Result<Option<
     Ok(Some(keep))
 }
 
-fn open_input(path: &str) -> Result<File, Failure> {
+pub(crate) fn open_input(path: &str) -> Result<File, Failure> {
     File::open(path).map_err(|error| Failure::Input(format!("cannot read {path}: {error}")))
 }
 
-fn open_output(path: &str) -> Result<File, Failure> {
+pub(crate) fn open_output(path: &str) -> Result<File, Failure> {
     File::create(path).map_err(|error| Failure::Input(format!("cannot write {path}: {error}")))
 }
 

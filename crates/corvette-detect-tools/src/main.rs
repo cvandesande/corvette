@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod annotate;
 pub mod args;
 pub mod compare;
 pub mod files;
@@ -24,6 +25,7 @@ usage: corvette-detect-tools COMMAND [flags]
   corvette-detect-tools compare --a DIR --b DIR [--tolerance T]
   corvette-detect-tools motion-detect --luma FILE --width W --height H --out FILE
     motion-detect optional: --threshold --contour-area --improve-contrast --lightning-threshold --frame-alpha --frame-height --mask
+  corvette-detect-tools annotate --luma FILE --width W --height H --boxes FILE --frames LIST --out DIR
 flags are --name value pairs in any order
 exit codes:
   0  success; for compare, the maximum absolute error is not above the tolerance
@@ -65,6 +67,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, Failure> {
         "run" => run::run(tail),
         "compare" => compare::run(tail),
         "motion-detect" => motion_detect::run(tail),
+        "annotate" => annotate::run(tail),
         _ => Err(Failure::Usage),
     }
 }
