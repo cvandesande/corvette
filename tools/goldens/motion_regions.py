@@ -36,6 +36,20 @@ with box1 the outer box and the candidate clusters sorted by their first member.
 functions box_inside, area, get_cluster_boundary and get_cluster_candidates are
 extracted from object.py 313-317 and 376-443 and from image.py 719-720 of the same
 revision and run unchanged in the same namespace.
+
+Fixture crates/corvette-motion/tests/fixtures/region_float_cases.txt, one case per
+line (floats written with Python's repr, which reads back bit-exact):
+
+    fregion <frame_width> <frame_height> <floor> <margin> <xmin> <ymin> <xmax> <ymax> <rx1> <ry1> <rx2> <ry2>
+
+with margin the word cluster (multiplier 1.35), motion (multiplier 2) or exact
+(multiplier 1); the result is calculate_region run on the float bounds. Draws come
+from a fourth Lcg(SEED4) in this order: 200 grow-like motion boxes built from a cell
+mean size around a centroid, 200 startup-like exact boxes on an eight-by-eight grid,
+200 free float boxes on eighths and tenths with margins cycling and one case in ten
+inverted, 100 whole-number floats of the draw_box boxes with margins cycling, and 200
+noise boxes whose width is one unit in the last place from a whole number of quarter
+sizes.
 """
 
 import hashlib
@@ -47,11 +61,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "crates/corvette-motion/tests/fixtures/region_cases.txt"
 FIXTURE2 = REPO / "crates/corvette-motion/tests/fixtures/cluster_cases.txt"
+FIXTURE3 = REPO / "crates/corvette-motion/tests/fixtures/region_float_cases.txt"
 IMAGE_BLOB = "ea9fb0a0a7f166d7b145c6c3af9941de673aebe3"
 OBJECT_BLOB = "b8f41e2c3214c22980f5227055aad348c9d6cd10"
 SEED = 20261116
 SEED2 = 20261117
 SEED3 = 20261118
+SEED4 = 20261119
 FRAMES = [(64, 48), (160, 120), (640, 480), (704, 576), (1280, 720), (1920, 1080), (100, 300)]
 FLOORS = [4, 32, 224, 252, 320, 640]
 
@@ -323,6 +339,76 @@ def main():
         lines2.append(f"candidates {wide} {high} {floor} {box_text} {cluster_text}")
 
     FIXTURE2.write_text("\n".join(lines2) + "\n", encoding="utf-8")
+
+    rng4 = Lcg(SEED4)
+    margins = [("cluster", 1.35), ("motion", 2.0), ("exact", 1.0)]
+    lines3 = []
+
+    def emit_fregion(frame, box, floor, margin, multiplier):
+        width, height = frame
+        r = calculate((height, width), box[0], box[1], box[2], box[3], floor, multiplier)
+        box_text = " ".join(repr(v) for v in box)
+        result_text = " ".join(str(v) for v in r)
+        lines3.append(f"fregion {width} {height} {floor} {margin} {box_text} {result_text}")
+
+    for _ in range(200):
+        frame = FRAMES[rng4.randint(0, len(FRAMES) - 1)]
+        width, height = frame
+        cx = rng4.randint(0, width)
+        cy = rng4.randint(0, height)
+        mean = rng4.randint(50, 1300) / 1000
+        size = mean * width
+        box = (max(0, cx - size / 2), max(0, cy - size / 2),
+               min(width, cx + size / 2), min(height, cy + size / 2))
+        emit_fregion(frame, box, FLOORS[rng4.randint(0, len(FLOORS) - 1)], "motion", 2.0)
+
+    for _ in range(200):
+        frame = FRAMES[rng4.randint(0, len(FRAMES) - 1)]
+        width, height = frame
+        gx = rng4.randint(0, 7)
+        gy = rng4.randint(0, 7)
+        x = width / 8 * (0.5 + gx)
+        y = height / 8 * (0.5 + gy)
+        mean = rng4.randint(50, 1300) / 1000
+        size = mean * width
+        box = (x - size / 2, y - size / 2, x + size / 2, y + size / 2)
+        emit_fregion(frame, box, FLOORS[rng4.randint(0, len(FLOORS) - 1)], "exact", 1.0)
+
+    for counter in range(200):
+        frame = FRAMES[rng4.randint(0, len(FRAMES) - 1)]
+        unit = 8 if counter % 2 == 0 else 10
+        xmin = rng4.randint(-1000, 20000) / unit
+        ymin = rng4.randint(-1000, 20000) / unit
+        xmax = xmin + rng4.randint(0, 4800) / unit
+        ymax = ymin + rng4.randint(0, 4800) / unit
+        box = [xmin, ymin, xmax, ymax]
+        if counter % 10 == 0:
+            if counter % 20 == 0:
+                box[0], box[2] = box[2], box[0]
+            else:
+                box[1], box[3] = box[3], box[1]
+        margin, multiplier = margins[counter % 3]
+        emit_fregion(frame, tuple(box), FLOORS[rng4.randint(0, len(FLOORS) - 1)], margin, multiplier)
+
+    for counter in range(100):
+        frame = FRAMES[rng4.randint(0, len(FRAMES) - 1)]
+        box = tuple(float(v) for v in draw_box(rng4, frame))
+        margin, multiplier = margins[counter % 3]
+        emit_fregion(frame, box, FLOORS[rng4.randint(0, len(FLOORS) - 1)], margin, multiplier)
+
+    for counter in range(200):
+        frame = FRAMES[rng4.randint(0, len(FRAMES) - 1)]
+        k = rng4.randint(1, 400)
+        margin, multiplier = margins[counter % 3]
+        limit = 4 * k / multiplier
+        span = [limit, math.nextafter(limit, 0.0), math.nextafter(limit, math.inf)][(counter // 3) % 3]
+        origin_x = rng4.randint(0, 500) / 8
+        origin_y = rng4.randint(0, 500) / 8
+        height = rng4.randint(0, 100)
+        box = (origin_x, origin_y, origin_x + span, origin_y + height)
+        emit_fregion(frame, box, FLOORS[rng4.randint(0, len(FLOORS) - 1)], margin, multiplier)
+
+    FIXTURE3.write_text("\n".join(lines3) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -38,7 +38,9 @@ pub use dilate::dilate_3x3;
 pub use mask::motion_keep_mask;
 pub use plane::{Image, Plane};
 pub use polygon::fill_polygons;
-pub use regions::{Margin, calculate_region, cluster_region, min_region_size};
+pub use regions::{
+    Bounds, Margin, calculate_region, calculate_region_f64, cluster_region, min_region_size,
+};
 pub use resize::resize_nearest;
 pub use resize_rgb::resize_linear_rgb;
 pub use shape::{Shape, motion_shape};

@@ -1,5 +1,5 @@
 use crate::crop::Region;
-use crate::regions::{cluster_region, truncated, within_domain};
+use crate::regions::{cluster_region, truncated, truncated_signed, within_domain};
 use crate::shape::Shape;
 
 const AREA_RATIO: f64 = 0.05;
@@ -135,12 +135,4 @@ fn f64_area(b: Region) -> Option<f64> {
     let width = i32::try_from(i64::from(b.x2) - i64::from(b.x1) + 1).ok()?;
     let height = i32::try_from(i64::from(b.y2) - i64::from(b.y1) + 1).ok()?;
     Some(f64::from(width) * f64::from(height))
-}
-
-fn truncated_signed(value: f64) -> Option<i32> {
-    if value < 0.0 {
-        truncated(-value)?.checked_neg()
-    } else {
-        truncated(value)
-    }
 }
