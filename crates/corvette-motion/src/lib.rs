@@ -3,9 +3,11 @@
 
 pub mod average;
 pub mod blur;
+pub mod colour;
 pub mod contours;
 pub mod contrast;
 pub mod contrast_history;
+pub mod crop;
 pub mod decision;
 pub mod detector;
 pub mod difference;
@@ -19,9 +21,11 @@ pub mod shrink;
 
 pub use average::RunningAverage;
 pub use blur::{GAUSSIAN_CENTRE_WEIGHT, GAUSSIAN_OUTER_WEIGHT, gaussian_blur};
+pub use colour::i420_to_rgb;
 pub use contours::{Contour, external_contours};
 pub use contrast::contrast_bounds;
 pub use contrast_history::ContrastHistory;
+pub use crop::{Region, RegionError, crop_pad_i420};
 pub use decision::{Decision, MotionBox, MotionDecider, MotionSettings};
 pub use detector::MotionDetector;
 pub use difference::{absolute_difference, threshold_above};
