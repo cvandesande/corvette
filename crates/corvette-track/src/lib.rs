@@ -3,6 +3,8 @@
 pub mod filters;
 pub mod mapping;
 pub mod merge;
+pub mod reduce;
 pub use filters::{Candidate, ObjectFilter, ObjectFilters, ObjectMask, Rejection};
 pub use mapping::{Frame, Geometry, Region, Skipped, map_box};
 pub use merge::{Detection, clipped, consolidate, inclusive_area, intersection};
+pub use reduce::reduce_detections;

@@ -4,7 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Pure tracking logic for the Corvette detector: the object filters"
+description = "Pure tracking logic for the Corvette detector: the object filters, the box mapping and the detection merge"
+
+[dependencies]
+corvette-yolo = { path = "../corvette-yolo" }
 
 [lints]
 workspace = true

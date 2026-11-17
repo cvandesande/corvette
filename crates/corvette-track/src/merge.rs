@@ -66,7 +66,7 @@ const fn box_edges(geometry: Geometry) -> [i64; 4] {
     ]
 }
 
-fn to_f64(value: i64) -> Option<f64> {
+pub(crate) fn to_f64(value: i64) -> Option<f64> {
     let high = i32::try_from(value.div_euclid(SPLIT)).ok()?;
     let low = u32::try_from(value.rem_euclid(SPLIT)).ok()?;
     let scaled = f64::from(high) * 4_294_967_296.0;
