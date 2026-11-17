@@ -25,19 +25,52 @@ impl ObjectMask {
         })
     }
 
-    fn masks(&self, candidate: &Candidate<'_>) -> bool {
-        let row = u64::from(candidate.y_max);
-        let row = usize::try_from(row).map_or(self.height - 1, |row| row.min(self.height - 1));
-        let mid = u64::from(candidate.x_min) + u64::from(candidate.x_max);
-        let col = usize::try_from(mid / 2).map_or(self.width - 1, |col| col.min(self.width - 1));
-        self.bytes.get(row * self.width + col) == Some(&0)
+    fn cell(&self, candidate: &Candidate<'_>) -> Cell {
+        let Ok(height) = i64::try_from(self.height) else {
+            return Cell::Outside;
+        };
+        let Ok(width) = i64::try_from(self.width) else {
+            return Cell::Outside;
+        };
+        let row = candidate.y_max.min(height - 1);
+        let mid = candidate.x_min.saturating_add(candidate.x_max) / 2;
+        let col = mid.min(width - 1);
+        let Some(row) = resolve(row, height) else {
+            return Cell::Outside;
+        };
+        let Some(col) = resolve(col, width) else {
+            return Cell::Outside;
+        };
+        if self.bytes.get(row * self.width + col) == Some(&0) {
+            Cell::Masked
+        } else {
+            Cell::Open
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cell {
+    Open,
+    Masked,
+    Outside,
+}
+
+fn resolve(index: i64, length: i64) -> Option<usize> {
+    let placed = if (0..length).contains(&index) {
+        index
+    } else if (-length..0).contains(&index) {
+        length + index
+    } else {
+        return None;
+    };
+    usize::try_from(placed).ok()
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectFilter {
-    pub min_area: u64,
-    pub max_area: u64,
+    pub min_area: i64,
+    pub max_area: i64,
     pub min_score: f64,
     pub min_ratio: f64,
     pub max_ratio: f64,
@@ -61,11 +94,11 @@ impl Default for ObjectFilter {
 pub struct Candidate<'a> {
     pub label: &'a str,
     pub score: f32,
-    pub x_min: u32,
-    pub y_min: u32,
-    pub x_max: u32,
-    pub y_max: u32,
-    pub area: u64,
+    pub x_min: i64,
+    pub y_min: i64,
+    pub x_max: i64,
+    pub y_max: i64,
+    pub area: i64,
     pub ratio: f64,
 }
 
@@ -78,6 +111,7 @@ pub enum Rejection {
     MinRatio,
     MaxRatio,
     Masked,
+    OutsideMask,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -115,12 +149,10 @@ impl ObjectFilters {
         if filter.max_ratio < candidate.ratio {
             return Some(Rejection::MaxRatio);
         }
-        if filter
-            .mask
-            .as_ref()
-            .is_some_and(|mask| mask.masks(candidate))
-        {
-            return Some(Rejection::Masked);
+        match filter.mask.as_ref().map(|mask| mask.cell(candidate)) {
+            Some(Cell::Masked) => return Some(Rejection::Masked),
+            Some(Cell::Outside) => return Some(Rejection::OutsideMask),
+            Some(Cell::Open) | None => {}
         }
         None
     }

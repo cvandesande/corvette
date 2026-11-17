@@ -34,6 +34,7 @@ const fn stage_name(stage: Option<Rejection>) -> &'static str {
         Some(Rejection::MinRatio) => "MinRatio",
         Some(Rejection::MaxRatio) => "MaxRatio",
         Some(Rejection::Masked) => "Masked",
+        Some(Rejection::OutsideMask) => "OutsideMask",
     }
 }
 
@@ -63,7 +64,7 @@ fn check(filters: &ObjectFilters, rows: &[&str]) {
     }
 }
 
-fn hand() -> (ObjectFilter, ObjectFilter, ObjectFilter) {
+fn hand() -> (ObjectFilter, ObjectFilter, ObjectFilter, ObjectFilter) {
     let person = ObjectFilter {
         min_area: 400,
         max_area: 100_000,
@@ -102,11 +103,19 @@ fn hand() -> (ObjectFilter, ObjectFilter, ObjectFilter) {
         max_ratio: 1.1,
         mask: None,
     };
-    (person, car, bird)
+    let horse = ObjectFilter {
+        min_area: -1000,
+        max_area: 100_000,
+        min_score: 0.5,
+        min_ratio: -2.0,
+        max_ratio: 3.0,
+        mask: None,
+    };
+    (person, car, bird, horse)
 }
 
 fn build(entries: &[(&str, &ObjectFilter)]) -> ObjectFilters {
-    let track = label_list("person,car,dog");
+    let track = label_list("person,car,dog,horse");
     let mut filters = BTreeMap::new();
     for (label, filter) in entries {
         filters.insert((*label).to_owned(), (*filter).clone());
@@ -116,7 +125,7 @@ fn build(entries: &[(&str, &ObjectFilter)]) -> ObjectFilters {
 
 #[test]
 fn an_untracked_label_is_rejected_first() {
-    let (person, car, bird) = hand();
+    let (person, car, bird, _) = hand();
     let filters = build(&[("person", &person), ("car", &car), ("bird", &bird)]);
     check(
         &filters,
@@ -131,7 +140,7 @@ fn an_untracked_label_is_rejected_first() {
 
 #[test]
 fn min_area_stage() {
-    let (person, _, _) = hand();
+    let (person, _, _, _) = hand();
     let filters = build(&[("person", &person)]);
     check(
         &filters,
@@ -144,7 +153,7 @@ fn min_area_stage() {
 
 #[test]
 fn max_area_stage() {
-    let (person, _, _) = hand();
+    let (person, _, _, _) = hand();
     let filters = build(&[("person", &person)]);
     check(
         &filters,
@@ -157,7 +166,7 @@ fn max_area_stage() {
 
 #[test]
 fn min_score_stage() {
-    let (person, _, _) = hand();
+    let (person, _, _, _) = hand();
     let filters = build(&[("person", &person)]);
     let row8 = "person 0.7 10 10 90 90 6400 1.0 MinScore";
     check(&filters, &[row8, "person 0.75 10 10 90 90 6400 1.0 None"]);
@@ -166,7 +175,7 @@ fn min_score_stage() {
 
 #[test]
 fn ratio_stages() {
-    let (person, _, _) = hand();
+    let (person, _, _, _) = hand();
     let filters = build(&[("person", &person)]);
     check(
         &filters,
@@ -181,7 +190,7 @@ fn ratio_stages() {
 
 #[test]
 fn mask_stage() {
-    let (person, car, _) = hand();
+    let (person, car, _, _) = hand();
     let filters = build(&[("person", &person), ("car", &car)]);
     check(
         &filters,
@@ -199,7 +208,7 @@ fn mask_stage() {
 
 #[test]
 fn stages_apply_in_frigates_order() {
-    let (person, car, _) = hand();
+    let (person, car, _, _) = hand();
     let filters = build(&[("person", &person), ("car", &car)]);
     check(
         &filters,
@@ -217,7 +226,7 @@ fn stages_apply_in_frigates_order() {
 
 #[test]
 fn a_tracked_label_without_a_filter_is_kept() {
-    let (person, car, _) = hand();
+    let (person, car, _, _) = hand();
     let filters = build(&[("person", &person), ("car", &car)]);
     check(
         &filters,
@@ -270,7 +279,7 @@ fn mask_column_sums_box_edges_without_wrapping() {
 
 #[test]
 fn labels_match_exactly() {
-    let (person, car, _) = hand();
+    let (person, car, _, _) = hand();
     check(
         &build(&[("person", &person), ("car", &car)]),
         &[
@@ -300,11 +309,49 @@ fn inverted_area_limits_name_the_minimum_first() {
 }
 
 #[test]
+fn negative_mask_indexes_follow_pythons_rules() {
+    let (person, car, _, _) = hand();
+    let filters = build(&[("person", &person), ("car", &car)]);
+    let rows = [
+        "person 0.9 0 0 0 -1 6400 1.0 None",
+        "person 0.9 0 0 0 -3 6400 1.0 Masked",
+        "person 0.9 0 0 0 -4 6400 1.0 OutsideMask",
+        "person 0.9 0 0 -9 0 6400 1.0 Masked",
+        "person 0.9 0 0 -10 0 6400 1.0 OutsideMask",
+        "person 0.9 1 0 -3 0 6400 1.0 None",
+        "person 0.9 0 0 -1 0 6400 1.0 Masked",
+        "car 0.9 10 0 90 -1 6400 1.0 Masked",
+    ];
+    check(&filters, &rows);
+    for row in rows {
+        let dropped = !row.ends_with(" None");
+        assert_eq!(filters.is_filtered(&parse_row(row)), dropped, "row: {row}");
+    }
+}
+
+#[test]
+fn signed_area_and_ratio_limits() {
+    let (person, _, _, horse) = hand();
+    let filters = build(&[("person", &person), ("horse", &horse)]);
+    check(
+        &filters,
+        &[
+            "horse 0.9 0 0 0 0 -1000 -2.0 None",
+            "horse 0.9 0 0 0 0 -1001 1.0 MinArea",
+            "horse 0.9 0 0 0 0 6400 -2.1 MinRatio",
+            "horse 0.9 0 0 0 0 6400 -2.0 None",
+            "person 0.9 0 0 0 0 -1 1.0 MinArea",
+        ],
+    );
+}
+
+#[test]
 fn fixture_matches_frigate_on_every_case() {
     let mut tracks: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     let mut sets: BTreeMap<&str, BTreeMap<String, ObjectFilter>> = BTreeMap::new();
     let mut total = 0_usize;
     let mut stages: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut negative = [0_usize; 3];
     for (index, line) in FIXTURE.lines().enumerate() {
         let line_no = index + 1;
         let fields: Vec<&str> = line.split_whitespace().collect();
@@ -352,20 +399,34 @@ fn fixture_matches_frigate_on_every_case() {
                     "fixture line {line_no}"
                 );
                 *stages.entry(fields[10]).or_insert(0) += 1;
+                negative[0] += usize::from(candidate.area < 0);
+                negative[1] += usize::from(candidate.x_max < 0);
+                negative[2] += usize::from(candidate.y_max < 0);
                 total += 1;
             }
             other => panic!("fixture line {line_no}: unknown kind {other}"),
         }
     }
-    assert_eq!(total, 3000);
-    assert!(stages.get("None").copied().unwrap_or(0) >= 676);
-    assert!(stages.get("NotTracked").copied().unwrap_or(0) >= 437);
-    assert!(stages.get("MinArea").copied().unwrap_or(0) >= 307);
-    assert!(stages.get("MaxArea").copied().unwrap_or(0) >= 343);
-    assert!(stages.get("MinScore").copied().unwrap_or(0) >= 311);
-    assert!(stages.get("MinRatio").copied().unwrap_or(0) >= 304);
-    assert!(stages.get("MaxRatio").copied().unwrap_or(0) >= 307);
-    assert!(stages.get("Masked").copied().unwrap_or(0) >= 315);
+    assert_eq!(total, 4000);
+    for stage in [
+        "None",
+        "NotTracked",
+        "MinArea",
+        "MaxArea",
+        "MinScore",
+        "MinRatio",
+        "MaxRatio",
+        "Masked",
+        "OutsideMask",
+    ] {
+        assert!(
+            stages.get(stage).copied().unwrap_or(0) >= 150,
+            "stage {stage}: {stages:?}"
+        );
+    }
+    assert!(negative[0] >= 200, "negative area cases: {}", negative[0]);
+    assert!(negative[1] >= 200, "negative x_max cases: {}", negative[1]);
+    assert!(negative[2] >= 200, "negative y_max cases: {}", negative[2]);
 }
 
 fn parse_case<'a>(fields: &[&'a str]) -> Candidate<'a> {
