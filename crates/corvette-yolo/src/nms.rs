@@ -18,7 +18,8 @@ fn std_min(a: f64, b: f64) -> f64 {
     if b < a { b } else { a }
 }
 
-const fn round_f64_to_f32(value: f64) -> f32 {
+#[must_use]
+pub const fn round_f64_to_f32(value: f64) -> f32 {
     let bits = value.to_bits();
     let sign = ((bits >> 32) & 0x8000_0000) as u32;
     let exponent = ((bits >> 52) & 0x7ff) as i32;

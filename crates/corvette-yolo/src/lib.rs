@@ -23,4 +23,4 @@ pub fn normalize(rgb: &[u8; RGB_BYTES]) -> Vec<f32> {
 pub mod decode;
 pub use decode::{Detection, decode};
 pub mod nms;
-pub use nms::{Candidate, Rect, nms_boxes};
+pub use nms::{Candidate, Rect, nms_boxes, round_f64_to_f32};
