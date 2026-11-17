@@ -106,8 +106,8 @@ fn pixel_from_relative(relative: f64, scale: f64) -> Option<i32> {
 }
 
 fn point_inside(polygon: &[[i32; 2]], x: i32, y: i32) -> bool {
-    let px = i64::from(x);
-    let py = i64::from(y);
+    let px = i128::from(x);
+    let py = i128::from(y);
     let closing = polygon.last().zip(polygon.first());
     let edges = closing
         .into_iter()
@@ -116,8 +116,8 @@ fn point_inside(polygon: &[[i32; 2]], x: i32, y: i32) -> bool {
     for (a, b) in edges {
         let [ax, ay] = *a;
         let [bx, by] = *b;
-        let (ax, ay) = (i64::from(ax), i64::from(ay));
-        let (bx, by) = (i64::from(bx), i64::from(by));
+        let (ax, ay) = (i128::from(ax), i128::from(ay));
+        let (bx, by) = (i128::from(bx), i128::from(by));
         let dx = bx - ax;
         let dy = by - ay;
         let on_edge = dx * (py - ay) == dy * (px - ax)

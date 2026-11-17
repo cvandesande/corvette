@@ -485,3 +485,24 @@ fn empty_zone_set_observes_without_entries() {
     assert!(state.current.is_empty());
     assert!(state.entered.is_empty());
 }
+
+#[test]
+fn extreme_coordinates_do_not_overflow() {
+    let zone = Zone {
+        name: "z0".to_string(),
+        polygon: vec![
+            [i32::MIN, i32::MIN],
+            [i32::MAX, i32::MIN],
+            [i32::MIN, i32::MAX],
+        ],
+        labels: Vec::new(),
+        inertia: 1,
+    };
+    let mut zone_set = ZoneSet::new(vec![zone]);
+    let inside = zone_set.observe(1, "person", -1_000_000_000, -1_500_000_000);
+    assert_eq!(inside.current, vec!["z0".to_string()]);
+    let on_edge = zone_set.observe(2, "person", 1_000_000_000, i32::MIN);
+    assert_eq!(on_edge.current, vec!["z0".to_string()]);
+    let outside = zone_set.observe(3, "person", 1_000_000_000, 1_500_000_000);
+    assert!(outside.current.is_empty());
+}
