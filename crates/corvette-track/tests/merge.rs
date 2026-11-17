@@ -309,7 +309,7 @@ fn check_merge_line(
         .iter()
         .map(|token| parse_det(token, line_no))
         .collect();
-    let expected: Vec<usize> = if arrow + 1 == tokens.len() && tokens[arrow + 1] == "-" {
+    let expected: Vec<usize> = if arrow + 1 < tokens.len() && tokens[arrow + 1] == "-" {
         Vec::new()
     } else {
         tokens[arrow + 1..]
@@ -506,4 +506,17 @@ fn fixture_matches_frigate_on_every_case() {
         }
     }
     assert_fixture_counts(&header, &counts);
+}
+
+#[test]
+fn empty_result_line_parses() {
+    let line = "merge 0 frame 704 576 dets => -";
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let arrow = tokens
+        .iter()
+        .position(|token| *token == "=>")
+        .expect("an arrow");
+    assert_eq!(arrow, 6);
+    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    check_merge_line(&tokens, arrow, 1, line, &mut counts);
 }

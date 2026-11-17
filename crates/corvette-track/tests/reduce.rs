@@ -219,11 +219,38 @@ fn hand_rows_degenerate_and_clipped() {
     );
 }
 
+fn hand_rows_prefix_labels() {
+    check(
+        &[
+            det("cart", 0.9, [0, 0, 10, 10]),
+            det("car", 0.9, [0, 0, 10, 10]),
+        ],
+        &[0, 1],
+    );
+    check(
+        &[
+            det("car", 0.9, [0, 0, 10, 10]),
+            det("cart", 0.9, [0, 0, 10, 10]),
+        ],
+        &[0, 1],
+    );
+    check(
+        &[
+            det("cart", 0.9, [0, 0, 8, 8]),
+            det("cart", 0.8, [2, 0, 10, 8]),
+            det("car", 0.9, [0, 0, 8, 8]),
+            det("car", 0.8, [2, 0, 10, 8]),
+        ],
+        &[0, 2, 3],
+    );
+}
+
 #[test]
 fn hand_rows_match_frigates_reduce() {
     hand_rows_score_floor_and_confidence();
     hand_rows_nms_limits_and_order();
     hand_rows_degenerate_and_clipped();
+    hand_rows_prefix_labels();
 }
 
 #[test]
