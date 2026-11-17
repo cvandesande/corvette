@@ -71,6 +71,7 @@ struct Entry {
 
 #[derive(Debug)]
 pub struct ObjectView<'a> {
+    pub id: u64,
     pub label: &'a str,
     pub score: f64,
     pub edges: [i32; 4],
@@ -285,6 +286,7 @@ impl<'a> ObjectTracker<'a> {
 
     pub fn objects(&self) -> impl Iterator<Item = ObjectView<'_>> {
         self.entries.iter().map(|entry| ObjectView {
+            id: entry.global_id,
             label: &entry.label,
             score: entry.score,
             edges: entry.edges,

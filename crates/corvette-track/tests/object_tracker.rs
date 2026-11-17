@@ -1593,3 +1593,118 @@ fn update_frame_times_keeps_the_count_running() {
         );
     }
 }
+
+fn hand_detection(label: &str, score: f64, edges: [i32; 4]) -> FrameDetection {
+    FrameDetection {
+        label: label.to_owned(),
+        score,
+        edges,
+        area: 14400,
+        ratio: 1.0,
+        region: Vec::new(),
+    }
+}
+
+fn car_settings(min_initialized: u32, max_disappeared: u32) -> TrackerSettings {
+    TrackerSettings {
+        width: 1280,
+        height: 720,
+        min_initialized,
+        max_disappeared,
+        stationary_threshold: 3,
+        max_frames_default: None,
+        max_frames_overrides: Vec::new(),
+        own_labels: vec!["car".to_owned()],
+    }
+}
+
+fn id_of(tracker: &ObjectTracker, edges: [i32; 4]) -> Option<u64> {
+    tracker
+        .objects()
+        .find(|object| object.edges == edges)
+        .map(|object| object.id)
+}
+
+#[test]
+fn two_same_label_objects_registered_in_one_frame_get_different_ids() {
+    let mut ids = IdSource::default();
+    let mut tracker = ObjectTracker::new(car_settings(1, 5), &mut ids).unwrap();
+    let left = hand_detection("car", 0.8, [100, 100, 220, 220]);
+    let right = hand_detection("car", 0.7, [600, 100, 720, 220]);
+    tracker
+        .match_and_update(1.0, vec![left.clone(), right.clone()])
+        .unwrap();
+    tracker.match_and_update(2.0, vec![left, right]).unwrap();
+    let seen: Vec<u64> = tracker.objects().map(|object| object.id).collect();
+    assert_eq!(seen.len(), 2, "both cars register on the second frame");
+    assert_ne!(seen[0], seen[1], "the two cars get different ids");
+}
+
+#[test]
+fn a_tracked_object_keeps_its_id_across_frames() {
+    let mut ids = IdSource::default();
+    let mut tracker = ObjectTracker::new(car_settings(1, 5), &mut ids).unwrap();
+    let mut seen = Vec::new();
+    for time in 1..=4 {
+        let dets = vec![hand_detection("car", 0.8, [100, 100, 220, 220])];
+        tracker.match_and_update(f64::from(time), dets).unwrap();
+        if let Some(id) = id_of(&tracker, [100, 100, 220, 220]) {
+            seen.push(id);
+        }
+    }
+    assert_eq!(seen.len(), 3, "tracked from the second frame on");
+    assert!(
+        seen.iter().all(|id| *id > 0),
+        "a registered object holds a real id: {seen:?}"
+    );
+    assert!(
+        seen.windows(2).all(|pair| pair[0] == pair[1]),
+        "the id never changes: {seen:?}"
+    );
+}
+
+#[test]
+fn a_survivor_keeps_its_id_and_a_new_object_gets_a_fresh_one() {
+    let mut ids = IdSource::default();
+    let mut tracker = ObjectTracker::new(car_settings(1, 5), &mut ids).unwrap();
+    let still = hand_detection("car", 0.8, [100, 100, 220, 220]);
+    let mover = hand_detection("car", 0.7, [400, 100, 520, 220]);
+    tracker
+        .match_and_update(1.0, vec![still.clone(), mover.clone()])
+        .unwrap();
+    tracker
+        .match_and_update(2.0, vec![still, mover.clone()])
+        .unwrap();
+    let retired_id = id_of(&tracker, [100, 100, 220, 220]).expect("the still car is registered");
+    let survivor_id = id_of(&tracker, [400, 100, 520, 220]).expect("the mover is registered");
+    assert_ne!(retired_id, survivor_id);
+    // the still car's hit counter decays to negative and the track retires
+    for time in 3..=6 {
+        tracker
+            .match_and_update(f64::from(time), vec![mover.clone()])
+            .unwrap();
+    }
+    let alone: Vec<u64> = tracker.objects().map(|object| object.id).collect();
+    assert_eq!(
+        alone,
+        vec![survivor_id],
+        "the survivor keeps its id after the retirement"
+    );
+    let newcomer = hand_detection("car", 0.9, [800, 100, 920, 220]);
+    tracker
+        .match_and_update(7.0, vec![mover.clone(), newcomer.clone()])
+        .unwrap();
+    tracker
+        .match_and_update(8.0, vec![mover, newcomer])
+        .unwrap();
+    let fresh_id = id_of(&tracker, [800, 100, 920, 220]).expect("the newcomer is registered");
+    assert_eq!(
+        id_of(&tracker, [400, 100, 520, 220]),
+        Some(survivor_id),
+        "the survivor is unchanged"
+    );
+    assert!(
+        fresh_id > retired_id.max(survivor_id),
+        "ids never repeat: fresh {fresh_id} vs issued {retired_id} and {survivor_id}"
+    );
+}
