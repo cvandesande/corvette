@@ -32,6 +32,26 @@ impl Region {
             })
         }
     }
+
+    #[must_use]
+    pub const fn x_min(&self) -> i64 {
+        self.x_min
+    }
+
+    #[must_use]
+    pub const fn y_min(&self) -> i64 {
+        self.y_min
+    }
+
+    #[must_use]
+    pub const fn x_max(&self) -> i64 {
+        self.x_max
+    }
+
+    #[must_use]
+    pub const fn y_max(&self) -> i64 {
+        self.y_max
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +68,16 @@ impl Frame {
         } else {
             Some(Self { width, height })
         }
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> i64 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn height(&self) -> i64 {
+        self.height
     }
 }
 
