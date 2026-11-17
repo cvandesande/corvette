@@ -114,4 +114,12 @@ impl<D: Clone> Tracker<D> {
     pub fn active_tracks(&self) -> impl Iterator<Item = &Track<D>> {
         self.tracks.iter().filter(|track| track.is_active())
     }
+
+    pub fn remove(&mut self, id: u64) -> bool {
+        if let Some(index) = self.tracks.iter().position(|track| track.id() == Some(id)) {
+            self.tracks.remove(index);
+            return true;
+        }
+        false
+    }
 }
