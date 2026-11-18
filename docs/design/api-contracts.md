@@ -1131,7 +1131,12 @@ The answer is `200` `{"objects":[...]}`, each object carrying:
 - `label`: the label the detector reported.
 - `score`: the median of the object's recent score history: `Scores` computes it on update
   (`crates/corvette-track/src/score.rs`: `median` at line 11, stored at line 44, read by
-  `computed` at line 58).
+  `computed` at line 58). The history holds the last ten scores. A frame on which the
+  tracker holds the object but no detection matched it adds 0.0, so the median decays while
+  an object goes unseen; Frigate v0.17.2 does the same (`frigate/track/tracked_object.py`
+  `update`, which appends 0.0 when the object's frame time differs from the current frame's).
+  The tracker's own view reports only the latest raw score, so the detection service keeps
+  the history itself.
 - `confirmed`: the sticky flag in the same `Scores` (`score.rs:49`, read by `confirmed` at
   line 68): it turns true the first time the median reaches the threshold and stays true for
   the object's life.
