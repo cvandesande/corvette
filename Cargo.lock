@@ -450,6 +450,7 @@ dependencies = [
 name = "corvette-detect"
 version = "0.1.0"
 dependencies = [
+ "corvette-detect-proto",
  "corvette-motion",
  "tokio",
 ]
