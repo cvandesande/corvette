@@ -9,6 +9,7 @@ description = "Input tensor generators and output comparers for inference worker
 [dependencies]
 corvette-detect-proto = { path = "../corvette-detect-proto" }
 corvette-motion = { path = "../corvette-motion" }
+serde_json = "1.0.149"
 
 [dev-dependencies]
 corvette-detect-worker = { path = "../corvette-detect-worker" }

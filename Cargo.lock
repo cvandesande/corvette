@@ -466,6 +466,7 @@ dependencies = [
  "corvette-detect-worker",
  "corvette-motion",
  "corvette-ncnn",
+ "serde_json",
 ]
 
 [[package]]

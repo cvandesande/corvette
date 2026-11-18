@@ -1,0 +1,108 @@
+[
+  {
+    "id": "1002.0-cccccc",
+    "camera": "front",
+    "label": "dog",
+    "start_time": 1002.0,
+    "end_time": 1005.0,
+    "zones": ["porch"],
+    "has_clip": true
+  },
+  {
+    "id": "1001.0-bbbbbb",
+    "camera": "back",
+    "label": "truck",
+    "start_time": 1001.0,
+    "end_time": null,
+    "zones": ["yard"],
+    "has_clip": false,
+    "data": {
+      "top_score": 0.55,
+      "score": 0.5,
+      "box": [0.5, 0.5, 0.6, 0.7]
+    }
+  },
+  {
+    "id": "1000.5-aaaaaa",
+    "camera": "front",
+    "label": "person",
+    "start_time": 1000.5,
+    "end_time": 1010.5,
+    "zones": ["porch", "drive"],
+    "has_clip": true,
+    "top_score": 0.11,
+    "score": 0.99,
+    "box": [0.0, 0.0, 1.0, 1.0],
+    "note": "an unknown key that must be ignored",
+    "data": {
+      "top_score": 0.87,
+      "score": 0.81,
+      "box": [0.1, 0.2, 0.3, 0.4]
+    }
+  },
+  {
+    "id": "1005.0-zzzzzz",
+    "camera": "back",
+    "label": "car",
+    "start_time": 1005.0,
+    "end_time": 1007.0,
+    "zones": ["driveway"],
+    "has_clip": true,
+    "data": {
+      "top_score": 0.61,
+      "score": 0.6,
+      "box": [0.5, 0.25, 0.75, 0.9]
+    }
+  },
+  {
+    "id": "1005.0-ffffff",
+    "camera": "garage",
+    "label": "person",
+    "start_time": 1005.0,
+    "end_time": 1007.5,
+    "zones": ["bay"],
+    "has_clip": false,
+    "data": null
+  },
+  {
+    "id": "1003.0-dddddd",
+    "camera": "back",
+    "label": "cat",
+    "start_time": 1003.0,
+    "end_time": 1004.0,
+    "zones": ["yard"],
+    "has_clip": true,
+    "data": {
+      "score": 0.4,
+      "box": [0.0, 0.1, 0.2, 0.3]
+    }
+  },
+  {
+    "id": "1004.0-eeeeee",
+    "camera": "front",
+    "label": "person",
+    "start_time": 1004.0,
+    "end_time": 1006.0,
+    "zones": [],
+    "has_clip": false,
+    "data": {
+      "top_score": 0.3,
+      "score": 0.3,
+      "box": [0.9, 0.9, 1.0, 1.0]
+    }
+  },
+  {
+    "id": "1006.0-gggggg",
+    "camera": "front",
+    "label": "père \"x\"",
+    "start_time": 1006.0,
+    "end_time": 1008.0,
+    "zones": ["kitchen"],
+    "has_clip": true,
+    "data": {
+      "top_score": 0.25,
+      "score": 0.25,
+      "box": [0.0, 0.0, 0.0, 0.0]
+    }
+  }
+]

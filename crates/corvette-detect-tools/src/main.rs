@@ -3,6 +3,7 @@
 pub mod annotate;
 pub mod args;
 pub mod compare;
+pub mod export_events;
 pub mod files;
 pub mod latency;
 pub mod motion_detect;
@@ -28,6 +29,7 @@ usage: corvette-detect-tools COMMAND [flags]
     motion-detect optional: --threshold --contour-area --improve-contrast --lightning-threshold --frame-alpha --frame-height --mask
   corvette-detect-tools annotate --luma FILE --width W --height H --boxes FILE --frames LIST --out DIR
   corvette-detect-tools regions --boxes FILE --width W --height H --out FILE [--model-size S]
+  corvette-detect-tools export-events --in FILE --out FILE [--camera NAME] [--label NAME]
 flags are --name value pairs in any order
 exit codes:
   0  success; for compare, the maximum absolute error is not above the tolerance
@@ -71,6 +73,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, Failure> {
         "motion-detect" => motion_detect::run(tail),
         "annotate" => annotate::run(tail),
         "regions" => regions::run(tail),
+        "export-events" => export_events::run(tail),
         _ => Err(Failure::Usage),
     }
 }
