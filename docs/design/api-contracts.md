@@ -749,7 +749,7 @@ body instead. Service errors share one shape, `{"code": ..., "message": ...}`, w
   answering for a camera that does not exist, that the caller's role may not see, or that
   has no recorded footage overlapping the requested range, or the still route answering
   for a camera that does not exist or that the caller's role may not see.
-- `config_unavailable` (`503`): the cameras, activity, range-link, still or status route
+- `config_unavailable` (`503`): the cameras, activity, range-link, still, status, objects or detection status route
   has no usable Frigate configuration.
 - `database_unavailable` (`503`): the activity or range-link route could not read Frigate's
   database. The underlying error is logged, not returned.
@@ -759,6 +759,8 @@ body instead. Service errors share one shape, `{"code": ..., "message": ...}`, w
   backing; the reason is logged, not returned.
 - `status_unavailable` (`503`): the status route could not get a usable stats answer from
   the backing; the reason is logged, not returned.
+- `detection_unavailable` (`503`): the objects or detection status route could not get a
+  usable answer from the detection service; the reason is logged, not returned.
 - `unhealthy` (`503`): the health route found failing parts; `message` names each one.
 
 `GET /corvette/api/v1/health` answers `200` `{"database":"ok","config":"ok"}` when both
@@ -1114,3 +1116,176 @@ return the same rows for the same model output; the test
 `quirk_nms_suppression` hold the behaviour. Suppressing on the real boxes returns different
 rows, so Corvette makes that change only as its own separate, measured step after Frigate's
 detector is retired, and a human decides when.
+
+## The detection service answers the current tracked objects of one camera
+
+`GET /corvette/api/v1/cameras/{camera}/objects` answers one camera's tracked objects as they
+stand when the request is read: one JSON entry per live tracked object, in tracker order. The
+object fields are the same values the replay record file writes per frame, so one parser reads
+both.
+
+The answer is `200` `{"objects":[...]}`, each object carrying:
+
+- `id`: the tracker's per-object id printed as a decimal string (`ObjectView::id`, a `u64` at
+  `crates/corvette-track/src/object_tracker.rs:74`). Clients treat it as opaque.
+- `label`: the label the detector reported.
+- `score`: the median of the object's recent score history: `Scores` computes it on update
+  (`crates/corvette-track/src/score.rs`: `median` at line 11, stored at line 44, read by
+  `computed` at line 58).
+- `confirmed`: the sticky flag in the same `Scores` (`score.rs:49`, read by `confirmed` at
+  line 68): it turns true the first time the median reaches the threshold and stays true for
+  the object's life.
+- `box`: `[x1, y1, x2, y2]` in 0-to-1 coordinates from the top left, so a client needs no
+  detect size to place the box on a differently sized picture.
+- `first_seen` and `last_seen`: Unix seconds as JSON numbers, the frames the object was first
+  and most recently seen.
+- `zones_now` and `zones_entered`: arrays of zone names. `zones_entered` only grows during the
+  object's life; `zones_now` is this frame's set, as the zone contract below defines both.
+- `state`: `stationary` when the object's motionless count after the frame
+  (`ObjectView::motionless`, `crates/corvette-track/src/object_tracker.rs:86`) is at or above
+  the camera's stationary threshold, otherwise `moving`, as the stationary contract below
+  defines.
+
+A camera that does not exist and a camera the caller's role may not see each answer `404`
+`not_found` with the same `code` and `message`, as the still route does.
+
+No usable configuration copy answers `503` `config_unavailable` under the condition the
+cameras route states for it. When the API server cannot get a usable answer from the
+detection service's local socket, the route answers `503` `detection_unavailable` ("The
+detection service could not be reached."); the detection service's own answer never appears
+in any response, and the reason is logged.
+
+Detection off for a known camera answers `200` with `{"objects":[]}`; the detection status
+route names the reason. The route accepts `GET` only, with the identity rules "Corvette's own API lives under
+`/corvette/api/v1/`" states for every route.
+
+## The detection service reports its own state
+
+`GET /corvette/api/v1/detection/status` answers what the detection pipeline is doing for each
+camera the caller's role may see, so a client can tell a quiet scene from a dead pipeline.
+Per camera the entry carries:
+
+- `state`: one of `running` (frames arriving and inferred), `waiting_for_frames` (detection
+  on with no frames arriving), `inference_unavailable` (frames arriving while the worker
+  cannot infer) or `off` (detection switched off for the camera).
+- the frames per second arriving and the frames per second processed;
+- the worker's own inference time beside the request's round-trip time, both in milliseconds,
+  so slow inference and slow transport read differently;
+- the worker's state and its restart count.
+
+The detection service serves both routes on a local socket and the API server relays them,
+so the API server stays the single public door (decided 2026-11-08). Both routes are
+specified and not yet served; their fields are final only after the corpus replay run
+amends them.
+
+No usable configuration copy answers `503` `config_unavailable` under the condition the
+cameras route states for it. When the API server cannot get a usable answer from the
+detection service's local socket, the route answers `503` `detection_unavailable` ("The
+detection service could not be reached."); the detection service's own answer never appears
+in any response, and the reason is logged.
+
+The route accepts `GET` only, with the identity rules "Corvette's own API lives under
+`/corvette/api/v1/`" states for every route.
+
+## A tracked object is stationary when its motionless count reaches the threshold
+
+The tracker in `crates/corvette-track` follows five tracking rules; the first, second and
+fourth part from Frigate `v0.17.2`. Each is held by the named test:
+
+- **One stationary comparator.** Frigate compares in three places: the tracker decides
+  with `motionless_count >= threshold` before counting the frame
+  (`frigate/track/norfair_tracker.py:456-459`), the frame loop that builds the stationary
+  set uses `>=` (`frigate/video.py:874-875`), and the object's own flag `is_stationary` uses
+  a strict `>` (`frigate/track/tracked_object.py:432-434`). Corvette uses `>=` only:
+  `motionless >= after` at `crates/corvette-track/src/stationary.rs:221` ports the
+  tracker's comparison, and every later stationary decision applies the same `>=` to the
+  count after the frame. The test `stationary_threshold_is_crossed_on_the_exact_frame`
+  (`crates/corvette-track/tests/object_tracker.rs:1511`) holds the motionless count on each
+  frame around the threshold.
+- **The median of an even count averages.** Frigate's `median_of_boxes` returns the entry at
+  index `int(len / 2)` of the area-sorted list (`frigate/util/object.py:355-358`), the
+  upper-middle box when the count is even. Corvette's `median_box` averages the two middle
+  boxes edge by edge for an even count (`crates/corvette-track/src/stationary.rs:110`, the
+  even branch at lines 129-135). `tools/goldens/track_stationary.py` runs Frigate's own
+  stationary code with `median_of_boxes` replaced by the ordinary median (header lines 5-16),
+  and `fixture_matches_the_real_library` (`crates/corvette-track/tests/stationary.rs:947`)
+  replays the golden fixture bit for bit.
+- **The expiry cap is per label and expires only capped labels**, as in Frigate's
+  `is_expired` (`frigate/track/norfair_tracker.py:427-443`). `max_frames` is an optional
+  per-label cap with an optional default (`max_frames_default: Option<u64>` and
+  `max_frames_overrides` at `crates/corvette-track/src/object_tracker.rs:27-28`, resolved by
+  `max_frames_for` at line 461); an object retires once `motionless - after > max_frames`
+  (`crates/corvette-track/src/stationary.rs:250-251`). The tests
+  `moving_sibling_survives_the_cap_retirement` and `object_without_a_cap_never_retires`
+  (`crates/corvette-track/tests/object_tracker.rs:1527`, `:1541`) hold both halves.
+- **Retiring an object removes one track.** Frigate's `deregister`
+  (`frigate/track/norfair_tracker.py:300-320`) rewrites the tracked-object list of the
+  tracker that serves the label (the label's own tracker, or the shared default tracker for
+  a label without one, `norfair_tracker.py:248-259`) when the label has a `max_frames`
+  value, keeping only entries that are not the retiring one and carry a negative hit
+  counter (line 317), so every other live track on that tracker disappears in the same
+  call. Corvette's `Tracker::remove`
+  (`crates/corvette-track/src/tracker.rs:118`) removes the track carrying the requested id and
+  leaves every other track alone, same-label live tracks included:
+  `removes_only_the_named_track` and `removal_keeps_other_live_tracks_of_the_same_label`
+  (`crates/corvette-track/tests/remove.rs:60`, `:141`) hold it.
+- **One id counter, shared**, as norfair 2.3's class-level counter is (`tracker.py:389`,
+  `:427-430`; Frigate pins `norfair == 2.3.*`). The per-object id counter is a single
+  `IdSource` (`crates/corvette-track/src/track.rs:35`) that the object loop hands to every
+  per-label
+  tracker and to the fallback tracker (`crates/corvette-track/src/object_tracker.rs:114`,
+  used at lines 252 and 259), so ids stay unique and never repeat while one source lives.
+  `ids_count_per_source` (`crates/corvette-track/tests/track.rs:310`) holds the per-source
+  counting; `two_same_label_objects_registered_in_one_frame_get_different_ids`
+  (`crates/corvette-track/tests/object_tracker.rs:1629`) holds fresh ids for new objects.
+
+## A zone counts the consecutive frames an object's foot is inside
+
+Frigate `v0.17.2` decides zone membership in the zone section of `TrackedObject.update`
+(`frigate/track/tracked_object.py:183-298`). The tested point is the box's bottom centre —
+centroid x and the box's lower edge (`tracked_object.py:185`) — and inside or on the edge
+counts as inside (`cv2.pointPolygonTest(...) >= 0`, line 198). Each frame's score is the
+stored presence plus one (line 195); an inside frame stores it while it is below the zone's
+inertia (default 3, `frigate/config/camera/zone.py:29-33`; line 287), so the stored presence
+stops at inertia minus one once the object enters, and the outside branch counts it down
+only while the score is below inertia (lines 290-291). After the first entry the presence
+never decays, so a re-entry after a long absence waits no frames.
+
+Corvette's contract: `ZoneSet::observe` decides membership from the box's bottom centre
+(`crates/corvette-track/src/zones.rs:42`); any frame outside the polygon resets the counter to
+zero, and entry needs `inertia` consecutive inside frames (lines 55-58). `entered` only grows
+— a zone name is added once and never removed (lines 60-61) — and `current` is rebuilt fresh
+every frame (line 48). Loitering, per-zone object filters and speed zones sit outside this
+contract, and the cameras' live zone configuration uses none of them. Polygons arrive as
+relative 0-to-1 vertices and are converted to pixels with truncation
+(`polygon_from_relative` at `zones.rs:77`, truncation at line 98).
+
+The golden `tools/goldens/track_zones.py` runs Frigate's own zone section unchanged apart from
+the single change, `self.zone_presence[name] = zone_score - 1` replaced by
+`self.zone_presence[name] = 0` (lines 289-291; header lines 3-18), so a zone counts
+consecutive inside frames and any outside frame resets. The tests
+`fixture_rows_replay_frame_by_frame` and `hand_written_scenarios_replay`
+(`crates/corvette-track/tests/zones.rs:412`, `:453`) replay
+`crates/corvette-track/tests/fixtures/zones_cases.txt`, whose header records a floor of 360
+on-edge cases, which holds the inside-or-on-the-edge rule.
+
+## The replay record file is JSON lines, one frame per line
+
+The detection service records, per camera segment, a file that the offline replay reads
+back to reconstruct the tracked-object stream (decided 2026-11-17). Schema version 1.
+
+Line 1 is a header object: `{"schema": 1, "camera": <name>, "segment": <segment file name>,
+"frame_width": <int>, "frame_height": <int>, "detect_fps": <number>}`. Every later line is
+one frame: `{"frame_time": <seconds as number>, "objects": [{"id": <string>, "label":
+<string>, "score": <number>, "confirmed": <bool>, "box": [x1, y1, x2, y2] (0-to-1
+coordinates), "first_seen": <seconds as number>, "last_seen": <seconds as number>,
+"zones_now": [<string>], "zones_entered": [<string>], "state": "moving"|"stationary"}],
+"ended": [<id string>]}`. `objects` lists the camera's tracked objects as of that frame
+with exactly the object fields of the objects route, so one parser reads both; `ended` lists
+the ids that retired on that frame. `box` divides each pixel edge by `frame_width` or
+`frame_height` from the header.
+
+Frame times derive from the segment name and the frame index, so two
+runs over the same segment produce byte-identical files. Keys appear in the order shown,
+numbers use the shortest decimal form that round-trips, lines end with a single `\n`, and the
+file has no trailing blank line.
