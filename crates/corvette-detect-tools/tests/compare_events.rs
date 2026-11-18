@@ -81,7 +81,9 @@ fn frame(time: usize, objects: &str, ended: &str) -> String {
 }
 
 fn object(id: &str, first_seen: usize) -> String {
-    format!("{{\"id\": \"{id}\", \"label\": \"person\", \"first_seen\": {first_seen}}}")
+    format!(
+        "{{\"id\": \"{id}\", \"label\": \"person\", \"confirmed\": true, \"first_seen\": {first_seen}}}"
+    )
 }
 
 fn keyev(inner: &str) -> String {
@@ -328,7 +330,7 @@ fn malformed_inputs_exit_three_naming_the_path_or_index() {
         "krecord.jsonl",
         record(&[frame(600, &object("t", 500), "\"t\"")]).as_bytes(),
     );
-    let cases: [(&str, &str); 21] = [
+    let cases: [(&str, &str); 23] = [
         ("k0", "nope"),
         ("k1", "{\"schema\": 2, \"events\": []}"),
         ("k2", "[]"),
@@ -358,15 +360,32 @@ fn malformed_inputs_exit_three_naming_the_path_or_index() {
         ("r6", &rec("{\"frame_time\": 1, \"objects\": {}}")),
         ("r7", &rec("{\"frame_time\": 1, \"ended\": \"x\"}")),
         ("r8", &rec("{\"frame_time\": 1, \"ended\": [5]}")),
-        ("r9", &fobj("{\"label\":\"p\",\"first_seen\":1}")),
-        ("r10", &fobj("{\"id\":\"a\",\"first_seen\":1}")),
-        ("r11", &fobj("{\"id\":\"a\",\"label\":\"p\"}")),
+        (
+            "r9",
+            &fobj("{\"confirmed\":true,\"label\":\"p\",\"first_seen\":1}"),
+        ),
+        (
+            "r10",
+            &fobj("{\"id\":\"a\",\"confirmed\":true,\"first_seen\":1}"),
+        ),
+        (
+            "r11",
+            &fobj("{\"id\":\"a\",\"label\":\"p\",\"confirmed\":true}"),
+        ),
         (
             "r12",
-            &fobj("{\"id\":\"a\",\"label\":\"p\",\"first_seen\":\"x\"}"),
+            &fobj("{\"id\":\"a\",\"label\":\"p\",\"confirmed\":true,\"first_seen\":\"x\"}"),
+        ),
+        (
+            "r13",
+            &fobj("{\"id\":\"a\",\"label\":\"p\",\"first_seen\":1}"),
+        ),
+        (
+            "r14",
+            &fobj("{\"id\":\"a\",\"label\":\"p\",\"confirmed\":\"yes\",\"first_seen\":1}"),
         ),
     ];
-    let messages: [&str; 21] = [
+    let messages: [&str; 23] = [
         "{P}: key is not valid JSON",
         "{P}: schema is not 1",
         "{P}: schema is not 1",
@@ -388,6 +407,8 @@ fn malformed_inputs_exit_three_naming_the_path_or_index() {
         "{P}: line 2: object 0: label is missing",
         "{P}: line 2: object 0: first_seen is missing",
         "{P}: line 2: object 0: first_seen is not a number",
+        "{P}: line 2: object 0: confirmed is missing",
+        "{P}: line 2: object 0: confirmed is not a boolean",
     ];
     for ((index, (label, body)), message) in cases.iter().enumerate().zip(messages) {
         let path = dir.write(label, body.as_bytes());
@@ -428,7 +449,7 @@ fn zone_agreement_counts_each_matched_pair_once_in_each_direction() {
     };
     let tobj = |id: &str, first: usize, zones: &str| {
         format!(
-            "{{\"id\": \"{id}\", \"label\": \"person\", \"first_seen\": {first}, \"zones_entered\": [{zones}]}}"
+            "{{\"id\": \"{id}\", \"label\": \"person\", \"confirmed\": true, \"first_seen\": {first}, \"zones_entered\": [{zones}]}}"
         )
     };
     let events = [
@@ -456,7 +477,7 @@ fn a_pair_with_two_lacking_zones_counts_once_as_missed() {
     let dir = TempDir::new("pairzones");
     let key_json = "{\"schema\": 1, \"events\": [{\"id\": \"e\", \"camera\": \"cam1\", \"label\": \"person\", \"start\": 0, \"end\": 100, \"zones\": [\"a\", \"b\"]}]}";
     let key_path = dir.write("key.json", key_json.as_bytes());
-    let tobj = "{\"id\": \"t\", \"label\": \"person\", \"first_seen\": 1, \"zones_entered\": []}";
+    let tobj = "{\"id\": \"t\", \"label\": \"person\", \"confirmed\": true, \"first_seen\": 1, \"zones_entered\": []}";
     let record_path = dir.write(
         "record.jsonl",
         record(&[frame(50, tobj, "\"t\"")]).as_bytes(),
@@ -539,9 +560,8 @@ fn a_track_label_and_zones_come_from_its_last_frame() {
     let dir = TempDir::new("lastframe");
     let key_json = "{\"schema\": 1, \"events\": [{\"id\": \"e\", \"camera\": \"cam1\", \"label\": \"person\", \"start\": 0, \"end\": 100, \"zones\": [\"a\"]}]}";
     let key_path = dir.write("key.json", key_json.as_bytes());
-    let first = "{\"id\": \"t\", \"label\": \"car\", \"first_seen\": 1, \"zones_entered\": []}";
-    let last =
-        "{\"id\": \"t\", \"label\": \"person\", \"first_seen\": 1, \"zones_entered\": [\"a\"]}";
+    let first = "{\"id\": \"t\", \"label\": \"car\", \"confirmed\": true, \"first_seen\": 1, \"zones_entered\": []}";
+    let last = "{\"id\": \"t\", \"label\": \"person\", \"confirmed\": true, \"first_seen\": 1, \"zones_entered\": [\"a\"]}";
     let frames = [frame(5, first, ""), frame(6, last, "")];
     let record_path = dir.write("record.jsonl", record(&frames).as_bytes());
     let out = dir.path_str("report.txt");
@@ -549,4 +569,43 @@ fn a_track_label_and_zones_come_from_its_last_frame() {
     let report = dir.read("report.txt");
     assert!(report.contains("events read 1\ntracks read 1\nevents matched 1\nevents without a track 0\ntracks without an event 0\n"));
     assert!(report.contains("zones identical 1 missed 0 extra 0"));
+}
+
+#[test]
+fn an_unconfirmed_object_creates_no_track() {
+    let dir = TempDir::new("unconfirmed");
+    let key_path = dir.write("key.json", key(&[event("e", 0, 10)]).as_bytes());
+    let unconfirmed =
+        "{\"id\": \"t\", \"label\": \"person\", \"confirmed\": false, \"first_seen\": 1}";
+    let record_path = dir.write(
+        "record.jsonl",
+        record(&[frame(5, unconfirmed, "")]).as_bytes(),
+    );
+    let out = dir.path_str("report.txt");
+    assert_eq!(code(&compare_to(&key_path, &[&record_path], &out)), 0);
+    assert!(
+        dir.read("report.txt")
+            .contains("events read 1\ntracks read 0\nevents matched 0\nevents without a track 1\ntracks without an event 0\n")
+    );
+}
+
+#[test]
+fn a_track_starts_at_its_first_confirmed_frame() {
+    let dir = TempDir::new("confirmstart");
+    let key_path = dir.write("key.json", key(&[]).as_bytes());
+    let early = "{\"id\": \"t\", \"label\": \"person\", \"confirmed\": false, \"first_seen\": 2}";
+    let later = "{\"id\": \"t\", \"label\": \"person\", \"confirmed\": true, \"first_seen\": 2}";
+    let frames = [
+        frame(3, early, ""),
+        frame(7, later, ""),
+        frame(9, early, ""),
+    ];
+    let record_path = dir.write("record.jsonl", record(&frames).as_bytes());
+    let out = dir.path_str("report.txt");
+    assert_eq!(code(&compare_to(&key_path, &[&record_path], &out)), 0);
+    let report = dir.read("report.txt");
+    assert!(report.contains("tracks read 1\nevents matched 0\n"));
+    assert!(report.contains(&format!(
+        "{record_path} cam1 person t 2 open - frames=7..9\n"
+    )));
 }

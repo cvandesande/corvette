@@ -170,6 +170,7 @@ fn read_frame(
         let note = |problem: String| object_note(object_index, problem);
         let id = field_text(object, "id").map_err(note)?;
         let label = field_text(object, "label").map_err(note)?;
+        let confirmed = field_bool(object, "confirmed").map_err(note)?;
         let start = field_number(object, "first_seen").map_err(note)?;
         let zones = zone_set(object.get("zones_entered")).map_err(note)?;
         let mut known = false;
@@ -181,7 +182,7 @@ fn read_frame(
                 known = true;
             }
         }
-        if known {
+        if known || !confirmed {
             continue;
         }
         tracks.push(Track {
@@ -243,6 +244,17 @@ fn field_number(item: &Value, key: &str) -> Result<f64, String> {
             value
                 .as_f64()
                 .ok_or_else(|| format!("{key} is not a number"))
+        },
+    )
+}
+
+fn field_bool(item: &Value, key: &str) -> Result<bool, String> {
+    item.get(key).map_or_else(
+        || Err(format!("{key} is missing")),
+        |value| {
+            value
+                .as_bool()
+                .ok_or_else(|| format!("{key} is not a boolean"))
         },
     )
 }
