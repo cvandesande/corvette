@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod backoff;
+mod candidate_stage;
 mod clock;
 mod engine;
 mod ffmpeg;
@@ -12,6 +13,7 @@ mod source;
 mod supervised;
 
 pub use backoff::{BACKOFF_INITIAL, BACKOFF_MAX, Backoff, DEFAULT_POLICY, HEALTHY_RUN, Policy};
+pub use candidate_stage::{CandidateError, CandidateStage, Infer};
 pub use clock::FrameClock;
 pub use engine::{EngineError, LabelError, Labels, WorkerClient};
 pub use ffmpeg::{Decode, FrameSpec, Input, MAX_FRAME_BYTES, SpecError, decode_command};
