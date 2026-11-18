@@ -1,0 +1,1 @@
+{"schema": 1, "source": "frigate-events", "events": [{"id": "e1", "camera": "cam1", "label": "person", "start": 5, "end": null, "zones": ["back", "front", "alley"]}, {"id": "e2", "camera": "cam1", "label": "person", "start": 10, "end": 20, "zones": ["yard"]}, {"id": "e3", "camera": "cam1", "label": "car", "start": 12, "end": null, "zones": []}]}

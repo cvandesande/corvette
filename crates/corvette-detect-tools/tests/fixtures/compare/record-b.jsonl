@@ -1,0 +1,5 @@
+{"schema": 1, "camera": "cam1", "segment": "seg-b", "frame_width": 640, "frame_height": 480, "detect_fps": 5}
+{"frame_time": 10, "objects": [{"id": "3", "label": "person", "score": 0.9, "confirmed": true, "box": [0.1, 0.1, 0.3, 0.5], "first_seen": 10, "last_seen": 10, "zones_now": ["yard"], "zones_entered": ["yard"], "state": "moving"}], "ended": []}
+{"frame_time": 20, "objects": [{"id": "3", "label": "person", "score": 0.9, "confirmed": true, "box": [0.1, 0.1, 0.3, 0.5], "first_seen": 10, "last_seen": 20, "zones_now": ["yard"], "zones_entered": ["yard"], "state": "stationary"}], "ended": ["3"]}
+{"frame_time": 25, "objects": [{"id": "7", "label": "person", "score": 0.7, "confirmed": true, "box": [0.5, 0.5, 0.7, 0.9], "first_seen": 25, "last_seen": 25, "zones_now": ["front", "side"], "zones_entered": ["front", "side"], "state": "moving"}], "ended": []}
+{"frame_time": 30, "objects": [{"id": "7", "label": "person", "score": 0.7, "confirmed": true, "box": [0.5, 0.5, 0.7, 0.9], "first_seen": 25, "last_seen": 30, "zones_now": ["front", "side"], "zones_entered": ["front", "side"], "state": "moving"}], "ended": []}

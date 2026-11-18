@@ -3,6 +3,7 @@
 pub mod annotate;
 pub mod args;
 pub mod compare;
+pub mod compare_events;
 pub mod export_events;
 pub mod files;
 pub mod latency;
@@ -30,6 +31,7 @@ usage: corvette-detect-tools COMMAND [flags]
   corvette-detect-tools annotate --luma FILE --width W --height H --boxes FILE --frames LIST --out DIR
   corvette-detect-tools regions --boxes FILE --width W --height H --out FILE [--model-size S]
   corvette-detect-tools export-events --in FILE --out FILE [--camera NAME] [--label NAME]
+  corvette-detect-tools compare-events --events FILE --record FILE [--record FILE ...] --out FILE
 flags are --name value pairs in any order
 exit codes:
   0  success; for compare, the maximum absolute error is not above the tolerance
@@ -74,6 +76,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, Failure> {
         "annotate" => annotate::run(tail),
         "regions" => regions::run(tail),
         "export-events" => export_events::run(tail),
+        "compare-events" => compare_events::run(tail),
         _ => Err(Failure::Usage),
     }
 }

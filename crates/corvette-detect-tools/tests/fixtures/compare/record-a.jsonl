@@ -1,0 +1,4 @@
+{"schema": 1, "camera": "cam1", "segment": "seg-a", "frame_width": 640, "frame_height": 480, "detect_fps": 5}
+{"frame_time": 11, "objects": [{"id": "7", "label": "person", "score": 0.8, "confirmed": true, "box": [0.4, 0.4, 0.6, 0.8], "first_seen": 11, "last_seen": 11, "zones_now": ["front"], "zones_entered": ["front"], "state": "moving"}], "ended": []}
+{"frame_time": 20, "objects": [{"id": "7", "label": "person", "score": 0.8, "confirmed": true, "box": [0.4, 0.4, 0.6, 0.8], "first_seen": 11, "last_seen": 20, "zones_now": ["front"], "zones_entered": ["front"], "state": "moving"}], "ended": ["7"]}
+{"frame_time": 30, "objects": [{"id": "9", "label": "person", "score": 0.7, "confirmed": true, "box": [0.2, 0.2, 0.4, 0.4], "first_seen": 26, "last_seen": 30, "zones_now": [], "zones_entered": [], "state": "moving"}], "ended": []}
