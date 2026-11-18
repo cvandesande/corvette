@@ -5,19 +5,23 @@ use std::fmt::Write as _;
 
 use super::{Event, Track};
 
-pub(super) fn render(events: &[Event], tracks: &[Track], pairs: &[(usize, usize)]) -> String {
+// read_count is the pre-filter track total, present only when a track filter is on.
+pub(super) fn render(
+    events: &[Event],
+    read_count: Option<usize>,
+    tracks: &[Track],
+    pairs: &[(usize, usize)],
+) -> String {
     let matched = pairs.len();
     let mut report = String::from("compare-events report\nmatching is greedy and deterministic\n");
-    let counts: [(&str, usize); 5] = [
-        ("events read", events.len()),
-        ("tracks read", tracks.len()),
-        ("events matched", matched),
-        ("events without a track", events.len() - matched),
-        ("tracks without an event", tracks.len() - matched),
-    ];
-    for (name, value) in counts {
-        let _ = writeln!(report, "{name} {value}");
+    let _ = writeln!(report, "events read {}", events.len());
+    let _ = writeln!(report, "tracks read {}", read_count.unwrap_or(tracks.len()));
+    if read_count.is_some() {
+        let _ = writeln!(report, "tracks kept {}", tracks.len());
     }
+    let _ = writeln!(report, "events matched {matched}");
+    let _ = writeln!(report, "events without a track {}", events.len() - matched);
+    let _ = writeln!(report, "tracks without an event {}", tracks.len() - matched);
     let _ = writeln!(report, "events matched {matched}/{}", events.len());
     let _ = writeln!(report, "tracks matched {matched}/{}", tracks.len());
     let mut start_offsets: Vec<f64> = Vec::new();

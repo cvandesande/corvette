@@ -609,3 +609,169 @@ fn a_track_starts_at_its_first_confirmed_frame() {
         "{record_path} cam1 person t 2 open - frames=7..9\n"
     )));
 }
+
+fn zoned_object(id: &str, first: usize, zones: &str) -> String {
+    format!(
+        "{{\"id\": \"{id}\", \"label\": \"person\", \"confirmed\": true, \"first_seen\": {first}, \"zones_entered\": [{zones}]}}"
+    )
+}
+
+fn compare_with_filters(key_path: &str, record: &str, out: &str, filter: &[&str]) -> Output {
+    let mut args: Vec<&str> = vec!["compare-events", "--events", key_path, "--record", record];
+    args.extend_from_slice(filter);
+    args.extend_from_slice(&["--out", out]);
+    run(&args)
+}
+
+#[test]
+fn zoned_only_drops_tracks_that_never_entered_a_zone() {
+    let dir = TempDir::new("zonedonly");
+    let key_path = dir.write(
+        "key.json",
+        key(&[event("e1", 0, 100), event("e2", 200, 300)]).as_bytes(),
+    );
+    let frames = [
+        frame(10, &zoned_object("t1", 0, ""), ""),
+        frame(210, &zoned_object("t2", 200, "\"a\""), ""),
+    ];
+    let record_path = dir.write("record.jsonl", record(&frames).as_bytes());
+    let out = dir.path_str("report.txt");
+    let output = compare_with_filters(&key_path, &record_path, &out, &["--zoned-only", "yes"]);
+    assert_eq!(code(&output), 0, "{}", stderr_text(&output));
+    let report = dir.read("report.txt");
+    assert!(
+        report.contains(
+            "tracks read 2\ntracks kept 1\nevents matched 1\nevents without a track 1\ntracks without an event 0\nevents matched 1/2\ntracks matched 1/1\n"
+        ),
+        "{report}"
+    );
+    assert!(report.contains("unmatched events:\ne1 cam1 person 0 100 -\n"));
+    assert_eq!(code(&compare_to(&key_path, &[&record_path], &out)), 0);
+    let unfiltered = dir.read("report.txt");
+    assert!(unfiltered.contains("tracks read 2\nevents matched 2\n"));
+    assert!(!unfiltered.contains("tracks kept"));
+}
+
+#[test]
+fn min_seconds_keeps_tracks_whose_span_is_at_least_the_value() {
+    let dir = TempDir::new("minsec");
+    let key_path = dir.write("key.json", key(&[]).as_bytes());
+    let frames = [
+        frame(5, &object("s1", 5), ""),
+        frame(6, &object("s1", 5), ""),
+        frame(10, &object("s2", 10), ""),
+        frame(13, &object("s2", 10), ""),
+        frame(20, &object("s3", 20), ""),
+        frame(22, &object("s3", 20), ""),
+    ];
+    let record_path = dir.write("record.jsonl", record(&frames).as_bytes());
+    let out = dir.path_str("report.txt");
+    let output = compare_with_filters(&key_path, &record_path, &out, &["--min-seconds", "2"]);
+    assert_eq!(code(&output), 0, "{}", stderr_text(&output));
+    let report = dir.read("report.txt");
+    assert!(
+        report.contains(
+            "tracks read 3\ntracks kept 2\nevents matched 0\nevents without a track 0\ntracks without an event 2\n"
+        ),
+        "{report}"
+    );
+    assert!(report.contains(&format!("{record_path} cam1 person s2 10")));
+    assert!(report.contains(&format!("{record_path} cam1 person s3 20")));
+    assert!(!report.contains("cam1 person s1"));
+}
+
+#[test]
+fn invalid_filter_flag_values_are_usage_errors() {
+    let dir = TempDir::new("badfilter");
+    let key_path = dir.write("key.json", key(&[]).as_bytes());
+    let record_path = dir.write(
+        "record.jsonl",
+        record(&[frame(5, &object("t", 1), "")]).as_bytes(),
+    );
+    let out = dir.path_str("report.txt");
+    let cases: [(&str, &str); 4] = [
+        ("--min-seconds", "-1"),
+        ("--min-seconds", "abc"),
+        ("--min-seconds", "NaN"),
+        ("--zoned-only", "maybe"),
+    ];
+    for (flag, value) in cases {
+        let output = compare_with_filters(&key_path, &record_path, &out, &[flag, value]);
+        assert_eq!(code(&output), 2, "{flag} {value}: {}", stderr_text(&output));
+    }
+}
+
+#[test]
+fn zone_and_duration_filters_apply_together() {
+    let dir = TempDir::new("bothfilters");
+    let key_path = dir.write("key.json", key(&[]).as_bytes());
+    let frames = [
+        frame(0, &zoned_object("zl", 0, "\"a\""), ""),
+        frame(10, &zoned_object("zl", 0, "\"a\""), ""),
+        frame(20, &zoned_object("zs", 20, "\"a\""), ""),
+        frame(21, &zoned_object("zs", 20, "\"a\""), ""),
+        frame(30, &zoned_object("nl", 30, ""), ""),
+        frame(40, &zoned_object("nl", 30, ""), ""),
+        frame(50, &zoned_object("ns", 50, ""), ""),
+        frame(51, &zoned_object("ns", 50, ""), ""),
+    ];
+    let record_path = dir.write("record.jsonl", record(&frames).as_bytes());
+    let out = dir.path_str("report.txt");
+    let output = compare_with_filters(
+        &key_path,
+        &record_path,
+        &out,
+        &["--zoned-only", "yes", "--min-seconds", "5"],
+    );
+    assert_eq!(code(&output), 0, "{}", stderr_text(&output));
+    let report = dir.read("report.txt");
+    assert!(
+        report.contains(
+            "tracks read 4\ntracks kept 1\nevents matched 0\nevents without a track 0\ntracks without an event 1\n"
+        ),
+        "{report}"
+    );
+    assert!(report.contains(&format!("{record_path} cam1 person zl 0")));
+    for dropped in ["zs", "nl", "ns"] {
+        assert!(!report.contains(&format!("person {dropped}")));
+    }
+}
+
+#[test]
+fn min_seconds_measures_the_confirmed_span_not_the_first_seen() {
+    let dir = TempDir::new("confirmedspan");
+    let key_path = dir.write("key.json", key(&[]).as_bytes());
+    let unconfirmed =
+        "{\"id\": \"t\", \"label\": \"person\", \"confirmed\": false, \"first_seen\": 2}";
+    let confirmed =
+        "{\"id\": \"t\", \"label\": \"person\", \"confirmed\": true, \"first_seen\": 2}";
+    let frames = [
+        frame(3, unconfirmed, ""),
+        frame(7, confirmed, ""),
+        frame(9, unconfirmed, ""),
+    ];
+    let record_path = dir.write("record.jsonl", record(&frames).as_bytes());
+    let out = dir.path_str("report.txt");
+    let output = compare_with_filters(&key_path, &record_path, &out, &["--min-seconds", "3"]);
+    assert_eq!(code(&output), 0, "{}", stderr_text(&output));
+    let dropped = dir.read("report.txt");
+    assert!(
+        dropped.contains(
+            "tracks read 1\ntracks kept 0\nevents matched 0\nevents without a track 0\ntracks without an event 0\n"
+        ),
+        "{dropped}"
+    );
+    assert!(!dropped.contains("cam1 person t "));
+    let output = compare_with_filters(&key_path, &record_path, &out, &["--min-seconds", "2"]);
+    assert_eq!(code(&output), 0, "{}", stderr_text(&output));
+    let kept = dir.read("report.txt");
+    assert!(
+        kept.contains(
+            "tracks read 1\ntracks kept 1\nevents matched 0\nevents without a track 0\ntracks without an event 1\n"
+        ),
+        "{kept}"
+    );
+    assert!(kept.contains(&format!(
+        "{record_path} cam1 person t 2 open - frames=7..9\n"
+    )));
+}

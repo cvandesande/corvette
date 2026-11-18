@@ -32,7 +32,7 @@ usage: corvette-detect-tools COMMAND [flags]
   corvette-detect-tools annotate --luma FILE --width W --height H --boxes FILE --frames LIST --out DIR
   corvette-detect-tools regions --boxes FILE --width W --height H --out FILE [--model-size S]
   corvette-detect-tools export-events --in FILE --out FILE [--camera NAME] [--label NAME]
-  corvette-detect-tools compare-events --events FILE --record FILE [--record FILE ...] --out FILE
+  corvette-detect-tools compare-events --events FILE --record FILE [--record FILE ...] --out FILE [--zoned-only yes|no] [--min-seconds S]
   corvette-detect-tools replay --socket PATH --labels FILE --in SEGMENT --out FILE [--camera NAME] [--width W] [--height H] [--fps F] [--deadline-ms D] [--confirm X]
     replay optional: --camera --width --height --fps --deadline-ms --confirm
 flags are --name value pairs in any order

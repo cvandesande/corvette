@@ -13,7 +13,7 @@ use crate::Failure;
 use crate::args::Flags;
 use crate::motion_detect::{open_input, open_output};
 
-const COMPARE_FLAGS: &[&str] = &["events", "out"];
+const COMPARE_FLAGS: &[&str] = &["events", "out", "zoned-only", "min-seconds"];
 const OPEN_END: f64 = f64::INFINITY;
 
 struct Event {
@@ -43,14 +43,40 @@ pub(crate) fn run(args: &[String]) -> Result<ExitCode, Failure> {
     let flags = Flags::parse(&rest, COMPARE_FLAGS).ok_or(Failure::Usage)?;
     let key_path = flags.required("events")?;
     let out = flags.required("out")?;
+    let zoned_only = match flags.get("zoned-only") {
+        None | Some("no") => false,
+        Some("yes") => true,
+        Some(_) => return Err(Failure::Usage),
+    };
+    let min_seconds = flags
+        .get("min-seconds")
+        .map(|text| {
+            text.parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .ok_or(Failure::Usage)
+        })
+        .transpose()?;
     let events = read_events(key_path)?;
     let mut tracks: Vec<Track> = Vec::new();
     for (record, path) in records.iter().enumerate() {
         let text = read_file(path)?;
         tracks.extend(read_tracks(record, path, &text)?);
     }
+    let read_count = tracks.len();
+    let filters_on = zoned_only || min_seconds.is_some();
+    let tracks: Vec<Track> = tracks
+        .into_iter()
+        .filter(|track| {
+            // A zone name is never removed once entered, so the final set equals the entered set.
+            let missing_zone = zoned_only && track.zones.is_empty();
+            let short_span =
+                min_seconds.is_some_and(|minimum| track.last_frame - track.first_frame < minimum);
+            !missing_zone && !short_span
+        })
+        .collect();
     let pairs = match_events(&events, &tracks);
-    let body = report::render(&events, &tracks, &pairs);
+    let body = report::render(&events, filters_on.then_some(read_count), &tracks, &pairs);
     let mut output = open_output(out)?;
     std::io::Write::write_all(&mut output, body.as_bytes())
         .map_err(|error| Failure::Input(format!("cannot write {out}: {error}")))?;
