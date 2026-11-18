@@ -7,6 +7,7 @@ license.workspace = true
 description = "Input tensor generators and output comparers for inference worker parity runs"
 
 [dependencies]
+corvette-detect = { path = "../corvette-detect" }
 corvette-detect-proto = { path = "../corvette-detect-proto" }
 corvette-motion = { path = "../corvette-motion" }
 serde_json = "1.0.149"

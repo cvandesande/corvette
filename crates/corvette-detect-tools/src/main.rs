@@ -9,6 +9,7 @@ pub mod files;
 pub mod latency;
 pub mod motion_detect;
 pub mod regions;
+pub mod replay;
 pub mod run;
 pub mod tensors;
 
@@ -32,6 +33,8 @@ usage: corvette-detect-tools COMMAND [flags]
   corvette-detect-tools regions --boxes FILE --width W --height H --out FILE [--model-size S]
   corvette-detect-tools export-events --in FILE --out FILE [--camera NAME] [--label NAME]
   corvette-detect-tools compare-events --events FILE --record FILE [--record FILE ...] --out FILE
+  corvette-detect-tools replay --socket PATH --labels FILE --in SEGMENT --out FILE [--camera NAME] [--width W] [--height H] [--fps F] [--deadline-ms D] [--confirm X]
+    replay optional: --camera --width --height --fps --deadline-ms --confirm
 flags are --name value pairs in any order
 exit codes:
   0  success; for compare, the maximum absolute error is not above the tolerance
@@ -75,6 +78,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, Failure> {
         "motion-detect" => motion_detect::run(tail),
         "annotate" => annotate::run(tail),
         "regions" => regions::run(tail),
+        "replay" => replay::run(tail),
         "export-events" => export_events::run(tail),
         "compare-events" => compare_events::run(tail),
         _ => Err(Failure::Usage),
