@@ -10,6 +10,7 @@ mod object_stage;
 mod reader;
 mod record;
 mod region_stage;
+mod replay;
 mod segment;
 mod source;
 mod supervised;
@@ -23,6 +24,7 @@ pub use object_stage::{FrameObjects, ObjectStage, ObjectStageError, TrackedObjec
 pub use reader::{Frame, FrameReader, ReadError};
 pub use record::{RecordError, RecordHeader, RecordWriter};
 pub use region_stage::{RegionStage, RegionStageError, RegionStageSettings, RegionTensor};
+pub use replay::{ReplayError, ReplayPipeline};
 pub use segment::{SegmentError, SegmentName};
 pub use source::{FrameSource, STREAM_QUEUE_CAPACITY, SourceError};
 pub use supervised::{Status, Supervised};
