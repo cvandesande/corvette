@@ -580,7 +580,7 @@ async fn a_clip_url_appears_for_a_review_with_an_overlapping_recording() {
     assert_eq!(
         review(&response, "r-front").media.clip,
         Some(MediaLink {
-            url: "/corvette/api/v1/media/front/start/1500/end/1600/master.m3u8".to_owned()
+            url: "/corvette/api/v1/media/front/start/1496/end/1604/master.m3u8".to_owned()
         })
     );
     assert_eq!(review(&response, "r-back").media.clip, None);
@@ -588,7 +588,7 @@ async fn a_clip_url_appears_for_a_review_with_an_overlapping_recording() {
     assert_eq!(
         review(&response, "r-side").media.clip,
         Some(MediaLink {
-            url: "/corvette/api/v1/media/side/start/1520/end/1800/master.m3u8".to_owned()
+            url: "/corvette/api/v1/media/side/start/1516/end/1800/master.m3u8".to_owned()
         })
     );
     env.finish();
@@ -605,7 +605,7 @@ async fn an_in_progress_review_links_a_clip_to_the_request_moment() {
     assert_eq!(
         review(&response, "live").media.clip,
         Some(MediaLink {
-            url: "/corvette/api/v1/media/front/start/1500/end/1800/master.m3u8".to_owned()
+            url: "/corvette/api/v1/media/front/start/1496/end/1800/master.m3u8".to_owned()
         })
     );
     env.finish();

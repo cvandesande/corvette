@@ -514,7 +514,7 @@ async fn route(
             camera_status(config, status_state, &request.remote_role, clock).await
         }
         Route::Cameras => cameras(config, &request.remote_role).await,
-        Route::ClipLink => clip_link(request, config, db_path).await,
+        Route::ClipLink => clip_link(request, config, db_path, clock).await,
         Route::Health => health(config, db_path).await,
     }
 }
@@ -636,7 +636,12 @@ async fn activity(
     )
 }
 
-async fn clip_link(request: &Request, config: &ConfigSource, db_path: &Path) -> Response {
+async fn clip_link(
+    request: &Request,
+    config: &ConfigSource,
+    db_path: &Path,
+    clock: &Clock,
+) -> Response {
     let query = match clip_link::ClipLinkQuery::parse(&request.query) {
         Ok(query) => query,
         Err(reason) => return bad_request(&reason),
@@ -674,8 +679,8 @@ async fn clip_link(request: &Request, config: &ConfigSource, db_path: &Path) -> 
         "200 OK",
         serde_json::to_vec(&activity::playlist_link(
             &query.camera,
-            query.start,
-            query.end,
+            activity::padded_clip_start(query.start),
+            activity::padded_clip_end(query.end, clock()),
         ))
         .expect("media link serializes"),
     )

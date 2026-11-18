@@ -28,15 +28,20 @@ struct TestEnv {
 
 impl TestEnv {
     async fn start(tag: &str) -> Self {
-        Self::with_config(tag, Some(config_response(&fixture_config()))).await
+        Self::with_config(tag, Some(config_response(&fixture_config())), None).await
+    }
+
+    /// A server whose clock answers `now` for every request.
+    async fn start_with_clock(tag: &str, now: f64) -> Self {
+        Self::with_config(tag, Some(config_response(&fixture_config())), Some(now)).await
     }
 
     /// A config address where nothing answers, as a stopped backing would.
     async fn refusing(tag: &str) -> Self {
-        Self::with_config(tag, None).await
+        Self::with_config(tag, None, None).await
     }
 
-    async fn with_config(tag: &str, config_response: Option<Vec<u8>>) -> Self {
+    async fn with_config(tag: &str, config_response: Option<Vec<u8>>, clock: Option<f64>) -> Self {
         let config_addr = Fixture::start(config_response).await;
         let dir = unique_dir(tag);
         let _ = std::fs::remove_dir_all(&dir);
@@ -45,6 +50,10 @@ impl TestEnv {
         let db_path = dir.join("frigate.db");
         let config = Arc::new(ConfigSource::new(config_addr, CACHE_TTL));
         let server = ApiServer::bind(&socket, CONNECTION_TIMEOUT, config, &db_path).expect("bind");
+        let server = match clock {
+            Some(now) => server.with_clock(move || now),
+            None => server,
+        };
         let socket = server.socket_path().to_path_buf();
         let handle = tokio::spawn(server.serve_until(std::future::pending::<()>()));
         Self {
@@ -282,9 +291,40 @@ async fn clip_link_answers_the_playlist_address_for_a_recorded_range() {
         .await;
     assert_playlist(
         &raw,
-        "/corvette/api/v1/media/front/start/1100/end/1400/master.m3u8",
+        "/corvette/api/v1/media/front/start/1096/end/1404/master.m3u8",
     );
     env.finish();
+}
+
+#[tokio::test]
+async fn clip_link_pads_the_address_by_four_seconds_on_each_side() {
+    let env = TestEnv::start("padding").await;
+    env.seed(&[("r1", "front", 1_000.0, 1_500.0)]);
+
+    let raw = env
+        .clip_link("admin", "camera=front&start=1000&end=1010")
+        .await;
+    assert_playlist(
+        &raw,
+        "/corvette/api/v1/media/front/start/996/end/1014/master.m3u8",
+    );
+    env.finish();
+}
+
+#[tokio::test]
+async fn clip_link_caps_the_padded_end_at_the_request_moment() {
+    for (now, end) in [(1_100.0, "1014"), (1_012.0, "1012"), (1_005.0, "1010")] {
+        let env = TestEnv::start_with_clock("tail-cap", now).await;
+        env.seed(&[("r1", "front", 1_000.0, 1_500.0)]);
+        let raw = env
+            .clip_link("admin", "camera=front&start=1000&end=1010")
+            .await;
+        assert_playlist(
+            &raw,
+            &format!("/corvette/api/v1/media/front/start/996/end/{end}/master.m3u8"),
+        );
+        env.finish();
+    }
 }
 
 #[tokio::test]
@@ -297,7 +337,7 @@ async fn clip_link_percent_encodes_the_camera_name_in_the_address() {
         .await;
     assert_playlist(
         &raw,
-        "/corvette/api/v1/media/back%20yard/start/1100/end/1400/master.m3u8",
+        "/corvette/api/v1/media/back%20yard/start/1096/end/1404/master.m3u8",
     );
     env.finish();
 }
@@ -383,7 +423,7 @@ async fn clip_link_serves_a_camera_that_is_switched_off_when_the_role_may_see_it
         .await;
     assert_playlist(
         &raw,
-        "/corvette/api/v1/media/living/start/1100/end/1400/master.m3u8",
+        "/corvette/api/v1/media/living/start/1096/end/1404/master.m3u8",
     );
     env.finish();
 }
@@ -398,7 +438,7 @@ async fn clip_link_uses_the_requested_range_in_the_address_not_the_recording() {
         .await;
     assert_playlist(
         &raw,
-        "/corvette/api/v1/media/front/start/1250.5/end/1260/master.m3u8",
+        "/corvette/api/v1/media/front/start/1246.5/end/1264/master.m3u8",
     );
     env.finish();
 }
@@ -492,7 +532,7 @@ async fn clip_link_accepts_a_range_of_exactly_thirty_one_days() {
     assert_playlist(
         &env.clip_link("admin", "camera=front&start=1000&end=2679400")
             .await,
-        "/corvette/api/v1/media/front/start/1000/end/2679400/master.m3u8",
+        "/corvette/api/v1/media/front/start/996/end/2679404/master.m3u8",
     );
     assert_error_shape(
         &env.clip_link("admin", "camera=front&start=1000&end=2679400.5")
@@ -517,7 +557,7 @@ async fn clip_link_keeps_a_plus_sign_in_the_camera_name() {
     assert_playlist(
         &env.clip_link("admin", "camera=back%20yard&start=1100&end=1400")
             .await,
-        "/corvette/api/v1/media/back%20yard/start/1100/end/1400/master.m3u8",
+        "/corvette/api/v1/media/back%20yard/start/1096/end/1404/master.m3u8",
     );
     env.finish();
 }

@@ -501,6 +501,22 @@ fn thumbnail_link(thumb_path: &str, media_root: &Path) -> Option<MediaLink> {
     })
 }
 
+/// Seconds every clip link adds before a start and after a stored end, the
+/// figure the current backing's own interface plays a review with.
+pub(crate) const CLIP_PADDING_SECONDS: f64 = 4.0;
+
+/// A clip start with its lead-in, clamped at zero.
+#[must_use]
+pub(crate) fn padded_clip_start(start: f64) -> f64 {
+    (start - CLIP_PADDING_SECONDS).max(0.0)
+}
+
+/// A stored clip end with its tail, capped at the request moment.
+#[must_use]
+pub(crate) fn padded_clip_end(end: f64, now: f64) -> f64 {
+    end.max((end + CLIP_PADDING_SECONDS).min(now))
+}
+
 fn clip_link(
     camera: &str,
     start: f64,
@@ -508,11 +524,12 @@ fn clip_link(
     has_recording: bool,
     now: f64,
 ) -> Option<MediaLink> {
-    let end = end.unwrap_or(now);
     if !has_recording {
         return None;
     }
-    Some(playlist_link(camera, start, end))
+    // The request moment stands in for an unfinished review's end and takes no tail.
+    let end = end.map_or(now, |end| padded_clip_end(end, now));
+    Some(playlist_link(camera, padded_clip_start(start), end))
 }
 
 pub(crate) fn playlist_link(camera: &str, start: f64, end: f64) -> MediaLink {
@@ -1464,7 +1481,7 @@ mod tests {
         assert_eq!(
             clip_link("front", live.start, live.end, live.has_recording, NOW),
             Some(MediaLink {
-                url: "/corvette/api/v1/media/front/start/1500/end/1950/master.m3u8".to_owned()
+                url: "/corvette/api/v1/media/front/start/1496/end/1950/master.m3u8".to_owned()
             })
         );
     }
@@ -1763,7 +1780,7 @@ mod tests {
         assert_eq!(
             clip_link("front door", 1.5, Some(2.0), true, NOW).expect("clip link"),
             MediaLink {
-                url: "/corvette/api/v1/media/front%20door/start/1.5/end/2/master.m3u8".to_owned()
+                url: "/corvette/api/v1/media/front%20door/start/0/end/6/master.m3u8".to_owned()
             }
         );
         assert_eq!(clip_link("front", 1.5, Some(2.0), false, NOW), None);
@@ -1775,7 +1792,47 @@ mod tests {
         assert_eq!(
             clip_link("front", 1.5, None, true, NOW).expect("clip link"),
             MediaLink {
-                url: "/corvette/api/v1/media/front/start/1.5/end/1950/master.m3u8".to_owned()
+                url: "/corvette/api/v1/media/front/start/0/end/1950/master.m3u8".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_stored_range_links_four_seconds_on_each_side() {
+        assert_eq!(
+            clip_link("front", 1_000.0, Some(1_010.0), true, NOW).expect("clip link"),
+            MediaLink {
+                url: "/corvette/api/v1/media/front/start/996/end/1014/master.m3u8".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_start_inside_the_lead_in_clamps_to_zero() {
+        assert_eq!(
+            clip_link("front", 2.0, Some(10.0), true, NOW).expect("clip link"),
+            MediaLink {
+                url: "/corvette/api/v1/media/front/start/0/end/14/master.m3u8".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_stored_end_within_the_tail_clamps_to_the_request_moment() {
+        assert_eq!(
+            clip_link("front", 1_000.0, Some(1_948.0), true, NOW).expect("clip link"),
+            MediaLink {
+                url: "/corvette/api/v1/media/front/start/996/end/1950/master.m3u8".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn an_ongoing_clip_pads_the_start_but_not_the_request_moment_end() {
+        assert_eq!(
+            clip_link("front", 100.0, None, true, NOW).expect("clip link"),
+            MediaLink {
+                url: "/corvette/api/v1/media/front/start/96/end/1950/master.m3u8".to_owned()
             }
         );
     }
@@ -1827,7 +1884,7 @@ mod tests {
                             url: "/thumb.webp".to_owned()
                         }),
                         clip: Some(MediaLink {
-                            url: "/corvette/api/v1/media/front/start/1500/end/1600/master.m3u8"
+                            url: "/corvette/api/v1/media/front/start/1496/end/1604/master.m3u8"
                                 .to_owned()
                         }),
                     },

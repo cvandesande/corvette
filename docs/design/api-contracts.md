@@ -845,8 +845,9 @@ reviews, so a review's `media` carries only its thumbnail and its clip. Each lin
   request to request. The URL is the address of "A recorded range plays through one
   playlist route",
   `/corvette/api/v1/media/{camera}/start/{start}/end/{end}/master.m3u8`, with the camera
-  percent-encoded, the review's start, and its end (the moment of the request for a review
-  with no end). The answers that route gives for a range it cannot serve are those of that
+  percent-encoded and the review's start and end padded as that section states (the moment
+  of the request in place of the end for a review with no end). The answers that route gives
+  for a range it cannot serve are those of that
   section. **Current backing**: a recording is a row of the backing's database, and a
   recording file deleted outside Frigate while its row remains is not detected, as
   Frigate does not detect it.
@@ -875,6 +876,15 @@ The address is
 seconds, decimals allowed. Clients do not build this address: they take it
 from a link the server issued, either a review's `media.clip` or the range-link
 route's answer, as "Media availability is explicit" requires.
+
+Every clip link carries four seconds of lead-in before its start, with the
+start clamped at zero, and its end is four seconds after a stored end but
+never later than the moment of the request. A review still in progress
+therefore ends at the moment of the request. A clip is offered only when the
+range without the padding has a recording overlapping it, so the padding
+never creates a link on its own. The figure matches the review padding of
+the current backing's own interface, where it is a client-side constant
+(`REVIEW_PADDING`, `web/src/types/review.ts:71` at v0.17.2).
 
 The playlist's variant, index, init and segment URIs are relative and
 resolve under the route's own directory (`…/start/<start>/end/<end>/`), so
@@ -936,8 +946,8 @@ The query is checked before the configuration is fetched, so a malformed request
 The answer is `200` with `{"url": "<address>"}` when the caller's role may see the camera
 and recorded footage of the camera overlaps `[start, end)` under "Ranges use half-open
 overlap". The address is the one "A recorded range plays through one playlist route"
-defines, with the camera percent-encoded and the requested range, and it has the same shape
-as the `url` of a review's `media.clip`.
+defines, with the camera percent-encoded and the requested range padded as that section
+states, and it has the same shape as the `url` of a review's `media.clip`.
 
 A camera that does not exist, a camera the caller's role may not see, and a camera with no
 recorded footage overlapping the range each answer `404` `not_found` with the same `code`
