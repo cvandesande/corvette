@@ -74,6 +74,11 @@ fn a_tracked_object_reports_exact_fields_and_confirms_when_its_score_reaches_the
             (340.0_f64 / 480.0).to_bits(),
         ]
     );
+    assert_eq!(
+        object.edges,
+        [100, 140, 200, 340],
+        "the detection box, passed through by the tracker"
+    );
     assert!(same(object.first_seen, 1.0));
     assert!(same(object.last_seen, 1.0));
     assert!(object.zones_now.is_empty());
@@ -342,5 +347,10 @@ fn edges_touching_the_frame_border_divide_without_clamping() {
     assert!(
         same(object.bounds[3], 479.0 / 480.0),
         "the edge reaches 479 uncapped"
+    );
+    assert_eq!(
+        object.edges,
+        [540, 380, 639, 479],
+        "the tracker reports the box unclamped"
     );
 }

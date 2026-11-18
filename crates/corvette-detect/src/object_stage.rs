@@ -15,6 +15,8 @@ pub struct TrackedObject {
     pub score: f64,
     pub confirmed: bool,
     pub bounds: [f64; 4],
+    /// The tracker's box in frame pixels, `[x1, y1, x2, y2]`.
+    pub edges: [i32; 4],
     pub first_seen: f64,
     pub last_seen: f64,
     pub zones_now: Vec<String>,
@@ -72,8 +74,7 @@ impl<'a> ObjectStage<'a> {
         })
     }
 
-    /// Steps one frame: live objects in tracker order, including objects the tracker keeps while unseen, because the objects route answers "one entry per live tracked object".
-    /// `score` is the median of the object's last ten scores and `confirmed` its sticky flag, a frame without a detection counting as 0.0, as the objects route defines.
+    /// Steps one frame: live objects in tracker order, kept-while-unseen included ("one entry per live tracked object"); `score` the median of its last ten scores, `confirmed` its sticky flag, an unseen frame counting 0.0.
     /// # Errors
     pub fn step(
         &mut self,
@@ -110,6 +111,7 @@ impl<'a> ObjectStage<'a> {
                     f64::from(x2) / width,
                     f64::from(y2) / height,
                 ],
+                edges: view.edges,
                 first_seen: view.start_time,
                 last_seen: view.frame_time,
                 zones_now: zones_state.current,

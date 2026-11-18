@@ -21,6 +21,7 @@ fn object(id: &str) -> TrackedObject {
         score: 0.9,
         confirmed: true,
         bounds: [0.1, 0.2, 0.3, 0.4],
+        edges: [0, 0, 0, 0],
         first_seen: 5.0,
         last_seen: 6.0,
         zones_now: Vec::new(),
@@ -76,6 +77,14 @@ fn a_frame_with_objects_and_endings_prints_every_field_in_contract_order() {
         ..object("2")
     };
     let text = frame_line(&frame_of(12.5, vec![moving, still], vec!["7", "9"]));
+    let mut edged = object("3");
+    edged.edges = [40, 50, 60, 70];
+    let plain = object("3");
+    assert_eq!(
+        frame_line(&frame_of(12.5, vec![edged], Vec::new())),
+        frame_line(&frame_of(12.5, vec![plain], Vec::new())),
+        "the writer ignores edges, so the lines are identical"
+    );
     assert_eq!(
         text,
         "{\"frame_time\":12.5,\"objects\":[\
