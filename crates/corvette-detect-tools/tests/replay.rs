@@ -295,9 +295,21 @@ fn a_missing_or_unknown_flag_or_bad_value_exits_two() {
         ["--confirm", "0"],
         ["--confirm", "-0.0"],
         ["--confirm", "abc"],
+        ["--area", "0.1,0.2,0.3"],
+        ["--area", "0,0,1,0,0.5"],
+        ["--area", "0,0,0,1"],
+        ["--area", "0,0,1.5,0.5,1,1"],
+        ["--area", "NaN,0,0,0.5,1,1"],
+        ["--area-name", "back"],
+        ["--area-pad", "5"],
+        ["--area-pad", "201"],
     ] {
         cases.push(with(full.clone(), &extra));
     }
+    cases.push(with(
+        full.clone(),
+        &["--area", "0,0,1,0,0.4,1", "--area-pad", "201"],
+    ));
     for case in cases {
         let output = run(&case);
         assert_eq!(code(&output), 2, "{case:?}: {}", stderr_text(&output));
@@ -345,6 +357,26 @@ fn a_missing_or_unparsable_labels_file_exits_three_naming_it() {
             "names the file: {labels}"
         );
     }
+}
+
+#[test]
+fn an_area_flag_lists_the_default_area_name_on_tracked_objects() {
+    let dir = TempDir::new("area");
+    let segment = make_segment(&dir.path);
+    let (output, bytes) =
+        replay_with_worker(&dir, "area", &segment, &["--area", "0.3,1,1,1,0.7,0"]);
+    assert_eq!(code(&output), 0, "{}", stderr_text(&output));
+    let lines = record_lines(&bytes);
+    assert!(
+        lines.iter().any(|line| line.contains("\"id\":\"1\"")),
+        "an object line exists"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("\"zones_entered\":[\"area\"]")),
+        "a frame line carries the default area name"
+    );
 }
 
 #[test]

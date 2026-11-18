@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use corvette_detect::{Labels, ReplayConfig, SegmentName, replay_segment};
+use corvette_detect::{Area, Labels, ReplayConfig, SegmentName, replay_segment};
 
 use crate::Failure;
 use crate::args::Flags;
@@ -24,6 +24,9 @@ const REPLAY_FLAGS: &[&str] = &[
     "fps",
     "deadline-ms",
     "confirm",
+    "area",
+    "area-name",
+    "area-pad",
 ];
 const MIN_EDGE: u32 = 16;
 const MAX_EDGE: u32 = 8192;
@@ -33,6 +36,10 @@ const MIN_DEADLINE_MS: u32 = 1;
 const MAX_DEADLINE_MS: u32 = 600_000;
 const DEFAULT_DEADLINE_MS: u32 = 10_000;
 const DEFAULT_CONFIRM: f64 = 0.7;
+const MIN_AREA_VALUES: usize = 6;
+const DEFAULT_AREA_NAME: &str = "area";
+const MAX_AREA_PAD: u32 = 200;
+const DEFAULT_AREA_PAD: u32 = 16;
 
 pub(crate) fn run(args: &[String]) -> Result<ExitCode, Failure> {
     let flags = Flags::parse(args, REPLAY_FLAGS).ok_or(Failure::Usage)?;
@@ -54,6 +61,7 @@ pub(crate) fn run(args: &[String]) -> Result<ExitCode, Failure> {
         DEFAULT_DEADLINE_MS,
     )?;
     let confirm_threshold = parse_confirm(flags.get("confirm"))?;
+    let area = parse_area(&flags)?;
     let labels_text = fs::read_to_string(labels_path)
         .map_err(|error| Failure::Input(format!("cannot read {labels_path}: {error}")))?;
     let labels = Labels::parse(&labels_text)
@@ -67,6 +75,7 @@ pub(crate) fn run(args: &[String]) -> Result<ExitCode, Failure> {
         deadline: Duration::from_millis(u64::from(deadline_ms)),
         labels,
         confirm_threshold,
+        area,
     };
     refuse_out_is_input(out, segment)?;
     let writer = BufWriter::new(open_output(out)?);
@@ -104,4 +113,40 @@ fn parse_confirm(text: Option<&str>) -> Result<f64, Failure> {
         .ok()
         .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
         .ok_or(Failure::Usage)
+}
+
+fn parse_area(flags: &Flags) -> Result<Option<Area>, Failure> {
+    let Some(text) = flags.get("area") else {
+        if flags.get("area-name").is_some() || flags.get("area-pad").is_some() {
+            return Err(Failure::Usage);
+        }
+        return Ok(None);
+    };
+    let name = flags
+        .get("area-name")
+        .map_or_else(|| DEFAULT_AREA_NAME.to_owned(), str::to_owned);
+    let pad_pixels = flags.bounded("area-pad", 0, MAX_AREA_PAD, DEFAULT_AREA_PAD)?;
+    let parsed: Result<Vec<f64>, _> = text.split(',').map(str::parse::<f64>).collect();
+    let values = parsed
+        .ok()
+        .filter(|values| {
+            values.len() >= MIN_AREA_VALUES
+                && values.len().is_multiple_of(2)
+                && values
+                    .iter()
+                    .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        })
+        .ok_or(Failure::Usage)?;
+    let mut polygon: Vec<(f64, f64)> = Vec::new();
+    for pair in values.chunks_exact(2) {
+        let [x, y] = pair else {
+            return Err(Failure::Usage);
+        };
+        polygon.push((*x, *y));
+    }
+    Ok(Some(Area {
+        name,
+        polygon,
+        pad_pixels,
+    }))
 }

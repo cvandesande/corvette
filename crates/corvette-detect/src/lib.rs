@@ -26,7 +26,7 @@ pub use reader::{Frame, FrameReader, ReadError};
 pub use record::{RecordError, RecordHeader, RecordWriter};
 pub use region_stage::{RegionStage, RegionStageError, RegionStageSettings, RegionTensor};
 pub use replay::{ReplayError, ReplayPipeline};
-pub use replay_segment::{ReplayConfig, ReplaySegmentError, ReplaySummary, replay_segment};
+pub use replay_segment::{Area, ReplayConfig, ReplaySegmentError, ReplaySummary, replay_segment};
 pub use segment::{SegmentError, SegmentName};
 pub use source::{FrameSource, STREAM_QUEUE_CAPACITY, SourceError};
 pub use supervised::{Status, Supervised};

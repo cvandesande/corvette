@@ -6,8 +6,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use corvette_motion::{MotionSettings, Shape, SizeGrid};
-use corvette_track::{IdSource, ObjectFilter, ObjectFilters, TrackerSettings, ZoneSet};
+use corvette_motion::{
+    Image, MotionSettings, Shape, SizeGrid, fill_polygons, motion_shape, shrink_keep_mask,
+};
+use corvette_track::{
+    IdSource, ObjectFilter, ObjectFilters, TrackerSettings, Zone, ZoneSet, polygon_from_relative,
+};
 
 use crate::backoff::DEFAULT_POLICY;
 use crate::candidate_stage::CandidateStage;
@@ -31,6 +35,15 @@ pub struct ReplayConfig {
     pub deadline: Duration,
     pub labels: Labels,
     pub confirm_threshold: f64,
+    pub area: Option<Area>,
+}
+
+/// One camera area: a zone name and its relative `x,y` polygon in `0.0..=1.0`; `pad_pixels` grows the motion keep mask outward by a square dilation.
+#[derive(Clone, Debug)]
+pub struct Area {
+    pub name: String,
+    pub polygon: Vec<(f64, f64)>,
+    pub pad_pixels: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +59,7 @@ pub enum ReplaySegmentError {
     Worker(EngineError),
     Stage(ReplayError),
     Io(String),
+    Area(String),
     NoFrames,
 }
 
@@ -64,6 +78,7 @@ impl fmt::Display for ReplaySegmentError {
             Self::Worker(error) => write!(f, "replay worker: {error}"),
             Self::Stage(error) => write!(f, "{error}"),
             Self::Io(detail) => write!(f, "replay: {detail}"),
+            Self::Area(detail) => write!(f, "replay area: {detail}"),
             Self::NoFrames => f.write_str("replay: the segment decoded no frames"),
         }
     }
@@ -73,7 +88,7 @@ impl std::error::Error for ReplaySegmentError {}
 
 /// Replays one segment through the stages; blocks until the decoded frames end, flushes `out` before returning, and must not be called from inside a Tokio runtime, where it panics.
 /// # Errors
-/// The failing step's variant; `Io` covers a missing segment, a refused shape, a failed runtime build and a failed flush (a refused frame size or rate is `Spawn`), and `NoFrames` covers a segment that decoded no frame (the header is already written).
+/// The failing step's variant; `Io` covers a missing segment, a refused shape, a failed runtime build and a failed flush (a refused frame size or rate is `Spawn`), and `NoFrames` covers a segment that decoded no frame (the header is already written); a refused area polygon or mask is `Area`.
 pub fn replay_segment<W: Write>(
     segment: &Path,
     config: &ReplayConfig,
@@ -106,10 +121,17 @@ pub fn replay_segment<W: Write>(
         usize::try_from(config.frame_height).unwrap_or(0),
     )
     .ok_or_else(|| ReplaySegmentError::Io(String::from("frame shape refused the settings")))?;
+    let motion = MotionSettings::default();
+    let area = match &config.area {
+        None => None,
+        Some(area) => Some(
+            area_parts(area, frame_shape, motion.frame_height).map_err(ReplaySegmentError::Area)?,
+        ),
+    };
     // Frigate defaults the deployment runs: floor 320, 640 model, "person" tracked with the default filter.
     let regions = RegionStage::new(
         RegionStageSettings {
-            motion: MotionSettings::default(),
+            motion,
             floor: 320,
             grid: SizeGrid::empty(),
             model: Shape::new(640, 640)
@@ -117,7 +139,7 @@ pub fn replay_segment<W: Write>(
             motion_enabled: true,
         },
         frame_shape,
-        None,
+        area.as_ref().map(|(_, mask)| mask.plane()),
     )
     .ok_or_else(|| ReplaySegmentError::Io(String::from("region stage refused the settings")))?;
     let mut filters = BTreeMap::new();
@@ -140,13 +162,12 @@ pub fn replay_segment<W: Write>(
         own_labels: Vec::new(),
     };
     let mut ids = IdSource::default();
-    let objects = ObjectStage::new(
-        tracker,
-        &mut ids,
-        ZoneSet::new(Vec::new()),
-        config.confirm_threshold,
-    )
-    .ok_or_else(|| ReplaySegmentError::Io(String::from("object stage refused the settings")))?;
+    let zones = match area {
+        None => ZoneSet::new(Vec::new()),
+        Some((zone, _)) => ZoneSet::new(vec![zone]),
+    };
+    let objects = ObjectStage::new(tracker, &mut ids, zones, config.confirm_threshold)
+        .ok_or_else(|| ReplaySegmentError::Io(String::from("object stage refused the settings")))?;
     let header = RecordHeader {
         camera: config.camera.clone(),
         segment: file_name.to_owned(),
@@ -213,4 +234,98 @@ async fn pump_frames<W: Write>(
         Ok(frames)
     };
     flushed.and(counted)
+}
+
+const AREA_INERTIA: u32 = 3;
+const POLYGON_REFUSAL: &str = "area polygon needs at least three finite points inside 0.0..=1.0";
+
+/// Builds the area's zone in frame pixels (Frigate defaults: inertia 3, empty label filter) and its motion keep mask, shaped `motion_shape(frame, motion_height)`, with the polygon grown by `pad_pixels` kept and everything else ignored.
+fn area_parts(area: &Area, frame: Shape, motion_height: usize) -> Result<(Zone, Image), String> {
+    let width = u32::try_from(frame.width()).map_err(|_| POLYGON_REFUSAL.to_owned())?;
+    let height = u32::try_from(frame.height()).map_err(|_| POLYGON_REFUSAL.to_owned())?;
+    let points: Vec<[f64; 2]> = area
+        .polygon
+        .iter()
+        .map(|point| [point.0, point.1])
+        .collect();
+    let polygon =
+        polygon_from_relative(&points, width, height).ok_or_else(|| POLYGON_REFUSAL.to_owned())?;
+    let zone = Zone {
+        name: area.name.clone(),
+        polygon,
+        labels: Vec::new(),
+        inertia: AREA_INERTIA,
+    };
+    let motion = motion_shape(frame, motion_height)
+        .ok_or_else(|| "area mask: no motion shape for this frame".to_owned())?;
+    let filled = fill_polygons(frame, std::slice::from_ref(&area.polygon))
+        .ok_or_else(|| POLYGON_REFUSAL.to_owned())?;
+    let mut keep: Vec<u8> = filled
+        .into_data()
+        .into_iter()
+        .map(|byte| if byte == 0 { 255 } else { 0 })
+        .collect();
+    let pad = usize::try_from(area.pad_pixels).map_err(|_| POLYGON_REFUSAL.to_owned())?;
+    grow(&mut keep, frame.width(), frame.height(), pad)?;
+    let grown = Image::new(keep, frame)
+        .ok_or_else(|| "area mask: the grown plane does not match the frame shape".to_owned())?;
+    let mask = shrink_keep_mask(grown.plane(), motion).ok_or_else(|| {
+        "area mask: the frame-to-motion shrink refused this pair of shapes".to_owned()
+    })?;
+    Ok((zone, mask))
+}
+
+fn grow(keep: &mut [u8], width: usize, height: usize, pad: usize) -> Result<(), String> {
+    if pad == 0 || width == 0 || height == 0 {
+        return Ok(());
+    }
+    let outside = "area mask: the plane is shorter than its shape";
+    for row in keep.chunks_mut(width) {
+        grow_axis(row, pad);
+    }
+    let mut column: Vec<u8> = vec![0u8; height];
+    for x in 0..width {
+        for (y, byte) in column.iter_mut().enumerate() {
+            *byte = keep
+                .get(y * width + x)
+                .copied()
+                .ok_or_else(|| outside.to_owned())?;
+        }
+        grow_axis(&mut column, pad);
+        for (y, byte) in column.iter().enumerate() {
+            *keep
+                .get_mut(y * width + x)
+                .ok_or_else(|| outside.to_owned())? = *byte;
+        }
+    }
+    Ok(())
+}
+
+fn grow_axis(line: &mut [u8], pad: usize) {
+    let forward: Vec<bool> = line
+        .iter()
+        .scan(pad + 1, |since, byte| {
+            *since = if *byte == 0 {
+                since.saturating_add(1)
+            } else {
+                0
+            };
+            Some(*since <= pad)
+        })
+        .collect();
+    let back: Vec<bool> = line
+        .iter()
+        .rev()
+        .scan(pad + 1, |since, byte| {
+            *since = if *byte == 0 {
+                since.saturating_add(1)
+            } else {
+                0
+            };
+            Some(*since <= pad)
+        })
+        .collect();
+    for (byte, seen) in line.iter_mut().zip(forward.iter().zip(back.iter().rev())) {
+        *byte = if *seen.0 || *seen.1 { 255 } else { 0 };
+    }
 }

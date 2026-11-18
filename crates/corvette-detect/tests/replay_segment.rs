@@ -4,18 +4,28 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use corvette_detect::{
-    CandidateError, EngineError, Labels, ReplayConfig, ReplayError, ReplaySegmentError,
+    Area, CandidateError, EngineError, Labels, ReplayConfig, ReplayError, ReplaySegmentError,
     ReplaySummary, SegmentName, replay_segment,
 };
 use corvette_detect_proto::{HEADER_LEN, Reply, Request, Row, parse_header};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+// ffmpeg children are process-wide and the ffmpeg-leak check scans all of them, so ffmpeg tests never overlap.
+static FFMPEG_GATE: Mutex<()> = Mutex::new(());
+
+/// Returns the process-wide ffmpeg lock for one test, recovered from poisoning so a panicking test does not stop the others.
+fn ffmpeg_gate() -> MutexGuard<'static, ()> {
+    FFMPEG_GATE.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -134,6 +144,14 @@ fn config(socket: PathBuf) -> ReplayConfig {
         deadline: Duration::from_secs(30),
         labels: Labels::parse("0 person\n").expect("labels parse"),
         confirm_threshold: 0.7,
+        area: None,
+    }
+}
+
+fn area_config(socket: PathBuf, area: Option<Area>) -> ReplayConfig {
+    ReplayConfig {
+        area,
+        ..config(socket)
     }
 }
 
@@ -192,6 +210,7 @@ fn ffmpeg_children() -> Vec<String> {
 
 #[test]
 fn the_record_holds_a_header_and_one_line_per_decoded_frame() {
+    let _ffmpeg_gate = ffmpeg_gate();
     let (summary, out) = replay_case("lines", Vec::new());
     let text = out.text();
     let lines: Vec<&str> = text.lines().collect();
@@ -213,6 +232,7 @@ fn the_record_holds_a_header_and_one_line_per_decoded_frame() {
 
 #[test]
 fn two_runs_over_the_same_segment_give_byte_identical_records() {
+    let _ffmpeg_gate = ffmpeg_gate();
     let rows = vec![person_row()];
     let (first, first_out) = replay_case("det-one", rows.clone());
     let (second, second_out) = replay_case("det-two", rows);
@@ -222,6 +242,7 @@ fn two_runs_over_the_same_segment_give_byte_identical_records() {
 
 #[test]
 fn a_person_row_from_the_worker_is_tracked_and_listed_on_later_frames() {
+    let _ffmpeg_gate = ffmpeg_gate();
     let (_summary, out) = replay_case("person", vec![person_row()]);
     let text = out.text();
     let lines: Vec<&str> = text.lines().collect();
@@ -239,6 +260,7 @@ fn a_person_row_from_the_worker_is_tracked_and_listed_on_later_frames() {
 
 #[test]
 fn a_missing_segment_a_bad_name_and_an_unopened_socket_each_fail_before_any_output() {
+    let _ffmpeg_gate = ffmpeg_gate();
     let dir = temp_dir("fail");
     let out = SharedOutput::default();
     let missing = dir.join("cam_gone-20261101T120000Z.ts");
@@ -266,6 +288,7 @@ fn a_missing_segment_a_bad_name_and_an_unopened_socket_each_fail_before_any_outp
 
 #[test]
 fn the_call_returns_when_the_source_ends_and_leaves_no_ffmpeg_child() {
+    let _ffmpeg_gate = ffmpeg_gate();
     let dir = temp_dir("return");
     let segment = make_segment(&dir);
     let socket = dir.join("worker.sock");
@@ -296,6 +319,7 @@ fn the_call_returns_when_the_source_ends_and_leaves_no_ffmpeg_child() {
 
 #[test]
 fn a_worker_that_closes_the_connection_surfaces_as_a_stage_failure_at_a_complete_line() {
+    let _ffmpeg_gate = ffmpeg_gate();
     let dir = temp_dir("closed");
     let segment = make_segment(&dir);
     let socket = dir.join("worker.sock");
@@ -318,6 +342,7 @@ fn a_worker_that_closes_the_connection_surfaces_as_a_stage_failure_at_a_complete
 
 #[test]
 fn a_segment_that_decodes_no_frames_fails_after_writing_the_header() {
+    let _ffmpeg_gate = ffmpeg_gate();
     let dir = temp_dir("noframes");
     for (tag, body) in [("empty", ""), ("text", "not video data")] {
         let segment = dir.join(format!("cam_{tag}-20261101T120000Z.ts"));
@@ -335,4 +360,257 @@ fn a_segment_that_decodes_no_frames_fails_after_writing_the_header() {
         assert_eq!(out.text().lines().count(), 1, "{tag}: header only");
         server.join().expect("worker thread joins");
     }
+}
+
+fn replay_case_bytes(
+    segment: &Path,
+    sock: &str,
+    rows: Vec<Row>,
+    area: Option<Area>,
+) -> (ReplaySummary, Vec<u8>) {
+    let socket = segment.parent().expect("segment directory").join(sock);
+    let listener = UnixListener::bind(&socket).expect("worker socket binds");
+    let server = serve(listener, rows, usize::MAX);
+    let out = SharedOutput::default();
+    let summary =
+        replay_segment(segment, &area_config(socket, area), out.clone()).expect("replay succeeds");
+    server.join().expect("worker thread joins");
+    (summary, out.bytes())
+}
+
+fn counted_requests(segment: &Path, sock: &str, area: Option<Area>) -> usize {
+    let socket = segment.parent().expect("segment directory").join(sock);
+    let listener = UnixListener::bind(&socket).expect("worker socket binds");
+    let counter = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&counter);
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("worker accept");
+        while let Some(id) = read_request_id(&mut stream) {
+            let bytes = Reply::Rows {
+                id,
+                rows: vec![person_row()],
+            }
+            .encode()
+            .expect("reply encodes");
+            stream.write_all(&bytes).expect("reply write");
+            observed.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let out = SharedOutput::default();
+    replay_segment(segment, &area_config(socket, area), out).expect("replay succeeds");
+    server.join().expect("counting worker joins");
+    counter.load(Ordering::Relaxed)
+}
+
+#[test]
+fn an_area_polygon_containing_the_object_bottom_centre_carries_the_zone_and_one_away_carries_none()
+{
+    let _ffmpeg_gate = ffmpeg_gate();
+    let dir = temp_dir("area-zone");
+    let segment = make_segment(&dir);
+    let inside = Area {
+        name: "back-area".to_owned(),
+        polygon: vec![(0.45, 0.0), (1.0, 0.0), (1.0, 1.0), (0.45, 1.0)],
+        pad_pixels: 100,
+    };
+    let outside = Area {
+        name: "back-area".to_owned(),
+        polygon: vec![(0.0, 0.0), (0.3, 0.0), (0.3, 1.0), (0.0, 1.0)],
+        pad_pixels: 100,
+    };
+    let ((summary, bytes), outside_bytes) = thread::scope(|scope| {
+        let inside_run = scope
+            .spawn(|| replay_case_bytes(&segment, "inside.sock", vec![person_row()], Some(inside)));
+        let outside_run = scope.spawn(|| {
+            replay_case_bytes(&segment, "outside.sock", vec![person_row()], Some(outside))
+        });
+        (
+            inside_run.join().expect("inside run"),
+            outside_run.join().expect("outside run").1,
+        )
+    });
+    assert_eq!(summary.frames, 15, "fifteen frames");
+    let inside_text = String::from_utf8(bytes).expect("the record is utf-8");
+    let lines: Vec<&str> = inside_text.lines().collect();
+    let first_object = lines
+        .iter()
+        .position(|line| line.contains("\"id\":\"1\""))
+        .expect("id one appears");
+    let entered = lines
+        .iter()
+        .position(|line| line.contains("\"back-area\""))
+        .expect("the zone name is entered");
+    assert!(
+        entered > first_object,
+        "entry follows the first object line"
+    );
+    assert_eq!(
+        entered, 5,
+        "zone line index after inertia three counted frames"
+    );
+    let outside_text = String::from_utf8(outside_bytes).expect("the record is utf-8");
+    assert!(
+        outside_text.contains("\"id\":\"1\""),
+        "the object is tracked with the area away from it"
+    );
+    assert!(
+        !outside_text.contains("back-area"),
+        "no entry outside the polygon"
+    );
+}
+
+fn without_zones(line: &str) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(position) = rest.find("\"zones_now\":[") {
+        out.push_str(&rest[..position]);
+        let after = &rest[position + "\"zones_now\":[".len()..];
+        let close = after.find(']').expect("zone array closes") + 1;
+        rest = &after[close..];
+        if let Some(entered) = rest.strip_prefix(",\"zones_entered\":[") {
+            let close = entered.find(']').expect("zone array closes") + 1;
+            rest = &entered[close..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+#[test]
+fn an_area_polygon_over_the_whole_frame_changes_only_the_zone_fields_of_the_record() {
+    let _ffmpeg_gate = ffmpeg_gate();
+    let dir = temp_dir("area-whole");
+    let segment = make_segment(&dir);
+    let whole = Area {
+        name: "whole".to_owned(),
+        polygon: vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
+        pad_pixels: 16,
+    };
+    let (plain_bytes, grown_bytes) = thread::scope(|scope| {
+        let plain_run =
+            scope.spawn(|| replay_case_bytes(&segment, "none.sock", vec![person_row()], None));
+        let grown_run = scope
+            .spawn(|| replay_case_bytes(&segment, "whole.sock", vec![person_row()], Some(whole)));
+        (
+            plain_run.join().expect("plain run").1,
+            grown_run.join().expect("grown run").1,
+        )
+    });
+    let plain_text = String::from_utf8(plain_bytes).expect("the record is utf-8");
+    let grown_text = String::from_utf8(grown_bytes).expect("the record is utf-8");
+    let plain_lines: Vec<String> = plain_text.lines().map(without_zones).collect();
+    let grown_lines: Vec<String> = grown_text.lines().map(without_zones).collect();
+    assert_eq!(plain_lines.len(), 16, "header plus fifteen frames");
+    assert_eq!(plain_lines.len(), grown_lines.len(), "same line count");
+    assert_eq!(
+        plain_lines, grown_lines,
+        "every line matches once zone fields are dropped"
+    );
+    assert!(
+        grown_text.contains("\"whole\""),
+        "the area run carries the zone name"
+    );
+    assert!(
+        !plain_text.contains("\"whole\""),
+        "the plain run carries no zone name"
+    );
+}
+
+#[test]
+fn an_area_polygon_at_a_quiet_corner_sends_fewer_worker_requests_than_no_area() {
+    let _ffmpeg_gate = ffmpeg_gate();
+    let dir = temp_dir("area-corner");
+    let segment = make_segment(&dir);
+    let corner = Area {
+        name: "corner".to_owned(),
+        polygon: vec![(0.0, 0.85), (0.15, 1.0), (0.0, 1.0)],
+        pad_pixels: 0,
+    };
+    let (without, with) = thread::scope(|scope| {
+        let none_run = scope.spawn(|| counted_requests(&segment, "none.sock", None));
+        let corner_run = scope.spawn(|| counted_requests(&segment, "corner.sock", Some(corner)));
+        (
+            none_run.join().expect("none run"),
+            corner_run.join().expect("corner run"),
+        )
+    });
+    assert_eq!(without, 27, "no-area request count");
+    assert_eq!(with, 15, "bottom-left-corner request count");
+    assert!(
+        with < without,
+        "the mask drops the motion outside the polygon"
+    );
+}
+
+#[test]
+fn growing_the_keep_mask_by_the_pad_sweeps_in_motion_and_sends_more_requests() {
+    let _ffmpeg_gate = ffmpeg_gate();
+    let dir = temp_dir("area-pad");
+    let segment = make_segment(&dir);
+    let polygon = vec![(0.0, 0.85), (0.15, 1.0), (0.0, 1.0)];
+    let (tight, grown) = thread::scope(|scope| {
+        let tight_run = scope.spawn(|| {
+            counted_requests(
+                &segment,
+                "tight.sock",
+                Some(Area {
+                    name: "corner".to_owned(),
+                    polygon: polygon.clone(),
+                    pad_pixels: 0,
+                }),
+            )
+        });
+        let grown_run = scope.spawn(|| {
+            counted_requests(
+                &segment,
+                "grown.sock",
+                Some(Area {
+                    name: "corner".to_owned(),
+                    polygon: polygon.clone(),
+                    pad_pixels: 150,
+                }),
+            )
+        });
+        (
+            tight_run.join().expect("tight run"),
+            grown_run.join().expect("grown run"),
+        )
+    });
+    assert_eq!(tight, 15, "unpadded count keeps only the quiet corner");
+    assert_eq!(grown, 27, "a pad of 150 reaches the moving region");
+}
+
+#[test]
+fn the_pad_boundary_at_frame_pixels_flips_the_keep_mask_and_the_request_count() {
+    // Frame 704x576 shrinks to the motion shape 122x100 (5.7704x5.76 frame px per
+    // motion px). A sweep measured the sweep boundary of this corner triangle at pad
+    // 46: at pad 45 the first motion column is still ignored, at pad 46 it is kept.
+    let _ffmpeg_gate = ffmpeg_gate();
+    let dir = temp_dir("pad-boundary");
+    let segment = make_segment(&dir);
+    let polygon = vec![(0.0, 0.85), (0.15, 1.0), (0.0, 1.0)];
+    let before = counted_requests(
+        &segment,
+        "before.sock",
+        Some(Area {
+            name: "corner".to_owned(),
+            polygon: polygon.clone(),
+            pad_pixels: 45,
+        }),
+    );
+    let at = counted_requests(
+        &segment,
+        "at.sock",
+        Some(Area {
+            name: "corner".to_owned(),
+            polygon,
+            pad_pixels: 46,
+        }),
+    );
+    assert_eq!(before, 15, "pad 45 has not reached the motion yet");
+    assert_eq!(at, 27, "pad 46 keeps the first motion column");
+    assert!(
+        at > before,
+        "one frame pixel of radius changes the request count"
+    );
 }
