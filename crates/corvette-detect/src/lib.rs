@@ -21,6 +21,7 @@ mod replay_segment;
 mod revision;
 mod segment;
 mod service_bodies;
+mod service_socket;
 mod source;
 mod supervised;
 mod worker_link;
@@ -55,6 +56,7 @@ pub use segment::{SegmentError, SegmentName};
 pub use service_bodies::{
     OFF_STATE, ObjectsAnswer, objects_answer, off_entry, state_name, status_entry,
 };
+pub use service_socket::{CameraEntry, ServiceState, serve, serve_with_timeout};
 pub use source::{FrameSource, STREAM_QUEUE_CAPACITY, SourceError};
 pub use supervised::{Status, Supervised};
 pub use worker_link::{LinkState, WorkerLink};
