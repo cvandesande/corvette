@@ -20,6 +20,7 @@ mod revision;
 mod segment;
 mod source;
 mod supervised;
+mod worker_link;
 
 pub use backoff::{BACKOFF_INITIAL, BACKOFF_MAX, Backoff, DEFAULT_POLICY, HEALTHY_RUN, Policy};
 pub use candidate_stage::{CandidateError, CandidateStage, Infer};
@@ -46,6 +47,7 @@ pub use revision::revision;
 pub use segment::{SegmentError, SegmentName};
 pub use source::{FrameSource, STREAM_QUEUE_CAPACITY, SourceError};
 pub use supervised::{Status, Supervised};
+pub use worker_link::{LinkState, WorkerLink};
 
 pub(crate) fn log_event(unit: &str, event: &str, detail: impl std::fmt::Display) {
     eprintln!("corvette-detect unit=\"{unit}\" event={event} detail=\"{detail}\"");
