@@ -4,6 +4,7 @@
 mod backoff;
 mod candidate_stage;
 mod clock;
+mod config;
 mod engine;
 mod ffmpeg;
 mod object_stage;
@@ -19,6 +20,13 @@ mod supervised;
 pub use backoff::{BACKOFF_INITIAL, BACKOFF_MAX, Backoff, DEFAULT_POLICY, HEALTHY_RUN, Policy};
 pub use candidate_stage::{CandidateError, CandidateStage, Infer};
 pub use clock::FrameClock;
+pub use config::{
+    AREA_KEYS, CAMERA_KEYS, CONFIG_KEYS, CONFIRM_MAX, CONFIRM_MIN_EXCLUSIVE, CameraConfig, Config,
+    ConfigError, DEFAULT_CONFIRM_THRESHOLD, DEFAULT_PAD_PIXELS, MAX_DEADLINE_MS, MAX_EDGE, MAX_FPS,
+    MAX_PAD_PIXELS, MAX_POLYGON_COORD, MIN_CAMERAS, MIN_DEADLINE_MS, MIN_EDGE, MIN_FPS,
+    MIN_PAD_PIXELS, MIN_POLYGON_COORD, MIN_POLYGON_POINTS, POINT_COORDINATES, REQUIRED_AREA_KEYS,
+    REQUIRED_CAMERA_KEYS, REQUIRED_CONFIG_KEYS,
+};
 pub use engine::{EngineError, LabelError, Labels, WorkerClient};
 pub use ffmpeg::{Decode, FrameSpec, Input, MAX_FRAME_BYTES, SpecError, decode_command};
 pub use object_stage::{FrameObjects, ObjectStage, ObjectStageError, TrackedObject};

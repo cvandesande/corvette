@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Corvette detection configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["worker_socket", "labels", "deadline_ms", "cameras"],
+  "properties": {
+    "worker_socket": {
+      "type": "string",
+      "description": "Unix socket path of the inference worker."
+    },
+    "labels": {
+      "type": "string",
+      "description": "Path of the dense class-id to name table file."
+    },
+    "deadline_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 600000,
+      "default": 10000,
+      "description": "Per-request worker timeout in milliseconds."
+    },
+    "cameras": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The cameras to run detection on, at least one.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "width", "height", "fps"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Unique camera name."
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 16,
+            "maximum": 8192,
+            "default": 704,
+            "description": "Detect frame width in pixels."
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 16,
+            "maximum": 8192,
+            "default": 576,
+            "description": "Detect frame height in pixels."
+          },
+          "fps": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 60,
+            "default": 5,
+            "description": "Detect frame rate in frames per second."
+          },
+          "confirm_threshold": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "default": 0.7,
+            "description": "Score above which a detection is confirmed."
+          },
+          "area": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "polygon"],
+            "description": "Detection zone and motion keep mask; absent means neither.",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Zone name."
+              },
+              "polygon": {
+                "type": "array",
+                "minItems": 3,
+                "description": "At least three relative x,y points in 0..=1.",
+                "items": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "items": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                }
+              },
+              "pad_pixels": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 200,
+                "default": 16,
+                "description": "Keep-mask square dilation in frame pixels."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
