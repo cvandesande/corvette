@@ -6,7 +6,7 @@ use std::io::Write;
 use corvette_motion::Region;
 
 use crate::candidate_stage::{CandidateError, CandidateStage, Infer};
-use crate::object_stage::{FrameObjects, ObjectStage, ObjectStageError};
+use crate::object_stage::{ObjectStage, ObjectStageError};
 use crate::record::{RecordError, RecordWriter};
 use crate::region_stage::{RegionStage, RegionStageError};
 
@@ -105,16 +105,14 @@ impl<'a, E: Infer, W: Write> ReplayPipeline<'a, E, W> {
         }
     }
 
-    /// Steps one frame through all four stages and appends its record line; a stage error is returned and the pipeline must not be stepped again after one.
-    ///
     /// # Errors
-    /// The failing stage's error wrapped in the matching `ReplayError` variant.
+    /// The failing stage's error is returned wrapped in the matching `ReplayError` variant; after one the pipeline must not be stepped again.
     pub fn step(&mut self, frame_time: f64, frame: &[u8]) -> Result<(), ReplayError> {
         let tensors = self.regions.step(frame, &self.previous_boxes)?;
         let detections = self.candidates.detect(&mut self.engine, &tensors)?;
         let frame_objects = self.objects.step(frame_time, detections)?;
         self.writer.write_frame(&frame_objects)?;
-        self.previous_boxes = object_regions(&frame_objects);
+        self.previous_boxes = frame_objects.regions();
         Ok(())
     }
 
@@ -122,15 +120,4 @@ impl<'a, E: Infer, W: Write> ReplayPipeline<'a, E, W> {
     pub fn finish(self) -> W {
         self.writer.finish()
     }
-}
-
-fn object_regions(frame_objects: &FrameObjects) -> Vec<Region> {
-    frame_objects
-        .objects
-        .iter()
-        .map(|object| {
-            let [x1, y1, x2, y2] = object.edges;
-            Region { x1, y1, x2, y2 }
-        })
-        .collect()
 }

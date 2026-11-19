@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use corvette_motion::Region;
 use corvette_track::object_tracker::ObjectView;
 use corvette_track::{
     FrameDetection, IdSource, NanDistance, ObjectTracker, Scores, TrackerSettings, ZoneSet,
@@ -29,6 +30,19 @@ pub struct FrameObjects {
     pub frame_time: f64,
     pub objects: Vec<TrackedObject>,
     pub ended: Vec<String>,
+}
+
+impl FrameObjects {
+    #[must_use]
+    pub fn regions(&self) -> Vec<Region> {
+        self.objects
+            .iter()
+            .map(|object| {
+                let [x1, y1, x2, y2] = object.edges;
+                Region { x1, y1, x2, y2 }
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use corvette_detect_proto::{Row, TENSOR_BYTES};
 
 use crate::backoff::{Backoff, Policy};
+use crate::candidate_stage::Infer;
 use crate::engine::{EngineError, WorkerClient};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,5 +83,11 @@ impl WorkerLink {
             self.retry_at = now + self.backoff.after_run(ran_for);
         }
         outcome
+    }
+}
+
+impl Infer for WorkerLink {
+    fn infer(&mut self, tensor: &[u8; TENSOR_BYTES]) -> Result<Vec<Row>, EngineError> {
+        Self::infer(self, tensor)
     }
 }
