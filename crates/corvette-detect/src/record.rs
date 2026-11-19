@@ -79,18 +79,24 @@ fn header_line(header: &RecordHeader) -> Result<String, RecordError> {
 
 fn frame_line(frame: &FrameObjects) -> Result<String, RecordError> {
     let frame_time = number(frame.frame_time, "frame_time")?;
-    let mut objects: Vec<String> = Vec::with_capacity(frame.objects.len());
-    for object in &frame.objects {
-        objects.push(object_line(object)?);
-    }
+    let objects = object_entries(frame)?;
     let ended = json_array(&frame.ended);
     let mut line = String::new();
     let _ = writeln!(
         line,
-        "{{\"frame_time\":{frame_time},\"objects\":[{}],\"ended\":[{ended}]}}",
-        objects.join(","),
+        "{{\"frame_time\":{frame_time},\"objects\":[{objects}],\"ended\":[{ended}]}}"
     );
     Ok(line)
+}
+
+/// # Errors
+pub fn object_entries(frame: &FrameObjects) -> Result<String, RecordError> {
+    let mut entries: Vec<String> = Vec::with_capacity(frame.objects.len());
+    for object in &frame.objects {
+        let entry = object_line(object)?;
+        entries.push(entry);
+    }
+    Ok(entries.join(","))
 }
 
 fn object_line(object: &TrackedObject) -> Result<String, RecordError> {
@@ -128,7 +134,8 @@ fn json_array(values: &[String]) -> String {
         .join(",")
 }
 
-fn json_string(value: &str) -> String {
+#[must_use]
+pub fn json_string(value: &str) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
     quoted.push('"');
     for character in value.chars() {

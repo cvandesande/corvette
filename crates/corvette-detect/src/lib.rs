@@ -20,6 +20,7 @@ mod replay;
 mod replay_segment;
 mod revision;
 mod segment;
+mod service_bodies;
 mod source;
 mod supervised;
 mod worker_link;
@@ -45,12 +46,15 @@ pub use ffmpeg::{Decode, FrameSpec, Input, MAX_FRAME_BYTES, SpecError, decode_co
 pub use live_pipeline::{FrameOutcome, LiveError, LivePipeline, PipelineCounters};
 pub use object_stage::{FrameObjects, ObjectStage, ObjectStageError, TrackedObject};
 pub use reader::{Frame, FrameReader, ReadError};
-pub use record::{RecordError, RecordHeader, RecordWriter};
+pub use record::{RecordError, RecordHeader, RecordWriter, json_string, object_entries};
 pub use region_stage::{RegionStage, RegionStageError, RegionStageSettings, RegionTensor};
 pub use replay::{ReplayError, ReplayPipeline};
 pub use replay_segment::{Area, ReplayConfig, ReplaySegmentError, ReplaySummary, replay_segment};
 pub use revision::revision;
 pub use segment::{SegmentError, SegmentName};
+pub use service_bodies::{
+    OFF_STATE, ObjectsAnswer, objects_answer, off_entry, state_name, status_entry,
+};
 pub use source::{FrameSource, STREAM_QUEUE_CAPACITY, SourceError};
 pub use supervised::{Status, Supervised};
 pub use worker_link::{LinkState, WorkerLink};
