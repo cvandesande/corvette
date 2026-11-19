@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "/corvette/api/v1/detection/config/schema",
   "title": "Corvette detection configuration",
   "type": "object",
   "additionalProperties": false,

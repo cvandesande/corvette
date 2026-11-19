@@ -7,6 +7,7 @@ mod clock;
 mod config;
 mod config_change;
 mod config_file;
+mod config_schema;
 mod engine;
 mod ffmpeg;
 mod object_stage;
@@ -32,6 +33,7 @@ pub use config::{
 };
 pub use config_change::{Change, classify};
 pub use config_file::render;
+pub use config_schema::{SCHEMA_ID, SCHEMA_JSON};
 pub use engine::{EngineError, LabelError, Labels, WorkerClient};
 pub use ffmpeg::{Decode, FrameSpec, Input, MAX_FRAME_BYTES, SpecError, decode_command};
 pub use object_stage::{FrameObjects, ObjectStage, ObjectStageError, TrackedObject};
