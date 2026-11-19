@@ -5,6 +5,7 @@ mod backoff;
 mod candidate_stage;
 mod clock;
 mod config;
+mod config_change;
 mod config_file;
 mod engine;
 mod ffmpeg;
@@ -29,6 +30,7 @@ pub use config::{
     MIN_PAD_PIXELS, MIN_POLYGON_COORD, MIN_POLYGON_POINTS, POINT_COORDINATES, REQUIRED_AREA_KEYS,
     REQUIRED_CAMERA_KEYS, REQUIRED_CONFIG_KEYS, Violation, convert_item, syntax_error,
 };
+pub use config_change::{Change, classify};
 pub use config_file::render;
 pub use engine::{EngineError, LabelError, Labels, WorkerClient};
 pub use ffmpeg::{Decode, FrameSpec, Input, MAX_FRAME_BYTES, SpecError, decode_command};
