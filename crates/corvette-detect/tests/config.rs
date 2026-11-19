@@ -651,3 +651,146 @@ fn syntax_error_after_a_multibyte_character_names_the_line() {
         "no position in: {text}"
     );
 }
+
+fn one_camera(extra_fields: &serde_json::Value) -> serde_json::Value {
+    let mut camera = serde_json::json!({"name": "a", "width": 640, "height": 480, "fps": 5});
+    if let (Some(camera), Some(extra)) = (camera.as_object_mut(), extra_fields.as_object()) {
+        camera.extend(extra.clone());
+    }
+    serde_json::json!({
+        "worker_socket": "/s",
+        "labels": "l.txt",
+        "deadline_ms": 100,
+        "cameras": [camera],
+    })
+}
+
+#[test]
+fn validate_all_lists_three_independent_faults_in_document_order() {
+    let value = serde_json::json!({
+        "worker_socket": "/s",
+        "labels": "l.txt",
+        "deadline_ms": 0,
+        "cameras": [
+            {"name": "a", "width": 640, "height": 480, "fps": 5},
+            {"name": "b", "width": 640, "height": 480, "fps": 100},
+            {"name": "a", "width": 640, "height": 480, "fps": 5},
+        ],
+    });
+    let violations = Config::validate_all(&value).expect_err("three faults");
+    let listed: Vec<(&str, &str)> = violations
+        .iter()
+        .map(|violation| (violation.path.as_str(), violation.rule.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("deadline_ms", "0 is below 1"),
+            ("cameras[1].fps", "100 is above 60"),
+            ("cameras[2].name", "duplicate camera name \"a\""),
+        ]
+    );
+}
+
+#[test]
+fn validate_all_lists_every_bad_field_of_one_camera() {
+    let value = one_camera(&serde_json::json!({"width": 15, "height": 8193}));
+    let violations = Config::validate_all(&value).expect_err("two faults");
+    let listed: Vec<(&str, &str)> = violations
+        .iter()
+        .map(|violation| (violation.path.as_str(), violation.rule.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("cameras[0].width", "15 is below 16"),
+            ("cameras[0].height", "8193 is above 8192"),
+        ]
+    );
+}
+
+#[test]
+fn validate_all_reports_each_missing_required_key_in_key_order() {
+    let value = serde_json::json!({
+        "worker_socket": "/s",
+        "cameras": [{"name": "a", "height": 480}],
+    });
+    let violations = Config::validate_all(&value).expect_err("four missing keys");
+    let listed: Vec<(&str, &str)> = violations
+        .iter()
+        .map(|violation| (violation.path.as_str(), violation.rule.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("labels", "missing"),
+            ("deadline_ms", "missing"),
+            ("cameras[0].width", "missing"),
+            ("cameras[0].fps", "missing"),
+        ]
+    );
+}
+
+#[test]
+fn validate_all_fills_found_and_allowed_for_ranges_and_unknown_keys() {
+    let range = Config::validate_all(&one_camera(&serde_json::json!({"fps": 100})))
+        .expect_err("fps out of range");
+    assert_eq!(range[0].found, Some(serde_json::json!(100)));
+    assert_eq!(
+        range[0].allowed,
+        Some(serde_json::json!({"min": 1, "max": 60}))
+    );
+    let unknown = Config::validate_all(&one_camera(&serde_json::json!({"extra": 7})))
+        .expect_err("unknown key");
+    assert_eq!(unknown.len(), 1);
+    assert_eq!(unknown[0].rule, "unknown key");
+    assert_eq!(unknown[0].found, Some(serde_json::json!(7)));
+    let names: Vec<serde_json::Value> = CAMERA_KEYS
+        .iter()
+        .map(|key| serde_json::json!(*key))
+        .collect();
+    assert_eq!(unknown[0].allowed, Some(serde_json::Value::Array(names)));
+    let nested = Config::validate_all(&one_camera(&serde_json::json!({"extra": [7]})))
+        .expect_err("unknown array value");
+    assert_eq!(nested[0].rule, "unknown key");
+    assert_eq!(nested[0].found, None);
+    let missing = Config::validate_all(&serde_json::json!({
+        "worker_socket": "/s",
+        "labels": "l.txt",
+        "cameras": [{"name": "a", "width": 640, "height": 480, "fps": 5}],
+    }))
+    .expect_err("missing deadline");
+    assert_eq!(missing[0].rule, "missing");
+    assert_eq!(missing[0].found, None);
+    assert_eq!(missing[0].allowed, None);
+}
+
+#[test]
+fn validate_all_reports_a_wrong_type_cameras_as_one_violation() {
+    let value = serde_json::json!({
+        "worker_socket": "/s",
+        "labels": "l.txt",
+        "deadline_ms": 100,
+        "cameras": "not-an-array",
+    });
+    let violations = Config::validate_all(&value).expect_err("wrong type");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].path, "cameras");
+    assert_eq!(violations[0].rule, "expected an array, found a string");
+}
+
+#[test]
+fn from_value_maps_the_first_violation_of_a_multi_fault_document() {
+    let value = serde_json::json!({
+        "worker_socket": "/s",
+        "labels": "l.txt",
+        "deadline_ms": 0,
+        "cameras": [
+            {"name": "a", "width": 640, "height": 480, "fps": 5},
+            {"name": "b", "width": 640, "height": 480, "fps": 100},
+            {"name": "a", "width": 640, "height": 480, "fps": 5},
+        ],
+    });
+    let error = Config::from_value(&value).expect_err("refused");
+    assert_eq!(error.to_string(), "deadline_ms: 0 is below 1");
+}

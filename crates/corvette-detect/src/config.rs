@@ -72,6 +72,27 @@ pub enum ConfigError {
     },
 }
 
+/// One rule violation: the loader's path, the rule's message, and what was found
+/// together with what was allowed where a closed set or range applies.
+#[derive(Clone, Debug)]
+pub struct Violation {
+    pub path: String,
+    pub rule: String,
+    pub found: Option<Value>,
+    pub allowed: Option<Value>,
+}
+
+impl Violation {
+    const fn new(path: String, rule: String) -> Self {
+        Self {
+            path,
+            rule,
+            found: None,
+            allowed: None,
+        }
+    }
+}
+
 impl Config {
     /// Reads TOML text, converts it to a `serde_json::Value`, and validates that value.
     /// # Errors
@@ -88,56 +109,82 @@ impl Config {
     /// # Errors
     /// `ConfigError` naming the path of the first rule violation.
     pub fn from_value(value: &Value) -> Result<Self, ConfigError> {
-        let root = object_at(value, "")?;
-        reject_unknown(root, "", CONFIG_KEYS)?;
-        require_present(root, "", REQUIRED_CONFIG_KEYS)?;
-        let worker_socket = PathBuf::from(text_at(root, "", "worker_socket")?);
-        let labels = PathBuf::from(text_at(root, "", "labels")?);
-        let deadline = Duration::from_millis(u64::from(integer_at(
+        let violations = match Self::validate_all(value) {
+            Ok(config) => return Ok(config),
+            Err(violations) => violations,
+        };
+        let Some(first) = violations.first() else {
+            unreachable!("validate_all fails only with at least one violation");
+        };
+        Err(ConfigError::Field {
+            path: first.path.clone(),
+            rule: first.rule.clone(),
+        })
+    }
+
+    /// Validates every rule in one pass and collects each violation in document order.
+    /// # Errors
+    /// Every violation found, in the loader's check order; never an empty list.
+    pub fn validate_all(value: &Value) -> Result<Self, Vec<Violation>> {
+        let mut out: Vec<Violation> = Vec::new();
+        let Some(root) = object_at(value, "", &mut out) else {
+            return Err(out);
+        };
+        reject_unknown(root, "", CONFIG_KEYS, &mut out);
+        require_present(root, "", REQUIRED_CONFIG_KEYS, &mut out);
+        let worker_socket = text_at(root, "", "worker_socket", &mut out).map(PathBuf::from);
+        let labels = text_at(root, "", "labels", &mut out).map(PathBuf::from);
+        let deadline = integer_at(
             root,
             "",
             "deadline_ms",
             MIN_DEADLINE_MS,
             MAX_DEADLINE_MS,
             None,
-        )?));
+            &mut out,
+        )
+        .map(|millis| Duration::from_millis(u64::from(millis)));
         let cameras = match root.get("cameras") {
-            Some(Value::Array(list)) => list,
-            other => {
-                return Err(field_error(
-                    "cameras".to_owned(),
-                    format!("expected an array, found {}", kind_opt(other)),
-                ));
+            Some(Value::Array(list)) => {
+                if list.len() < MIN_CAMERAS {
+                    let rule = format!(
+                        "expected at least {MIN_CAMERAS} camera, found {}",
+                        list.len()
+                    );
+                    out.push(ranged(
+                        "cameras".to_owned(),
+                        rule,
+                        count_value(list.len()),
+                        at_least(count_value(MIN_CAMERAS)),
+                    ));
+                }
+                Some(list)
             }
+            Some(other) => {
+                out.push(wrong_type_at("cameras".to_owned(), "an array", other));
+                None
+            }
+            None => None,
         };
-        if cameras.len() < MIN_CAMERAS {
-            return Err(field_error(
-                "cameras".to_owned(),
-                format!(
-                    "expected at least {MIN_CAMERAS} camera, found {}",
-                    cameras.len()
-                ),
-            ));
-        }
-        let mut parsed = Vec::with_capacity(cameras.len());
-        let mut names: HashSet<String> = HashSet::new();
-        for (index, camera) in cameras.iter().enumerate() {
-            let base = indexed("", "cameras", index);
-            let camera = camera_at(camera, &base)?;
-            if !names.insert(camera.name.clone()) {
-                return Err(field_error(
-                    dotted(&base, "name"),
-                    format!("duplicate camera name \"{}\"", camera.name),
-                ));
+        let mut cameras_ok: Vec<CameraConfig> = Vec::new();
+        if let Some(list) = cameras {
+            let mut names: HashSet<String> = HashSet::new();
+            for (index, camera) in list.iter().enumerate() {
+                let base = indexed("", "cameras", index);
+                if let Some(camera) = camera_at(camera, &base, &mut names, &mut out) {
+                    cameras_ok.push(camera);
+                }
             }
-            parsed.push(camera);
         }
-        Ok(Self {
-            worker_socket,
-            labels,
-            deadline,
-            cameras: parsed,
-        })
+        match (worker_socket, labels, deadline) {
+            (Some(worker_socket), Some(labels), Some(deadline)) if out.is_empty() => Ok(Self {
+                worker_socket,
+                labels,
+                deadline,
+                cameras: cameras_ok,
+            }),
+            _ => Err(out),
+        }
     }
 
     #[must_use]
@@ -251,39 +298,57 @@ fn convert_value(value: &toml_edit::Value, path: &str) -> Result<Value, ConfigEr
     }
 }
 
-fn camera_at(value: &Value, base: &str) -> Result<CameraConfig, ConfigError> {
-    let object = object_at(value, base)?;
-    reject_unknown(object, base, CAMERA_KEYS)?;
-    require_present(object, base, REQUIRED_CAMERA_KEYS)?;
-    let name = text_at(object, base, "name")?;
-    if name.is_empty() {
-        return Err(field_error(dotted(base, "name"), "empty".to_owned()));
+fn camera_at(
+    value: &Value,
+    base: &str,
+    names: &mut HashSet<String>,
+    out: &mut Vec<Violation>,
+) -> Option<CameraConfig> {
+    let object = object_at(value, base, out)?;
+    reject_unknown(object, base, CAMERA_KEYS, out);
+    require_present(object, base, REQUIRED_CAMERA_KEYS, out);
+    let mut name = text_at(object, base, "name", out).map(str::to_owned);
+    if name.as_deref() == Some("") {
+        out.push(Violation {
+            found: Some(Value::String(String::new())),
+            ..Violation::new(dotted(base, "name"), "empty".to_owned())
+        });
+        name = None;
     }
-    let name = name.to_owned();
-    let width = integer_at(object, base, "width", MIN_EDGE, MAX_EDGE, None)?;
-    let height = integer_at(object, base, "height", MIN_EDGE, MAX_EDGE, None)?;
-    let fps = integer_at(object, base, "fps", MIN_FPS, MAX_FPS, None)?;
-    let confirm_threshold = confirm_at(object, base)?;
-    let area = match object.get("area") {
-        None => None,
-        Some(area) => Some(area_at(area, &dotted(base, "area"))?),
-    };
-    Ok(CameraConfig {
-        name,
-        width,
-        height,
-        fps,
-        confirm_threshold,
-        area,
+    let width = integer_at(object, base, "width", MIN_EDGE, MAX_EDGE, None, out);
+    let height = integer_at(object, base, "height", MIN_EDGE, MAX_EDGE, None, out);
+    let fps = integer_at(object, base, "fps", MIN_FPS, MAX_FPS, None, out);
+    let confirm_threshold = confirm_at(object, base, out);
+    let area = object.get("area").map_or(Some(None), |area| {
+        Some(area_at(area, &dotted(base, "area"), out))
+    });
+    if let Some(name) = &name
+        && !names.insert(name.clone())
+    {
+        out.push(Violation {
+            found: Some(Value::String(name.clone())),
+            ..Violation::new(
+                dotted(base, "name"),
+                format!("duplicate camera name \"{name}\""),
+            )
+        });
+    }
+    Some(CameraConfig {
+        name: name?,
+        width: width?,
+        height: height?,
+        fps: fps?,
+        confirm_threshold: confirm_threshold?,
+        area: area?,
     })
 }
 
-fn area_at(value: &Value, base: &str) -> Result<Area, ConfigError> {
-    let object = object_at(value, base)?;
-    reject_unknown(object, base, AREA_KEYS)?;
-    require_present(object, base, REQUIRED_AREA_KEYS)?;
-    let name = text_at(object, base, "name")?.to_owned();
-    let polygon = polygon_at(object, base)?;
+fn area_at(value: &Value, base: &str, out: &mut Vec<Violation>) -> Option<Area> {
+    let object = object_at(value, base, out)?;
+    reject_unknown(object, base, AREA_KEYS, out);
+    require_present(object, base, REQUIRED_AREA_KEYS, out);
+    let name = text_at(object, base, "name", out);
+    let polygon = polygon_at(object, base, out);
     let pad_pixels = integer_at(
         object,
         base,
@@ -291,115 +356,139 @@ fn area_at(value: &Value, base: &str) -> Result<Area, ConfigError> {
         MIN_PAD_PIXELS,
         MAX_PAD_PIXELS,
         Some(DEFAULT_PAD_PIXELS),
-    )?;
-    Ok(Area {
-        name,
-        polygon,
-        pad_pixels,
+        out,
+    );
+    Some(Area {
+        name: name?.to_owned(),
+        polygon: polygon?,
+        pad_pixels: pad_pixels?,
     })
 }
 
-fn polygon_at(object: &Map<String, Value>, base: &str) -> Result<Vec<(f64, f64)>, ConfigError> {
+fn polygon_at(
+    object: &Map<String, Value>,
+    base: &str,
+    out: &mut Vec<Violation>,
+) -> Option<Vec<(f64, f64)>> {
     let path = dotted(base, "polygon");
-    let points = match object.get("polygon") {
-        Some(Value::Array(points)) => points,
-        other => {
-            return Err(field_error(
-                path,
-                format!("expected an array, found {}", kind_opt(other)),
-            ));
-        }
+    let found = object.get("polygon")?;
+    let Value::Array(points) = found else {
+        out.push(wrong_type_at(path, "an array", found));
+        return None;
     };
     if points.len() < MIN_POLYGON_POINTS {
-        return Err(field_error(
+        let rule = format!(
+            "expected at least {MIN_POLYGON_POINTS} points, found {}",
+            points.len()
+        );
+        out.push(ranged(
             path,
-            format!(
-                "expected at least {MIN_POLYGON_POINTS} points, found {}",
-                points.len()
-            ),
+            rule,
+            count_value(points.len()),
+            at_least(count_value(MIN_POLYGON_POINTS)),
         ));
+        return None;
     }
     let mut polygon = Vec::with_capacity(points.len());
     for (index, point) in points.iter().enumerate() {
-        let point_path = indexed(&path, "", index);
-        let coords = match point {
-            Value::Array(coords) => coords,
-            other => {
-                return Err(field_error(
-                    point_path,
-                    format!("expected an array, found {}", kind_opt(Some(other))),
-                ));
-            }
-        };
-        if coords.len() != POINT_COORDINATES {
-            return Err(field_error(
-                point_path,
-                format!(
-                    "expected {POINT_COORDINATES} numbers, found {}",
-                    coords.len()
-                ),
-            ));
-        }
-        let mut pair = VecDeque::with_capacity(POINT_COORDINATES);
-        for coordinate in coords {
-            let raw = coordinate.as_f64().ok_or_else(|| {
-                field_error(
-                    point_path.clone(),
-                    format!("expected a number, found {}", kind(coordinate)),
-                )
-            })?;
-            if !raw.is_finite() {
-                return Err(field_error(
-                    point_path,
-                    format!("{raw} is not a finite number"),
-                ));
-            }
-            if raw < MIN_POLYGON_COORD {
-                return Err(field_error(
-                    point_path,
-                    format!("{raw} is below {MIN_POLYGON_COORD}"),
-                ));
-            }
-            if raw > MAX_POLYGON_COORD {
-                return Err(field_error(
-                    point_path,
-                    format!("{raw} is above {MAX_POLYGON_COORD}"),
-                ));
-            }
-            pair.push_back(raw);
-        }
-        let (Some(x), Some(y)) = (pair.pop_front(), pair.pop_front()) else {
-            return Err(field_error(point_path, "expected a point".to_owned()));
-        };
-        polygon.push((x, y));
+        polygon.extend(point_at(point, indexed(&path, "", index), out));
     }
-    Ok(polygon)
+    (polygon.len() == points.len()).then_some(polygon)
 }
 
-fn confirm_at(object: &Map<String, Value>, base: &str) -> Result<f64, ConfigError> {
+fn point_at(point: &Value, point_path: String, out: &mut Vec<Violation>) -> Option<(f64, f64)> {
+    let Value::Array(coords) = point else {
+        out.push(wrong_type_at(point_path, "an array", point));
+        return None;
+    };
+    if coords.len() != POINT_COORDINATES {
+        let rule = format!(
+            "expected {POINT_COORDINATES} numbers, found {}",
+            coords.len()
+        );
+        let allowed = bounds(
+            count_value(POINT_COORDINATES),
+            count_value(POINT_COORDINATES),
+        );
+        out.push(ranged(point_path, rule, count_value(coords.len()), allowed));
+        return None;
+    }
+    let mut pair = VecDeque::with_capacity(POINT_COORDINATES);
+    for coordinate in coords {
+        let Some(raw) = coordinate.as_f64() else {
+            out.push(wrong_type_at(point_path.clone(), "a number", coordinate));
+            continue;
+        };
+        if !raw.is_finite() {
+            out.push(Violation {
+                found: Some(coordinate.clone()),
+                ..Violation::new(point_path.clone(), format!("{raw} is not a finite number"))
+            });
+            continue;
+        }
+        let allowed = bounds(
+            number_value(MIN_POLYGON_COORD),
+            number_value(MAX_POLYGON_COORD),
+        );
+        if raw < MIN_POLYGON_COORD {
+            let rule = format!("{raw} is below {MIN_POLYGON_COORD}");
+            out.push(ranged(
+                point_path.clone(),
+                rule,
+                coordinate.clone(),
+                allowed,
+            ));
+            continue;
+        }
+        if raw > MAX_POLYGON_COORD {
+            let rule = format!("{raw} is above {MAX_POLYGON_COORD}");
+            out.push(ranged(
+                point_path.clone(),
+                rule,
+                coordinate.clone(),
+                allowed,
+            ));
+            continue;
+        }
+        pair.push_back(raw);
+    }
+    let (Some(x), Some(y)) = (pair.pop_front(), pair.pop_front()) else {
+        return None;
+    };
+    Some((x, y))
+}
+
+fn confirm_at(object: &Map<String, Value>, base: &str, out: &mut Vec<Violation>) -> Option<f64> {
     let path = dotted(base, "confirm_threshold");
     let Some(found) = object.get("confirm_threshold") else {
-        return Ok(DEFAULT_CONFIRM_THRESHOLD);
+        return Some(DEFAULT_CONFIRM_THRESHOLD);
     };
-    let raw = found.as_f64().ok_or_else(|| {
-        field_error(
-            path.clone(),
-            format!("expected a number, found {}", kind(found)),
-        )
-    })?;
+    let Some(raw) = found.as_f64() else {
+        out.push(wrong_type_at(path, "a number", found));
+        return None;
+    };
     if !raw.is_finite() {
-        return Err(field_error(path, format!("{raw} is not a finite number")));
+        out.push(Violation {
+            found: Some(found.clone()),
+            ..Violation::new(path, format!("{raw} is not a finite number"))
+        });
+        return None;
     }
+    let allowed = bounds(
+        number_value(CONFIRM_MIN_EXCLUSIVE),
+        number_value(CONFIRM_MAX),
+    );
     if raw <= CONFIRM_MIN_EXCLUSIVE {
-        return Err(field_error(
-            path,
-            format!("{raw} is not above {CONFIRM_MIN_EXCLUSIVE}"),
-        ));
+        let rule = format!("{raw} is not above {CONFIRM_MIN_EXCLUSIVE}");
+        out.push(ranged(path, rule, found.clone(), allowed));
+        return None;
     }
     if raw > CONFIRM_MAX {
-        return Err(field_error(path, format!("{raw} is above {CONFIRM_MAX}")));
+        let rule = format!("{raw} is above {CONFIRM_MAX}");
+        out.push(ranged(path, rule, found.clone(), allowed));
+        return None;
     }
-    Ok(raw)
+    Some(raw)
 }
 
 fn integer_at(
@@ -409,47 +498,60 @@ fn integer_at(
     min: u32,
     max: u32,
     default: Option<u32>,
-) -> Result<u32, ConfigError> {
+    out: &mut Vec<Violation>,
+) -> Option<u32> {
     let path = dotted(base, key);
     let Some(found) = object.get(key) else {
-        return default.map_or_else(|| Err(field_error(path, "missing".to_owned())), Ok);
+        return default;
     };
-    let raw = found.as_i64().ok_or_else(|| {
-        field_error(
-            path.clone(),
-            format!("expected an integer, found {}", kind(found)),
-        )
-    })?;
+    let Some(raw) = found.as_i64() else {
+        out.push(wrong_type_at(path, "an integer", found));
+        return None;
+    };
+    let allowed = bounds(Value::from(i64::from(min)), Value::from(i64::from(max)));
     if raw < i64::from(min) {
-        return Err(field_error(path, format!("{raw} is below {min}")));
+        let rule = format!("{raw} is below {min}");
+        out.push(ranged(path, rule, found.clone(), allowed));
+        return None;
     }
     if raw > i64::from(max) {
-        return Err(field_error(path, format!("{raw} is above {max}")));
+        let rule = format!("{raw} is above {max}");
+        out.push(ranged(path, rule, found.clone(), allowed));
+        return None;
     }
-    u32::try_from(raw).map_err(|_| field_error(path, format!("{raw} is outside {min}..={max}")))
+    let Ok(value) = u32::try_from(raw) else {
+        let rule = format!("{raw} is outside {min}..={max}");
+        out.push(ranged(path, rule, found.clone(), allowed));
+        return None;
+    };
+    Some(value)
 }
 
 fn text_at<'v>(
     object: &'v Map<String, Value>,
     base: &str,
     key: &str,
-) -> Result<&'v str, ConfigError> {
-    let path = dotted(base, key);
-    let found = object
-        .get(key)
-        .ok_or_else(|| field_error(path.clone(), "missing".to_owned()))?;
-    found
-        .as_str()
-        .ok_or_else(|| field_error(path, format!("expected a string, found {}", kind(found))))
+    out: &mut Vec<Violation>,
+) -> Option<&'v str> {
+    let found = object.get(key)?;
+    let Some(text) = found.as_str() else {
+        out.push(wrong_type_at(dotted(base, key), "a string", found));
+        return None;
+    };
+    Some(text)
 }
 
-fn object_at<'v>(value: &'v Value, path: &str) -> Result<&'v Map<String, Value>, ConfigError> {
+fn object_at<'v>(
+    value: &'v Value,
+    base: &str,
+    out: &mut Vec<Violation>,
+) -> Option<&'v Map<String, Value>> {
     match value {
-        Value::Object(object) => Ok(object),
-        other => Err(field_error(
-            path.to_owned(),
-            format!("expected a table, found {}", kind(other)),
-        )),
+        Value::Object(object) => Some(object),
+        other => {
+            out.push(wrong_type_at(base.to_owned(), "a table", other));
+            None
+        }
     }
 }
 
@@ -457,26 +559,71 @@ fn reject_unknown(
     object: &Map<String, Value>,
     base: &str,
     known: &[&str],
-) -> Result<(), ConfigError> {
-    for key in object.keys() {
+    out: &mut Vec<Violation>,
+) {
+    let names: Vec<Value> = known
+        .iter()
+        .map(|key| Value::String((*key).to_owned()))
+        .collect();
+    for (key, value) in object {
         if !known.contains(&key.as_str()) {
-            return Err(field_error(dotted(base, key), "unknown key".to_owned()));
+            let scalar = value.is_string() || value.is_number() || value.as_bool().is_some();
+            out.push(Violation {
+                found: scalar.then(|| value.clone()),
+                allowed: Some(Value::Array(names.clone())),
+                ..Violation::new(dotted(base, key), "unknown key".to_owned())
+            });
         }
     }
-    Ok(())
 }
 
 fn require_present(
     object: &Map<String, Value>,
     base: &str,
     required: &[&str],
-) -> Result<(), ConfigError> {
+    out: &mut Vec<Violation>,
+) {
     for key in required {
         if !object.contains_key(*key) {
-            return Err(field_error(dotted(base, key), "missing".to_owned()));
+            out.push(Violation::new(dotted(base, key), "missing".to_owned()));
         }
     }
-    Ok(())
+}
+
+fn bounds(min: Value, max: Value) -> Value {
+    let mut allowed = Map::new();
+    allowed.insert("min".to_owned(), min);
+    allowed.insert("max".to_owned(), max);
+    Value::Object(allowed)
+}
+
+fn at_least(min: Value) -> Value {
+    let mut allowed = Map::new();
+    allowed.insert("min".to_owned(), min);
+    Value::Object(allowed)
+}
+
+fn count_value(count: usize) -> Value {
+    u64::try_from(count).map_or(Value::Null, Value::from)
+}
+
+fn number_value(raw: f64) -> Value {
+    serde_json::Number::from_f64(raw).map_or(Value::Null, Value::Number)
+}
+
+fn wrong_type_at(path: String, expected: &str, found: &Value) -> Violation {
+    Violation {
+        found: Some(found.clone()),
+        ..Violation::new(path, format!("expected {expected}, found {}", kind(found)))
+    }
+}
+
+fn ranged(path: String, rule: String, found: Value, allowed: Value) -> Violation {
+    Violation {
+        found: Some(found),
+        allowed: Some(allowed),
+        ..Violation::new(path, rule)
+    }
 }
 
 fn camera_to_value(camera: &CameraConfig) -> Value {
@@ -539,10 +686,6 @@ fn kind(value: &Value) -> &'static str {
         Value::Number(number) if number.is_i64() || number.is_u64() => "an integer",
         Value::Number(_) => "a float",
     }
-}
-
-fn kind_opt(value: Option<&Value>) -> &'static str {
-    value.map_or("nothing", kind)
 }
 
 const fn field_error(path: String, rule: String) -> ConfigError {
