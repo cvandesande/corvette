@@ -734,13 +734,15 @@ upstream cannot hold a request open, and in size, so an oversized response is a 
 upstream and not a configuration worth parsing.
 
 Every response the service sends — success and error alike — is JSON with
-`Content-Type: application/json`, with one exception: the still route's `200` is the
+`Content-Type: application/json`, with two exceptions: the still route's `200` is the
 camera's picture, `Content-Type: image/jpeg`, while every error the still route sends is
-JSON like every other route's. Every response carries `Cache-Control: no-store` and
+JSON like every other route's; the errors the configuration routes answer are
+`application/problem+json`, the RFC 9457 problem details the configuration routes
+define. Every response carries `Cache-Control: no-store` and
 closes the connection. Responses nginx generates itself — `401` from a failed identity check, `403`
 for a refused method, `502` when the service is unreachable — carry nginx's own HTML
-body instead. Service errors share one shape, `{"code": ..., "message": ...}`, where
-`code` is a stable machine value to branch on and `message` describes the failure:
+body instead. The other service errors share one shape, `{"code": ..., "message": ...}`,
+where `code` is a stable machine value to branch on and `message` describes the failure:
 
 - `bad_request` (`400`): the request could not be parsed; `message` names the reason,
   including a malformed camera segment or `height` on the still route.
@@ -759,9 +761,20 @@ body instead. Service errors share one shape, `{"code": ..., "message": ...}`, w
   backing; the reason is logged, not returned.
 - `status_unavailable` (`503`): the status route could not get a usable stats answer from
   the backing; the reason is logged, not returned.
-- `detection_unavailable` (`503`): the objects or detection status route could not get a
-  usable answer from the detection service; the reason is logged, not returned.
+- `detection_unavailable` (`503`): the objects, detection status or configuration routes
+  could not get a usable answer from the detection service; the reason is logged, not
+  returned.
 - `unhealthy` (`503`): the health route found failing parts; `message` names each one.
+
+The detection configuration routes answer six more codes, in their problem-details
+bodies:
+
+- `forbidden` (`403`): a `PUT` from a role that may not write.
+- `stale_revision` (`412`): `If-Match` does not match the current revision.
+- `revision_required` (`428`): a `PUT` arrived without `If-Match`.
+- `invalid_config` (`422`): the submitted value failed validation.
+- `apply_failed` (`503`): the running configuration refused the change.
+- `apply_incomplete` (`500`): the pipelines took the change; the file write failed.
 
 `GET /corvette/api/v1/health` answers `200` `{"database":"ok","config":"ok"}` when both
 probes pass, and `503` `unhealthy` naming each failing part otherwise. The database probe
@@ -1201,6 +1214,281 @@ in any response, and the reason is logged.
 
 The route accepts `GET` only, with the identity rules "Corvette's own API lives under
 `/corvette/api/v1/`" states for every route.
+
+## The detection configuration is read, validated and applied through the API
+
+Three routes read, dry-run and change the saved detection configuration. The API server
+relays all three to the detection service over its local socket, and the detection
+service validates, applies and writes the file; the file lives with the service that
+loads it, and Corvette's process is its only writer (issue 32, decided 2026-11-19).
+
+`GET /corvette/api/v1/detection/config` answers the saved configuration as JSON in the
+loader's value form — the shape `Config::to_value` produces
+(`crates/corvette-detect/src/config.rs:144`): top-level `worker_socket`, `labels`,
+`deadline_ms` and a `cameras` array. The answer is the normalized value: defaults the
+file omits appear filled in (`confirm_threshold` 0.7, `pad_pixels` 16, `config.rs:381,290`).
+The response carries the configuration's revision in an `ETag` header and follows the
+shared response rules "Corvette's own API lives under `/corvette/api/v1/`" states: JSON,
+`Cache-Control: no-store`.
+
+`POST /corvette/api/v1/detection/config/validate` takes the same value form as its body
+and runs the loader's complete rule set against it — `Config::from_value`, every rule
+behind one entry point (`config.rs:87-90`) — while changing nothing: no file write, no
+pipeline touch. Success answers `200`
+`{"valid":true,"restart_required":[<restart-required paths>]}` — every changed path in
+the proposal that takes effect only after a restart, including the path of an added or
+removed camera; the array is empty when the proposal changes none — and
+failure answers `422` `invalid_config` with every violation listed together (the error
+body below).
+
+`PUT /corvette/api/v1/detection/config` replaces the configuration as a whole: the body
+is the entire desired value form and the request carries, in `If-Match`, the revision it
+was based on. Success answers `200`
+`{"revision":"<new>","live":[<camera names>],"restart_required":[<restart-required paths>]}`,
+naming exactly what took effect live and every changed path that takes effect only after
+a restart, including the path of an added or removed camera, and the body's
+`revision` is the token for the next `If-Match`. The apply `200` carries the new
+revision in its body only and sends no `ETag` header: RFC 9110 §9.3.4 forbids a
+validator in a successful `PUT` response unless the saved representation is identical
+to the content received, and the saved form is normalized. Re-applying identical
+content against
+the current revision changes nothing and answers that same revision. A retry whose first
+attempt already succeeded carries the pre-apply revision and answers `412` like any
+stale write; the `412` body carries the current configuration value, so a client compares
+it — once its omitted defaulted fields are filled in — against the normalized form the
+read route returns, and recognizes its own completed write.
+
+The revision is one strong token for the saved file: `sha256:<hex>` over the saved file
+bytes, quoted in `ETag` and `If-Match` exactly as RFC 9110 defines for lost-update
+prevention. A `PUT` whose `If-Match` does not match answers `412` with nothing written
+and nothing applied; a `PUT` without `If-Match` answers `428`, because unconditional
+writes are never applied — which is what RFC 6585 added 428 for.
+
+`GET /corvette/api/v1/detection/config/schema` answers the schema document, so editors
+get completion and hover against the live deployment; one more `GET` under the existing
+prefix needs no nginx change. The served copy must stay the tested copy: the loader does
+not read the schema at runtime and a test checks agreement
+(`crates/corvette-detect/tests/config.rs:495-498`). The schema declares its dialect at
+JSON Schema 2020-12 (`docs/design/detection-config.schema.json:2`) and gains a stable
+`$id` equal to this serving URL, keeping `additionalProperties: false`, which is the
+right closure while the schema is one plain object.
+
+## The configuration routes answer with these codes and one error body
+
+- `200` — read succeeded; validate passed; apply took effect.
+- `400` `bad_request` — the body is missing, not JSON, not a JSON object, or over the
+  service's body-size bound; the bound exists so a stalled or oversized writer cannot
+  grow the service unboundedly, and is sized for a hand-authored detection
+  configuration (tens of cameras).
+- `401` `unauthorized` — no or empty `Remote-User`, exactly as every route today.
+- `403` `forbidden` — the `PUT` configuration route and the caller's role may not write.
+- `412` `stale_revision` — `If-Match` does not match the current revision; nothing was
+  written and nothing was applied; the body carries the current configuration value.
+- `422` `invalid_config` — the value failed validation; the error body below.
+- `428` `revision_required` — `PUT` arrived without `If-Match`, answered after
+  validation in the apply order below.
+- `503` `detection_unavailable` — the detection service could not be reached over its
+  local socket; the same condition and code the two detection routes already define
+  ("The detection service could not be reached.").
+- `503` `apply_failed` — validation passed and the revision matched, but the running
+  configuration refused the change (a camera's new pipeline would not come up); the old
+  configuration keeps running untouched and the `detail` member names the camera.
+- `500` `apply_incomplete` — the pipelines took the change and the file write failed;
+  the running configuration is ahead of the file and its revision.
+
+Errors are RFC 9457 problem details, `application/problem+json`, carrying `type`,
+`title`, `status`, `detail` and `instance`, plus two extension members: the stable
+string in `code` (`invalid_config`, `stale_revision`, …) and, on validation failures,
+`errors`. One validation failure answers, as an example:
+
+`{"type":"<problem type>","title":"<problem title>","status":422,`
+`"detail":"2 configuration errors","code":"invalid_config","errors":[`
+`{"path":"cameras[1].fps","rule":"expected an integer, found a string","found":"a"},`
+`{"path":"cameras[0].area.polygon","rule":"expected at least 3 points, found 2","found":2}]}`
+
+`path` is the loader's own path style — dotted keys, bracketed indices, built by `dotted`
+and `indexed` (`config.rs:514-530`) — so `cameras[1].fps` names the same place in the
+file, the value form and the schema. `rule` is the loader's one-line message
+(`unknown key`, `missing`, `duplicate camera name "front"`). `found` carries the value
+found where a scalar one exists, and `allowed` carries a closed set or range where one
+applies (fps bounds, threshold bounds, known key names). A file that does not parse to
+TOML at all answers one entry with an empty `path` and the loader's syntax message,
+which already names line and column (`toml line 4 column 9: ...`, `config.rs:166-175`).
+Validation reports every violation found in the document, collected in one pass, so a
+multi-typo fix takes one round trip; the loader returns on the first rule violation today
+(`config.rs:87-89`), so accumulating them is a loader change. Field-locating diagnostics
+serve both audiences a change can come from: a person fixes a form and a model fixes its
+next attempt from the same field.
+
+The pre-routing identity answer keeps the shared `{"code","message"}` shape: its body
+must be identical for every path, so an unauthenticated caller learns nothing about
+which routes exist (this file, "Corvette's own API lives under `/corvette/api/v1/`");
+problem details appear only on responses a route reaches. The two existing detection
+routes answer `{"code","message"}` today; moving them to problem details is a later
+step of its own, and until then their `503` `detection_unavailable` keeps that body.
+
+## An apply runs in one numbered order and takes effect per camera
+
+Issue 32 decided that per-camera settings apply live and global ones wait for a restart.
+
+ASSUMPTION (to confirm): restart-required means the three top-level fields
+`worker_socket`, `labels` and `deadline_ms` — the first two map the issue's words
+("worker socket, model") onto keys that exist; `deadline_ms` joins them because the
+engine binds the socket path and the request deadline together at connect
+(`crates/corvette-detect/src/engine.rs:147-162`). Every field under a camera entry
+applies live. The response shape is stable across changes to the set, and a restart
+stays out of band: an operator or their platform performs it, never a route.
+
+One apply runs this order. The API server performs step 1 and relays; the detection
+service performs steps 3 to 7:
+
+1. authenticate — the `Remote-User` rule "Corvette's own API lives under
+   `/corvette/api/v1/`" states; a role not allowed to write answers `403` here;
+2. the API server relays the request to the detection service over its socket;
+3. parse and validate the body with the same rule set the dry run uses;
+4. take the service's single apply lock;
+5. check the revision against the saved file; a missing `If-Match` answers `428` here;
+6. bring the changed pipelines up;
+7. write the file last.
+
+Concurrent applies serialise on the lock at step 4: the second reaches step 5 only after
+the first finishes and then sees the first's new revision, which closes the
+check-versus-write race. Any refusal before step 7 writes nothing. The new
+configuration takes effect only as a whole, and a failed bring-up keeps the previous
+configuration running for every camera and answers `503` `apply_failed`.
+
+On a live change, each camera whose entry changed gets a fresh detect pipeline: the
+replacement is started and the old one stops after it, so the camera is never left
+without detection mid-change. That pipeline restart restarts the camera's tracking;
+object ids begin anew for it. Cameras whose entries did not change keep running
+untouched. Adding or removing a camera answers `restart_required` naming that camera,
+until the frame-delivery registry that feeds the pipeline — fixed at startup today
+(`crates/corvette-media-bridge/src/restream_provider.rs:39-40`) — can change at runtime.
+
+ASSUMPTION (to confirm): the saved file declares TOML 1.1.0 as its version. The write
+edits the file in place with `toml_edit`, so comments, key order and spacing outside
+the changed values survive; a comment attached to a value the change itself rewrites
+is not promised, because assigning a value replaces that value's decoration. The
+whole-camera rewrite proof has not been written yet; the nearest case proves survival
+for one value assignment on a polygon fixture
+(`crates/corvette-detect/tests/config.rs:116-145`). The writer emits exactly one
+trailing newline and a defined key order, so a save whose content has not changed keeps
+one revision; plain `toml_edit` output does not hold a missing trailing newline or
+dotted-key order stable. The current `toml_edit` release reported upstream
+(`0.25.19+spec-1.1.0`) is UNVERIFIED as current; the lock is settled: `Cargo.lock:3404`
+pins `toml_edit 0.25.13+spec-1.1.0`, which already parses and writes to the 1.1.0 spec.
+
+A file-write failure at step 7 — disk full, permissions — leaves the running
+configuration ahead of the file and its revision. The answer is the distinct code
+`apply_incomplete` (`500`), naming that the file did not land, and the service logs it. The
+divergence is bounded: a later successful apply saves the new content, and a restart
+loads the saved file and brings the pipelines back to it, dropping the unsaved change.
+Because the revision is the file's hash, the file and revision stand unchanged and the
+next apply at the current revision passes step 5.
+
+A successful apply records one structured audit entry in the service's log: who
+(`Remote-User`), when, the previous and new revision, and a summary of the changed
+paths — nothing secret, which the configuration format guarantees by construction. An
+API audit-log precedent for mutating APIs backs this entry; that precedent's citation
+404'd when the research read it — UNVERIFIED.
+
+## Configuration reads carry no address or credential, and writes need the admin role
+
+The identity rules "Corvette's own API lives under `/corvette/api/v1/`" states stand
+unchanged: nginx runs an identity check (a subrequest to Frigate's `/auth` today) and
+sets `Remote-User` and `Remote-Role` from its response, so a browser cannot supply
+them; a request reaching the service with a missing or empty `Remote-User` gets `401`
+whatever the path. The service itself performs no authentication beyond that check —
+the identity arrives on headers from nginx, unspoofable from outside the `frigate`
+container because the service binds a Unix socket file in a volume shared only with
+that container, where nginx runs — and `Remote-Role` today only filters which cameras
+read routes show (`crates/corvette-api-server/src/lib.rs:514-522`).
+
+A write demands more than a read: a `PUT` whose `Remote-Role` is not `admin` answers
+`403` `forbidden`. The `admin` string is the role value the current backing's identity
+check writes into `Remote-Role`; Corvette's own role names are the human's to set. Two
+changes belong to this contract's implementation: nginx's `location ^~ /corvette/api/`
+block forwards `PUT` and `POST` (it answers `403` to other methods today), and the
+service's request parser accepts them with a bounded body (it accepts `GET` only today,
+`crates/corvette-api-server/src/lib.rs:411`). The proxy also strips any client-supplied `Remote-User` or `Remote-Role`
+before setting them — a requirement of this contract; UNVERIFIED whether the deployed
+nginx already does, settled by reading the `proxy_set_header` lines of the
+`/corvette/api/` location in the deployed configuration.
+
+The current backing shows why the write permission is explicit: its config-write
+endpoint was once reachable without authentication (GHSL-2023-198) and its raw-config
+read leaked secrets to low-privilege readers (CVE-2026-33469) — advisory- and
+doc-sourced, UNVERIFIED against the deployed revision. It saves whole-file YAML on
+every UI write with no revision guard between two writers (`PUT /api/config/set`; the
+whole-file and no-guard details are UNVERIFIED against the deployed revision), and it
+can restart broadly on a saved change while flagging restart-required fields in its
+editor (docs-sourced; the one-camera-change-restarts-the-system pain is its issue
+#16492 — UNVERIFIED against the deployed revision).
+
+No response ever carries a stream address or a credential. The configuration format has
+no field for one and none is ever added, in the file or in any API or MCP result
+(issue 32). A camera entry names its source by the camera name alone — the same name the
+restream provider uses to dispatch frames (`restream_provider.rs:20`) — so a
+configuration that is correct never contains a place an address or password could sit,
+and the read response, the validate body and every tool result share that one shape.
+Where stream addresses live — the delivery layer's own configuration — is outside this
+contract.
+
+## The MCP server administers the detection configuration
+
+The MCP server is a separate process over the public API (issue 32); it authenticates
+to `/corvette/api/v1/` like any other client, and that it holds no privileged path into
+the detection service is a reading of the issue's words "over the public API", not a
+recorded decision. It connects over stdio, launched as a local subprocess by the MCP
+client, and reads a service-account credential from the environment; the
+stdio-credentials guidance is quoted directly from the MCP authorization page (primary).
+The audience this transport suits — one operator and one MCP client — is UNVERIFIED
+(no record found). OAuth 2.1, RFC 8707 resource indicators and RFC 9728 are quoted
+from the MCP authorization text, primary; the PKCE and `401` plus `WWW-Authenticate`
+resource-metadata discovery that a later HTTP transport would use come from secondary
+sources and stand as direction, not settled text. The spec revision relied on is the
+current 2026-07-28.
+
+It exposes the four intent-level tools issue 32 named; a fifth is not justified, because
+the four close the read-validate-apply-check loop, and endpoint-mirroring is the
+documented anti-pattern (relayed through secondary sources). Each tool's `inputSchema`
+and `outputSchema` are JSON Schema documents derived from the route bodies above:
+
+- `read_detection_config` — input `{}`; output `{config, revision}`: the read route's
+  body plus the revision it carries. Annotated read-only.
+- `validate_detection_config` — input `{config}`; output `{valid, restart_required}` on
+  success, or the full `errors` list as a tool-execution error on failure. Annotated
+  read-only.
+- `apply_detection_config` — input `{config, revision}`; the server places the revision
+  on `If-Match` and puts the configuration in the body, the route's whole value form;
+  output is the apply response `{revision, live,
+  restart_required}`. The one tool that changes state. Annotated `destructiveHint` and
+  `idempotentHint`, and the server requests a form-mode elicitation confirmation before
+  each apply; elicitation is a client capability, so the request reaches a human when
+  the client implements it. Annotations are hints and clients must treat them as
+  untrusted, so enforcement stays in the API's own authentication and admin-role rule.
+- `read_detection_status` — input `{}`; output is the detection status route's body, so
+  the model can tell a quiet scene from a dead pipeline before proposing a change.
+  Annotated read-only. Its route, `GET /corvette/api/v1/detection/status`, is specified
+  and not yet served; the tool ships with it.
+
+The server is read-only by default (issue 32): the advertised tool list omits
+`apply_detection_config`, and the server's documentation names how writes are turned on.
+A validation failure returns as a tool-execution error whose content is the `errors`
+list — the spec assigns execution errors exactly that role: actionable feedback a model
+can use to self-correct — while malformed requests stay protocol errors. Human
+confirmation before `apply_detection_config` sits with the client, where the spec places
+it; the server's elicitation request sits on top of that.
+
+The server has no tool that yields stream addresses or credentials — the contract gives
+it no shape that contains one — and tool results carry JSON values, never stream bytes
+or pictures, and no tool returns a stream URI: stream addressing belongs to the
+delivery contract. No normative prohibition on embedding streams was found in the spec
+— that rule is marked UNVERIFIED — so "no stream in any tool result, ever" stands as
+this contract's own rule.
+
+Implementation status: the three configuration routes, the schema route and the MCP
+server are specified and not yet served.
 
 ## A tracked object is stationary when its motionless count reaches the threshold
 
