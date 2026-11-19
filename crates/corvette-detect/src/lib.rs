@@ -13,6 +13,7 @@ mod record;
 mod region_stage;
 mod replay;
 mod replay_segment;
+mod revision;
 mod segment;
 mod source;
 mod supervised;
@@ -25,7 +26,7 @@ pub use config::{
     ConfigError, DEFAULT_CONFIRM_THRESHOLD, DEFAULT_PAD_PIXELS, MAX_DEADLINE_MS, MAX_EDGE, MAX_FPS,
     MAX_PAD_PIXELS, MAX_POLYGON_COORD, MIN_CAMERAS, MIN_DEADLINE_MS, MIN_EDGE, MIN_FPS,
     MIN_PAD_PIXELS, MIN_POLYGON_COORD, MIN_POLYGON_POINTS, POINT_COORDINATES, REQUIRED_AREA_KEYS,
-    REQUIRED_CAMERA_KEYS, REQUIRED_CONFIG_KEYS,
+    REQUIRED_CAMERA_KEYS, REQUIRED_CONFIG_KEYS, Violation,
 };
 pub use engine::{EngineError, LabelError, Labels, WorkerClient};
 pub use ffmpeg::{Decode, FrameSpec, Input, MAX_FRAME_BYTES, SpecError, decode_command};
@@ -35,6 +36,7 @@ pub use record::{RecordError, RecordHeader, RecordWriter};
 pub use region_stage::{RegionStage, RegionStageError, RegionStageSettings, RegionTensor};
 pub use replay::{ReplayError, ReplayPipeline};
 pub use replay_segment::{Area, ReplayConfig, ReplaySegmentError, ReplaySummary, replay_segment};
+pub use revision::revision;
 pub use segment::{SegmentError, SegmentName};
 pub use source::{FrameSource, STREAM_QUEUE_CAPACITY, SourceError};
 pub use supervised::{Status, Supervised};
