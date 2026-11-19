@@ -1369,9 +1369,9 @@ ASSUMPTION (to confirm): the saved file declares TOML 1.1.0 as its version. The 
 edits the file in place with `toml_edit`, so comments, key order and spacing outside
 the changed values survive; a comment attached to a value the change itself rewrites
 is not promised, because assigning a value replaces that value's decoration. The
-whole-camera rewrite proof has not been written yet; the nearest case proves survival
-for one value assignment on a polygon fixture
-(`crates/corvette-detect/tests/config.rs:116-145`). The writer emits exactly one
+whole-camera rewrite keeps the comments around it, proven in
+`crates/corvette-detect/tests/config_file.rs` (`rewriting_a_camera_keeps_comments_elsewhere`).
+The writer (`render`) emits exactly one
 trailing newline and a defined key order, so a save whose content has not changed keeps
 one revision; plain `toml_edit` output does not hold a missing trailing newline or
 dotted-key order stable. The current `toml_edit` release reported upstream

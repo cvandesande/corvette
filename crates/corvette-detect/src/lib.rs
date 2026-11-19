@@ -5,6 +5,7 @@ mod backoff;
 mod candidate_stage;
 mod clock;
 mod config;
+mod config_file;
 mod engine;
 mod ffmpeg;
 mod object_stage;
@@ -26,8 +27,9 @@ pub use config::{
     ConfigError, DEFAULT_CONFIRM_THRESHOLD, DEFAULT_PAD_PIXELS, MAX_DEADLINE_MS, MAX_EDGE, MAX_FPS,
     MAX_PAD_PIXELS, MAX_POLYGON_COORD, MIN_CAMERAS, MIN_DEADLINE_MS, MIN_EDGE, MIN_FPS,
     MIN_PAD_PIXELS, MIN_POLYGON_COORD, MIN_POLYGON_POINTS, POINT_COORDINATES, REQUIRED_AREA_KEYS,
-    REQUIRED_CAMERA_KEYS, REQUIRED_CONFIG_KEYS, Violation,
+    REQUIRED_CAMERA_KEYS, REQUIRED_CONFIG_KEYS, Violation, convert_item, syntax_error,
 };
+pub use config_file::render;
 pub use engine::{EngineError, LabelError, Labels, WorkerClient};
 pub use ffmpeg::{Decode, FrameSpec, Input, MAX_FRAME_BYTES, SpecError, decode_command};
 pub use object_stage::{FrameObjects, ObjectStage, ObjectStageError, TrackedObject};

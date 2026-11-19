@@ -224,7 +224,9 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-fn syntax_error(text: &str, error: &toml_edit::TomlError) -> ConfigError {
+/// Builds the syntax error for a parse failure, locating line and column in `text`.
+#[must_use]
+pub fn syntax_error(text: &str, error: &toml_edit::TomlError) -> ConfigError {
     let start = error
         .span()
         .filter(|span| text.get(span.start..).is_some())
@@ -239,7 +241,11 @@ fn syntax_error(text: &str, error: &toml_edit::TomlError) -> ConfigError {
     }
 }
 
-fn convert_item(item: &toml_edit::Item, path: &str) -> Result<Value, ConfigError> {
+/// Converts a loaded TOML item into the loader's `serde_json` value form.
+///
+/// # Errors
+/// `ConfigError::Field` if a datetime, a non-finite number, or an absent value appears.
+pub fn convert_item(item: &toml_edit::Item, path: &str) -> Result<Value, ConfigError> {
     match item {
         toml_edit::Item::Table(table) => convert_entries(table.iter(), path),
         toml_edit::Item::ArrayOfTables(tables) => {
