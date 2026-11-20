@@ -200,7 +200,7 @@ fn an_infer_request_returns_the_decoded_rows() {
                 <&[f32; corvette_yolo::decode::RAW_LEN]>::try_from(raw.as_slice()).unwrap();
             let expected_rows = mapped_rows(raw_ref);
             let reply = read_reply(&mut stream).unwrap();
-            let Reply::Rows { id, rows } = reply else {
+            let Reply::Rows { id, rows, .. } = reply else {
                 panic!("expected a Rows reply, got {reply:?}");
             };
             assert_eq!(id, 3);
@@ -213,6 +213,53 @@ fn an_infer_request_returns_the_decoded_rows() {
             assert_eq!(row.y_max.to_bits(), 0.3125f32.to_bits());
             assert_eq!(row.x_max.to_bits(), 0.625f32.to_bits());
             assert_eq!(rows, expected_rows);
+        });
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
+        assert_eq!(end.unwrap(), ServeEnd::Stopped);
+    });
+    assert_eq!(recorder.codes(), Vec::<i32>::new());
+}
+
+struct Sleeping {
+    delay: Duration,
+}
+
+impl Engine for Sleeping {
+    fn infer(&mut self, _rgb: &[u8; TENSOR_BYTES]) -> Result<Box<[f32; RAW_VALUES]>, EngineError> {
+        thread::sleep(self.delay);
+        Ok(boxed(vec![0.0; RAW_VALUES]))
+    }
+}
+
+#[test]
+fn a_rows_reply_reports_the_elapsed_milliseconds_of_the_engine_call() {
+    let path = socket_path("elapsed");
+    let listener = UnixListener::bind(&path).unwrap();
+    let stop = AtomicBool::new(false);
+    let recorder = Recorder::new();
+    let mut engine = Sleeping {
+        delay: Duration::from_millis(30),
+    };
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            let _guard = StopGuard(&stop);
+            let mut stream = connect(&path);
+            let tensor = &ZERO_TENSOR;
+            let frame = request_frame(&Request::InferRequest {
+                id: 40,
+                deadline_ms: 10_000,
+                tensor,
+            });
+            stream.write_all(&frame).unwrap();
+            let reply = read_reply(&mut stream).unwrap();
+            let Reply::Rows { id, worker_ms, .. } = reply else {
+                panic!("expected a Rows reply, got {reply:?}");
+            };
+            assert_eq!(id, 40);
+            assert!(
+                worker_ms >= 20,
+                "worker_ms {worker_ms} missed the 30 ms sleep"
+            );
         });
         let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
         assert_eq!(end.unwrap(), ServeEnd::Stopped);

@@ -139,6 +139,7 @@ fn infer_returns_the_rows_a_worker_replies() {
     let rows = vec![row(3, 0.75), row(17, 0.5)];
     let reply = Reply::Rows {
         id: 0,
+        worker_ms: 0,
         rows: rows.clone(),
     };
     serve_replies(listener, vec![reply]);
@@ -267,10 +268,12 @@ fn two_consecutive_infers_each_get_their_own_reply_on_one_connection() {
     let second = vec![row(2, 0.8)];
     let first_reply = Reply::Rows {
         id: 0,
+        worker_ms: 0,
         rows: first.clone(),
     };
     let second_reply = Reply::Rows {
         id: 1,
+        worker_ms: 0,
         rows: second.clone(),
     };
     serve_replies(listener, vec![first_reply, second_reply]);
@@ -303,6 +306,7 @@ fn a_stale_second_reply_is_an_id_mismatch_and_not_fresh_rows() {
     let listener = UnixListener::bind(&socket).expect("bind");
     let fresh_reply = Reply::Rows {
         id: 0,
+        worker_ms: 0,
         rows: vec![row(1, 0.9)],
     };
     thread::spawn(move || {

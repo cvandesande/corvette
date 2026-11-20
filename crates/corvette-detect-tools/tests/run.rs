@@ -399,6 +399,7 @@ fn script_second_reply(stream: &mut UnixStream, case: &str) {
                 stream,
                 &Reply::Rows {
                     id: 1,
+                    worker_ms: 0,
                     rows: Vec::new(),
                 },
             );

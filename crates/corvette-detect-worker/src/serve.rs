@@ -124,20 +124,24 @@ fn serve_connection<E: Engine>(
                 id,
                 deadline_ms,
                 tensor,
-            } => match infer_with_deadline(engine, tensor, deadline_ms, watchdog) {
-                Ok(raw) => Reply::Rows {
-                    id,
-                    rows: decoded_rows(&raw),
-                },
-                Err(InferFailure::ZeroDeadline) => {
-                    bad_request(&stream, id);
-                    continue;
+            } => {
+                let started = Instant::now();
+                match infer_with_deadline(engine, tensor, deadline_ms, watchdog) {
+                    Ok(raw) => Reply::Rows {
+                        id,
+                        worker_ms: saturating_ms(started.elapsed()),
+                        rows: decoded_rows(&raw),
+                    },
+                    Err(InferFailure::ZeroDeadline) => {
+                        bad_request(&stream, id);
+                        continue;
+                    }
+                    Err(InferFailure::Engine(error)) => {
+                        return engine_failure(&stream, id, &error, terminator);
+                    }
+                    Err(InferFailure::Overran) => return overrun(&stream, id),
                 }
-                Err(InferFailure::Engine(error)) => {
-                    return engine_failure(&stream, id, &error, terminator);
-                }
-                Err(InferFailure::Overran) => return overrun(&stream, id),
-            },
+            }
             Request::InferRawRequest {
                 id,
                 deadline_ms,
@@ -185,6 +189,10 @@ fn infer_with_deadline<E: Engine>(
         return Err(InferFailure::Overran);
     }
     raw.map_err(InferFailure::Engine)
+}
+
+fn saturating_ms(elapsed: Duration) -> u32 {
+    u32::try_from(elapsed.as_millis()).unwrap_or(u32::MAX)
 }
 
 fn decoded_rows(raw: &[f32; RAW_VALUES]) -> Vec<Row> {
@@ -352,5 +360,21 @@ fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
     match state.lock() {
         Ok(guard) => guard,
         Err(poisoned) => PoisonError::into_inner(poisoned),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::saturating_ms;
+    use std::time::Duration;
+
+    #[test]
+    fn saturating_ms_measures_milliseconds_and_saturates_at_the_maximum() {
+        assert_eq!(saturating_ms(Duration::ZERO), 0);
+        assert_eq!(saturating_ms(Duration::from_millis(1234)), 1234);
+        assert_eq!(
+            saturating_ms(Duration::from_secs(u64::from(u32::MAX))),
+            u32::MAX
+        );
     }
 }

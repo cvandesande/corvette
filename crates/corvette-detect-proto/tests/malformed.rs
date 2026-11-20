@@ -158,7 +158,7 @@ fn a_rows_reply_with_too_many_rows_is_refused() {
     assert_eq!(
         Reply::decode(&frame(0x81, 33, &mismatch)),
         Err(DecodeError::BodyLength {
-            expected: 57,
+            expected: 61,
             found: 33,
         })
     );
@@ -202,7 +202,9 @@ fn every_prefix_of_a_valid_frame_is_refused() {
         assert!(Request::decode(&health_request[..len]).is_err());
     }
 
-    let mut rows = vec![1_u8, 0x81, 57, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 2];
+    let mut rows = vec![
+        1_u8, 0x81, 61, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0,
+    ];
     rows.extend_from_slice(&[0_u8; 48]);
     for len in 0..rows.len() {
         assert!(Reply::decode(&rows[..len]).is_err());
@@ -226,7 +228,11 @@ fn encode_refuses_what_it_cannot_describe() {
             x_max: 0.0,
         })
         .collect();
-    let too_many = Reply::Rows { id: 1, rows };
+    let too_many = Reply::Rows {
+        id: 1,
+        worker_ms: 0,
+        rows,
+    };
     assert_eq!(too_many.encode(), Err(EncodeError::RowCount(21)));
 
     let short = Reply::Raw {

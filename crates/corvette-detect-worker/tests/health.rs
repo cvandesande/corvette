@@ -218,13 +218,11 @@ fn a_health_request_is_answered_while_the_serving_loop_is_inside_a_slow_engine_c
             assert!(elapsed < Duration::from_secs(2));
             gate_sender.send(()).unwrap();
             let infer_reply = read_frame(&mut infer_stream).unwrap();
-            assert_eq!(
-                Reply::decode(&infer_reply).unwrap(),
-                Reply::Rows {
-                    id: 5,
-                    rows: Vec::new()
-                }
-            );
+            let Reply::Rows { id, rows, .. } = Reply::decode(&infer_reply).unwrap() else {
+                panic!("expected a Rows reply");
+            };
+            assert_eq!(id, 5);
+            assert!(rows.is_empty());
         });
         scope.spawn(|| {
             serve_health(&health_listener, &stop, Duration::from_secs(5)).unwrap();

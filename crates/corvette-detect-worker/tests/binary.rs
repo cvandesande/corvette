@@ -190,7 +190,7 @@ fn the_worker_serves_a_request_and_answers_the_probe_while_the_connection_stays_
         },
     );
     let reply = read_reply(&mut stream).expect("rows reply");
-    let Reply::Rows { id, rows } = reply else {
+    let Reply::Rows { id, rows, .. } = reply else {
         panic!("expected a Rows reply, got {reply:?}");
     };
     assert_eq!(id, 8);

@@ -126,6 +126,7 @@ fn infer_returns_rows_and_reports_connected() {
         listener,
         vec![Reply::Rows {
             id: 0,
+            worker_ms: 0,
             rows: rows.clone(),
         }],
     );
@@ -176,6 +177,7 @@ fn a_worker_returning_on_the_same_path_serves_again_after_the_delay() {
         listener,
         vec![Reply::Rows {
             id: 0,
+            worker_ms: 0,
             rows: rows.clone(),
         }],
     );
@@ -265,6 +267,7 @@ fn a_failure_after_a_healthy_run_waits_only_the_initial_delay() {
         listener,
         vec![Reply::Rows {
             id: 0,
+            worker_ms: 0,
             rows: rows.clone(),
         }],
     );

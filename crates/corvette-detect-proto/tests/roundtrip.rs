@@ -1,4 +1,4 @@
-use corvette_detect_proto::{ErrorCode, Kind, Reply, Request, Row};
+use corvette_detect_proto::{DecodeError, ErrorCode, Kind, Reply, Request, Row};
 
 fn row_bits(rows: &[Row]) -> Vec<(u32, u32, u32, u32, u32, u32)> {
     rows.iter()
@@ -82,10 +82,14 @@ fn a_health_request_is_eighteen_bytes() {
 fn rows_replies_round_trip_with_zero_one_and_max_rows() {
     let zero = Reply::Rows {
         id: 5,
+        worker_ms: 0,
         rows: vec![],
     };
     let zero_frame = zero.encode().unwrap();
-    assert_eq!(zero_frame, [1, 0x81, 9, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        zero_frame,
+        [1, 0x81, 13, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    );
     assert_eq!(Reply::decode(&zero_frame).unwrap(), zero);
 
     let row = Row {
@@ -98,10 +102,11 @@ fn rows_replies_round_trip_with_zero_one_and_max_rows() {
     };
     let one = Reply::Rows {
         id: 5,
+        worker_ms: 0,
         rows: vec![row.clone()],
     };
     let one_frame = one.encode().unwrap();
-    let mut expected: Vec<u8> = vec![1, 0x81, 33, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 1];
+    let mut expected: Vec<u8> = vec![1, 0x81, 37, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
     expected.extend_from_slice(&2_u32.to_le_bytes());
     for value in [0.75_f32, 0.25, 0.5, 0.875, 0.125] {
         expected.extend_from_slice(&value.to_le_bytes());
@@ -110,6 +115,7 @@ fn rows_replies_round_trip_with_zero_one_and_max_rows() {
     let Reply::Rows {
         id: one_id,
         rows: one_rows,
+        ..
     } = Reply::decode(&one_frame).unwrap()
     else {
         panic!("a rows reply decodes as a rows reply");
@@ -129,19 +135,73 @@ fn rows_replies_round_trip_with_zero_one_and_max_rows() {
         .collect();
     let many = Reply::Rows {
         id: 9,
+        worker_ms: 0,
         rows: rows.clone(),
     };
     let many_frame = many.encode().unwrap();
-    assert_eq!(many_frame.len(), 495);
+    assert_eq!(many_frame.len(), 499);
     let Reply::Rows {
         id: many_id,
         rows: many_rows,
+        ..
     } = Reply::decode(&many_frame).unwrap()
     else {
         panic!("a rows reply decodes as a rows reply");
     };
     assert_eq!(many_id, 9);
     assert_eq!(row_bits(&many_rows), row_bits(&rows));
+}
+
+#[test]
+fn a_rows_reply_carries_the_worker_elapsed_milliseconds() {
+    let row = Row {
+        class_id: 2,
+        score: 0.75,
+        y_min: 0.25,
+        x_min: 0.5,
+        y_max: 0.875,
+        x_max: 0.125,
+    };
+    let reply = Reply::Rows {
+        id: 7,
+        worker_ms: 1234,
+        rows: vec![row],
+    };
+    let frame = reply.encode().unwrap();
+    assert_eq!(&frame[..6], [1, 0x81, 37, 0, 0, 0]);
+    assert_eq!(&frame[6..14], 7_u64.to_le_bytes());
+    assert_eq!(frame[14], 1);
+    assert_eq!(&frame[15..19], 1234_u32.to_le_bytes());
+    assert_eq!(Reply::decode(&frame).unwrap(), reply);
+    let mut short_frame = frame;
+    short_frame.pop();
+    short_frame[2..6].copy_from_slice(&36_u32.to_le_bytes());
+    assert_eq!(
+        Reply::decode(&short_frame),
+        Err(DecodeError::BodyLength {
+            expected: 37,
+            found: 36,
+        })
+    );
+}
+
+#[test]
+fn a_rows_reply_encodes_every_worker_ms_byte() {
+    let reply = Reply::Rows {
+        id: 7,
+        worker_ms: 0x0102_0304,
+        rows: vec![],
+    };
+    let frame = reply.encode().unwrap();
+    assert_eq!(&frame[15..19], [0x04, 0x03, 0x02, 0x01]);
+    assert_eq!(Reply::decode(&frame).unwrap(), reply);
+
+    let max = Reply::Rows {
+        id: 7,
+        worker_ms: u32::MAX,
+        rows: vec![],
+    };
+    assert_eq!(Reply::decode(&max.encode().unwrap()).unwrap(), max);
 }
 
 #[test]

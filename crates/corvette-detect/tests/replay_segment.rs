@@ -88,6 +88,7 @@ fn serve(listener: UnixListener, rows: Vec<Row>, close_after: usize) -> JoinHand
         while let Some(id) = read_request_id(&mut stream) {
             let reply = Reply::Rows {
                 id,
+                worker_ms: 0,
                 rows: rows.clone(),
             };
             let bytes = reply.encode().expect("reply encodes");
@@ -388,6 +389,7 @@ fn counted_requests(segment: &Path, sock: &str, area: Option<Area>) -> usize {
         while let Some(id) = read_request_id(&mut stream) {
             let bytes = Reply::Rows {
                 id,
+                worker_ms: 0,
                 rows: vec![person_row()],
             }
             .encode()

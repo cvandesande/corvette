@@ -195,7 +195,7 @@ fn the_worker_answers_infer_and_infer_raw_with_the_real_engine_over_a_socket() {
             .encode();
             stream.write_all(&frame).unwrap();
             let reply = read_reply(&mut stream).unwrap();
-            let Reply::Rows { id, rows } = reply else {
+            let Reply::Rows { id, rows, .. } = reply else {
                 panic!("expected a Rows reply, got {reply:?}");
             };
             assert_eq!(id, 32);

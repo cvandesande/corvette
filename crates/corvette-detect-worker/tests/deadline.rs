@@ -324,7 +324,7 @@ fn requests_within_their_deadline_are_served_and_the_watchdog_stays_quiet() {
                     )
                     .unwrap();
                 let reply = read_reply(&mut stream).unwrap();
-                let Reply::Rows { id: got, rows } = reply else {
+                let Reply::Rows { id: got, rows, .. } = reply else {
                     panic!("expected a Rows reply, got {reply:?}");
                 };
                 assert_eq!(got, id);

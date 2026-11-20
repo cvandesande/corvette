@@ -109,7 +109,13 @@ fn serve_worker(listener: &UnixListener) {
     let (mut stream, _) = listener.accept().expect("worker accept");
     while let Some(id) = read_request_id(&mut stream) {
         let rows = vec![person_row()];
-        let bytes = Reply::Rows { id, rows }.encode().expect("reply encodes");
+        let bytes = Reply::Rows {
+            id,
+            worker_ms: 0,
+            rows,
+        }
+        .encode()
+        .expect("reply encodes");
         stream.write_all(&bytes).expect("reply write");
     }
 }

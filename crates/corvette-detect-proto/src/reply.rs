@@ -58,12 +58,26 @@ impl fmt::Display for EncodeError {
 
 impl std::error::Error for EncodeError {}
 
+const WORKER_MS_LEN: usize = 4;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reply {
-    Rows { id: u64, rows: Vec<Row> },
-    Raw { id: u64, values: Vec<f32> },
-    Health { id: u64 },
-    Error { id: u64, code: ErrorCode },
+    Rows {
+        id: u64,
+        worker_ms: u32,
+        rows: Vec<Row>,
+    },
+    Raw {
+        id: u64,
+        values: Vec<f32>,
+    },
+    Health {
+        id: u64,
+    },
+    Error {
+        id: u64,
+        code: ErrorCode,
+    },
 }
 
 impl Reply {
@@ -71,16 +85,21 @@ impl Reply {
     /// Returns an `EncodeError` when the payload cannot be described within the wire limits.
     pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         match self {
-            Self::Rows { id, rows } => {
+            Self::Rows {
+                id,
+                worker_ms,
+                rows,
+            } => {
                 if rows.len() > MAX_ROWS {
                     return Err(EncodeError::RowCount(rows.len()));
                 }
                 let count = u8::try_from(rows.len()).unwrap_or(0);
-                let body_len = ID_LEN + 1 + usize::from(count) * ROW_LEN;
+                let body_len = ID_LEN + 1 + WORKER_MS_LEN + usize::from(count) * ROW_LEN;
                 let mut out = Vec::with_capacity(HEADER_LEN + body_len);
                 Kind::RowsReply.push_header(body_len, &mut out);
                 out.extend_from_slice(&id.to_le_bytes());
                 out.push(count);
+                out.extend_from_slice(&worker_ms.to_le_bytes());
                 for row in rows {
                     out.extend_from_slice(&row.class_id.to_le_bytes());
                     for value in [row.score, row.y_min, row.x_min, row.y_max, row.x_max] {
@@ -177,15 +196,24 @@ fn decode_rows(body: &[u8]) -> Result<Reply, DecodeError> {
     if count > MAX_ROWS {
         return Err(DecodeError::RowCount(count));
     }
-    let required = ID_LEN + 1 + count * ROW_LEN;
+    let head_len = ID_LEN + 1 + WORKER_MS_LEN;
+    let required = head_len + count * ROW_LEN;
     if body.len() != required {
         return Err(DecodeError::BodyLength {
             expected: required,
             found: body.len(),
         });
     }
+    let elapsed_bytes = body
+        .get(ID_LEN + 1..head_len)
+        .ok_or(DecodeError::Truncated)?;
+    let worker_ms = u32::from_le_bytes(
+        *elapsed_bytes
+            .first_chunk::<4>()
+            .ok_or(DecodeError::Truncated)?,
+    );
     let row_bytes = body
-        .split_at_checked(ID_LEN + 1)
+        .split_at_checked(head_len)
         .ok_or(DecodeError::Truncated)?
         .1;
     let mut rows = Vec::with_capacity(count);
@@ -194,6 +222,7 @@ fn decode_rows(body: &[u8]) -> Result<Reply, DecodeError> {
     }
     Ok(Reply::Rows {
         id: Header::read_id(body).ok_or(DecodeError::Truncated)?,
+        worker_ms,
         rows,
     })
 }
