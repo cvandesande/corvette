@@ -252,6 +252,20 @@ async fn a_frame_of_the_wrong_length_is_a_fatal_pipeline_error() {
 }
 
 #[tokio::test]
+async fn run_publishes_failed_when_a_step_ends_on_a_fatal_error() {
+    let (pipeline, _cells) = pipeline_with(true);
+    let short = FrameSpec::new(16, 12, 10, Decode::Cpu).expect("valid small spec");
+    let source = source_with("head -c 288 /dev/zero", short);
+    let (runner, handle) = CameraRunner::new(source, pipeline, Duration::from_secs(1));
+    let error = runner.run().await.expect_err("wrong frame length");
+    assert!(
+        matches!(error, RunnerError::Pipeline(LiveError::Region(_))),
+        "not a region error: {error:?}"
+    );
+    assert_eq!(handle.status.borrow().state, CameraState::Failed);
+}
+
+#[tokio::test]
 async fn run_returns_ok_when_the_source_reports_stopped() {
     let (pipeline, _cells) = pipeline_with(true);
     let source = FrameSource::spawn(
@@ -261,8 +275,13 @@ async fn run_returns_ok_when_the_source_reports_stopped() {
         FrameClock::replay(Duration::from_secs(1000), spec()),
         || panic!("the frame command closure panicked"),
     );
-    let (runner, _handle) = CameraRunner::new(source, pipeline, Duration::from_secs(1));
+    let (runner, handle) = CameraRunner::new(source, pipeline, Duration::from_secs(1));
     assert!(runner.run().await.is_ok());
+    assert_eq!(
+        handle.status.borrow().state,
+        CameraState::WaitingForFrames,
+        "a clean stop leaves the last published state, not failed"
+    );
 }
 
 #[tokio::test]

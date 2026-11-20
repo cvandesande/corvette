@@ -149,6 +149,7 @@ fn status_entries_parse_with_exact_names_and_counters() {
         (CameraState::Running, "running"),
         (CameraState::WaitingForFrames, "waiting_for_frames"),
         (CameraState::InferenceUnavailable, "inference_unavailable"),
+        (CameraState::Failed, "failed"),
     ] {
         assert_eq!(state_name(state), name);
         let parsed: Value =

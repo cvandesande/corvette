@@ -30,6 +30,7 @@ pub const fn state_name(state: CameraState) -> &'static str {
         CameraState::Running => "running",
         CameraState::WaitingForFrames => "waiting_for_frames",
         CameraState::InferenceUnavailable => "inference_unavailable",
+        CameraState::Failed => "failed",
     }
 }
 

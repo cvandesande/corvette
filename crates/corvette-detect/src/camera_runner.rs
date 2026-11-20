@@ -12,6 +12,7 @@ pub enum CameraState {
     Running,
     WaitingForFrames,
     InferenceUnavailable,
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,7 +135,10 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
             match self.step_once().await {
                 Ok(StepEnd::Stopped) => return Ok(()),
                 Ok(StepEnd::Frame | StepEnd::Gap) => {}
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.publish(CameraState::Failed);
+                    return Err(error);
+                }
             }
         }
     }
