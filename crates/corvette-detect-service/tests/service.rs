@@ -4,6 +4,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_corvette-detect-service");
@@ -250,4 +251,128 @@ fn unpublished_camera_answers_objects_unknown() {
     let (code, body) = answer.expect("an objects answer");
     assert_eq!(code, 503);
     assert_eq!(body, "{\"reason\":\"objects_unknown\"}");
+}
+
+fn probe_command(socket: &Path) -> Command {
+    let mut command = Command::new(BIN);
+    command
+        .env_remove("CORVETTE_DETECTION_SOCKET")
+        .arg("--probe")
+        .arg("--socket")
+        .arg(socket)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+#[test]
+fn probe_exits_zero_against_the_running_service() {
+    let service = start("probe-valid");
+    wait_until("a status of 200", || {
+        try_get(&service.socket, STATUS).is_some_and(|found| found.0 == 200)
+    });
+    let output = probe_command(&service.socket).output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn probe_exit_code_follows_the_status_first_line() {
+    let dir = temp_dir("probe-answers");
+    for (tag, answer, wanted) in [
+        (
+            "503",
+            b"HTTP/1.1 503 Service Unavailable\r\n\r\n".as_slice(),
+            1,
+        ),
+        ("200", b"HTTP/1.1 200 OK\r\n\r\n".as_slice(), 0),
+        ("2000", b"HTTP/1.1 2000 odd\r\n\r\n".as_slice(), 1),
+        ("200nospace", b"HTTP/1.1 200OK\r\n\r\n".as_slice(), 1),
+        ("closed", b"".as_slice(), 1),
+    ] {
+        let socket = dir.join(format!("probe-{tag}.sock"));
+        let listener = UnixListener::bind(&socket).unwrap();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // Read the request first, as the real service does: closing early races the probe's write.
+                let mut request = [0u8; 128];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(answer);
+            }
+        });
+        let output = probe_command(&socket).output().unwrap();
+        assert_eq!(output.status.code(), Some(wanted), "for answer {tag}");
+    }
+}
+
+#[test]
+fn probe_on_a_missing_socket_exits_one_and_creates_nothing() {
+    let dir = temp_dir("probe-absent");
+    let socket = dir.join("absent.sock");
+    let output = probe_command(&socket).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!socket.exists());
+}
+
+#[test]
+fn probe_with_no_socket_exits_two() {
+    let dir = temp_dir("probe-usage");
+    let output = Command::new(BIN)
+        .env_remove("CORVETTE_DETECTION_SOCKET")
+        .arg("--probe")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let socket = dir.join("rejected.sock");
+    let output = Command::new(BIN)
+        .env_remove("CORVETTE_DETECTION_SOCKET")
+        .arg("--probe")
+        .arg("--config")
+        .arg(dir.join("config.toml"))
+        .arg("--socket")
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!socket.exists());
+}
+
+// Dropping kills and waits the probe process even when a wait-time assertion failed on the way out.
+struct ProbeChild {
+    child: Child,
+}
+
+impl Drop for ProbeChild {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn probe_gives_up_on_a_server_that_never_answers() {
+    let dir = temp_dir("probe-silent");
+    let socket = dir.join("silent.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut sink = [0u8; 128];
+        let _ = stream.read(&mut sink);
+        let _ = stream.read(&mut sink);
+    });
+    let started = Instant::now();
+    let mut probe = ProbeChild {
+        child: probe_command(&socket).spawn().unwrap(),
+    };
+    let ended = loop {
+        if let Some(status) = probe.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "the probe outlived its read timeout"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(ended.code(), Some(1));
 }

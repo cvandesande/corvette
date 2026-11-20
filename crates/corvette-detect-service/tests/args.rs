@@ -1,5 +1,6 @@
 use corvette_detect_service::{Invocation, Options, parse};
 use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 use std::time::Duration;
 
 fn owned(args: &[&str]) -> Vec<OsString> {
@@ -9,7 +10,7 @@ fn owned(args: &[&str]) -> Vec<OsString> {
 fn options(args: &[&str], env: Option<&str>) -> Options {
     match parse(&owned(args), env.map(OsStr::new)) {
         Ok(Invocation::Serve(options)) => *options,
-        Ok(Invocation::Help) => panic!("help answered a serve command line"),
+        Ok(other) => panic!("non-serve invocation: {other:?}"),
         Err(message) => panic!("unexpected usage error: {message}"),
     }
 }
@@ -140,10 +141,68 @@ fn help_wins_over_everything_else() {
 #[test]
 fn unknown_flag_names_itself() {
     assert_eq!(
-        refused(&with(&base(), &["--probe", "/x"])),
-        "unknown argument --probe"
+        refused(&with(&base(), &["--status", "/x"])),
+        "unknown argument --status"
     );
     assert_eq!(refused(&["--bogus"]), "unknown argument --bogus");
+}
+
+fn probe_socket(args: &[&str], env: Option<&str>) -> PathBuf {
+    match parse(&owned(args), env.map(OsStr::new)) {
+        Ok(Invocation::Probe { socket }) => socket,
+        Ok(other) => panic!("unexpected success: {other:?}"),
+        Err(message) => panic!("unexpected usage error: {message}"),
+    }
+}
+
+#[test]
+fn probe_takes_its_socket_from_the_flag() {
+    let socket = probe_socket(&["--probe", "--socket", "/p.sock"], None);
+    assert_eq!(socket.to_str(), Some("/p.sock"));
+}
+
+#[test]
+fn probe_socket_flag_overrides_environment() {
+    let socket = probe_socket(&["--probe", "--socket", "/p.sock"], Some("/env.sock"));
+    assert_eq!(socket.to_str(), Some("/p.sock"));
+}
+
+#[test]
+fn probe_takes_its_socket_from_the_environment_argument() {
+    let socket = probe_socket(&["--probe"], Some("/env.sock"));
+    assert_eq!(socket.to_str(), Some("/env.sock"));
+}
+
+#[test]
+fn probe_without_any_socket_is_a_usage_error() {
+    assert_eq!(refused(&["--probe"]), "missing required flag --socket");
+}
+
+#[test]
+fn probe_refuses_every_serve_flag() {
+    for (flag, value, name) in [
+        ("--config", "x", "config"),
+        ("--ffmpeg", "x", "ffmpeg"),
+        ("--restream-address", "h:1", "restream-address"),
+        ("--worker", "x", "worker"),
+        ("--worker-param", "x", "worker-param"),
+        ("--worker-bin", "x", "worker-bin"),
+        ("--worker-max-deadline-ms", "5", "worker-max-deadline-ms"),
+        ("--worker-health-socket", "x", "worker-health-socket"),
+        ("--worker-device", "x", "worker-device"),
+        ("--frame-timeout-ms", "5", "frame-timeout-ms"),
+    ] {
+        assert_eq!(
+            refused(&["--probe", flag, value]),
+            format!("flag --{name} is not allowed with --probe"),
+            "for {flag}"
+        );
+    }
+}
+
+#[test]
+fn probe_given_twice_is_a_usage_error() {
+    assert_eq!(refused(&["--probe", "--probe"]), "flag --probe given twice");
 }
 
 #[test]

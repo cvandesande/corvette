@@ -3,9 +3,9 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::os::unix::fs::FileTypeExt as _;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -22,23 +22,30 @@ usage: corvette-detect-service --config PATH --ffmpeg PROGRAM --restream-address
            --worker PROGRAM --worker-param PATH --worker-bin PATH
            --worker-max-deadline-ms N --worker-health-socket PATH
            [--socket PATH] [--worker-device VALUE] [--frame-timeout-ms N]
+       corvette-detect-service --probe [--socket PATH]
        corvette-detect-service --help
 exit codes:
      0  help
-     1  the serve loop ended with an error
+     1  probe failed or serve loop ended with an error
      2  usage error
      3  startup failure (configuration, camera plan, socket claim)
 ";
 
 const EXIT_SERVE: u8 = 1;
+const EXIT_PROBE_FAILED: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 const EXIT_STARTUP: u8 = 3;
 const DEFAULT_FRAME_TIMEOUT_MS: u64 = 10_000;
 const MAX_FRAME_TIMEOUT_MS: u64 = 600_000;
+const PROBE_IO_TIMEOUT: Duration = Duration::from_secs(3);
+const PROBE_REQUEST: &str = "GET /corvette/api/v1/detection/status HTTP/1.1\r\nHost: corvette-detect\r\nConnection: close\r\n\r\n";
+// A peer that streams without a newline cannot grow the probe past this read cap.
+const MAX_PROBE_ANSWER: usize = 8192;
 
 #[derive(Debug)]
 pub enum Invocation {
     Help,
+    Probe { socket: PathBuf },
     Serve(Box<Options>),
 }
 
@@ -77,6 +84,31 @@ struct FlagSlots {
     frame_timeout_ms: Option<u64>,
 }
 
+impl FlagSlots {
+    // The first serve-only flag set, used to refuse any of them beside --probe.
+    fn extra_with_probe(&self) -> Option<&'static str> {
+        [
+            self.config.as_ref().map(|_| "config"),
+            self.ffmpeg.as_ref().map(|_| "ffmpeg"),
+            self.restream_address.as_ref().map(|_| "restream-address"),
+            self.worker.as_ref().map(|_| "worker"),
+            self.worker_param.as_ref().map(|_| "worker-param"),
+            self.worker_bin.as_ref().map(|_| "worker-bin"),
+            self.worker_max_deadline_ms
+                .as_ref()
+                .map(|_| "worker-max-deadline-ms"),
+            self.worker_health_socket
+                .as_ref()
+                .map(|_| "worker-health-socket"),
+            self.worker_device.as_ref().map(|_| "worker-device"),
+            self.frame_timeout_ms.as_ref().map(|_| "frame-timeout-ms"),
+        ]
+        .into_iter()
+        .flatten()
+        .next()
+    }
+}
+
 /// Parses one command line; `env_socket` is the environment socket default used when no `--socket` flag is given.
 ///
 /// # Errors
@@ -86,10 +118,19 @@ pub fn parse(args: &[OsString], env_socket: Option<&OsStr>) -> Result<Invocation
         return Ok(Invocation::Help);
     }
     let mut slots = FlagSlots::default();
+    let mut saw_probe = false;
     let mut index = 0;
     while index < args.len() {
         let flag = text(&args[index]);
         match flag.as_str() {
+            "--probe" => {
+                if saw_probe {
+                    return Err("flag --probe given twice".to_string());
+                }
+                saw_probe = true;
+                index += 1;
+                continue;
+            }
             "--restream-address" => {
                 set_restream_address(&mut slots.restream_address, argument(args, index, &flag)?)?;
             }
@@ -124,6 +165,14 @@ pub fn parse(args: &[OsString], env_socket: Option<&OsStr>) -> Result<Invocation
             }
         }
         index += 2;
+    }
+    if saw_probe {
+        if let Some(name) = slots.extra_with_probe() {
+            return Err(format!("flag --{name} is not allowed with --probe"));
+        }
+        return Ok(Invocation::Probe {
+            socket: take_socket(slots.socket, env_socket)?,
+        });
     }
     Ok(Invocation::Serve(Box::new(serve_options(
         slots, env_socket,
@@ -257,6 +306,7 @@ pub fn run(args: &[OsString], env_socket: Option<&OsStr>) -> ExitCode {
             let _ = std::io::stdout().write_all(USAGE.as_bytes());
             return ExitCode::SUCCESS;
         }
+        Ok(Invocation::Probe { socket }) => return run_probe(&socket),
         Ok(Invocation::Serve(options)) => options,
     };
     let (config, bytes) = match read_config(&options.config) {
@@ -344,6 +394,64 @@ pub fn run(args: &[OsString], env_socket: Option<&OsStr>) -> ExitCode {
             ExitCode::from(EXIT_SERVE)
         }
     }
+}
+
+/// Runs one readiness probe: a status request on the socket, exit `0` only on a first line of `HTTP/1.1 200`.
+fn run_probe(socket: &Path) -> ExitCode {
+    match probe_status(socket) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(reason) => {
+            log_event("service", "probe-failed", reason);
+            ExitCode::from(EXIT_PROBE_FAILED)
+        }
+    }
+}
+
+fn probe_status(path: &Path) -> Result<(), String> {
+    let mut stream = UnixStream::connect(path)
+        .map_err(|error| format!("{} connect failed: {error}", path.display()))?;
+    stream
+        .set_read_timeout(Some(PROBE_IO_TIMEOUT))
+        .and_then(|()| stream.set_write_timeout(Some(PROBE_IO_TIMEOUT)))
+        .map_err(|error| format!("{} timeouts could not be set: {error}", path.display()))?;
+    stream
+        .write_all(PROBE_REQUEST.as_bytes())
+        .map_err(|error| format!("status request could not be written: {error}"))?;
+    let first_line = read_status_line(&mut stream)?;
+    let status_ok = first_line == "HTTP/1.1 200" || first_line.starts_with("HTTP/1.1 200 ");
+    if status_ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "first line was {first_line:?}, expected \"HTTP/1.1 200\" followed by a space or end of line"
+        ))
+    }
+}
+
+fn read_status_line(stream: &mut UnixStream) -> Result<String, String> {
+    let mut answer = vec![0u8; MAX_PROBE_ANSWER];
+    let mut filled = 0;
+    while filled < answer.len() {
+        match stream.read(&mut answer[filled..]) {
+            Ok(0) => break,
+            Ok(read) => {
+                filled += read;
+                if answer[..filled].contains(&b'\n') {
+                    break;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return Err(format!("no status line within {PROBE_IO_TIMEOUT:?}"));
+            }
+            Err(error) => return Err(format!("status answer could not be read: {error}")),
+        }
+    }
+    if filled == 0 {
+        return Err("the answer was empty".to_string());
+    }
+    let head = String::from_utf8_lossy(&answer[..filled]);
+    let first_line = head.lines().next().map_or_else(String::new, str::to_owned);
+    Ok(first_line)
 }
 
 fn plan_all(config: &Config) -> Result<Vec<CameraPlan>, String> {
