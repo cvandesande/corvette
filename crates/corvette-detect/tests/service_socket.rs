@@ -199,7 +199,7 @@ async fn empty_frame_and_off_camera_both_answer_an_empty_list() {
 }
 
 #[tokio::test]
-async fn unregistered_query_percent_and_extra_segment_paths_answer_not_found() {
+async fn unregistered_query_and_extra_segment_paths_answer_not_found() {
     let handle = live_handle(running(4), Some(frame(&["a1"])));
     let socket = start(
         "not_found",
@@ -208,7 +208,6 @@ async fn unregistered_query_percent_and_extra_segment_paths_answer_not_found() {
     let paths = [
         "/corvette/api/v1/cameras/nosuch/objects",
         "/corvette/api/v1/cameras/front/objects?camera=back",
-        "/corvette/api/v1/cameras/fr%6Fnt/objects",
         "/corvette/api/v1/cameras/front/extra/objects",
         "/corvette/api/v1/detection/status/extra",
     ];
@@ -217,6 +216,113 @@ async fn unregistered_query_percent_and_extra_segment_paths_answer_not_found() {
         assert_eq!(status_code(&response), 404, "for {path}");
         assert_eq!(body(&response), "{\"reason\":\"not_found\"}", "for {path}");
     }
+}
+
+#[tokio::test]
+async fn percent_escapes_decode_to_a_registered_name_in_either_hex_case() {
+    let handle = live_handle(running(4), Some(frame(&["a1"])));
+    let socket = start(
+        "decode",
+        vec![("front".to_owned(), CameraEntry::Live(handle))],
+    );
+    for path in [
+        "/corvette/api/v1/cameras/fr%6Fnt/objects",
+        "/corvette/api/v1/cameras/fr%6fnt/objects",
+    ] {
+        let response = request(&socket, &get(path)).await;
+        assert_eq!(status_code(&response), 200, "for {path}");
+        assert_eq!(objects_of(&response), vec!["a1".to_owned()]);
+    }
+}
+
+#[tokio::test]
+async fn space_and_slash_cameras_answer_only_through_their_encoded_forms() {
+    let socket = start(
+        "encoded_names",
+        vec![
+            (
+                "a".to_owned(),
+                CameraEntry::Live(live_handle(running(4), Some(frame(&["x1"])))),
+            ),
+            (
+                "a/b".to_owned(),
+                CameraEntry::Live(live_handle(running(4), Some(frame(&["y1"])))),
+            ),
+            (
+                "back yard".to_owned(),
+                CameraEntry::Live(live_handle(running(4), Some(frame(&["b1"])))),
+            ),
+        ],
+    );
+    let cases = [
+        (
+            "/corvette/api/v1/cameras/back%20yard/objects",
+            vec!["b1".to_owned()],
+        ),
+        (
+            "/corvette/api/v1/cameras/a%2Fb/objects",
+            vec!["y1".to_owned()],
+        ),
+        (
+            "/corvette/api/v1/cameras/a%2fb/objects",
+            vec!["y1".to_owned()],
+        ),
+    ];
+    for (path, ids) in cases {
+        let response = request(&socket, &get(path)).await;
+        assert_eq!(status_code(&response), 200, "for {path}");
+        assert_eq!(
+            objects_of(&response),
+            ids,
+            "only the named camera's ids: {path}"
+        );
+    }
+    let raw = request(&socket, &get("/corvette/api/v1/cameras/a/b/objects")).await;
+    assert_eq!(
+        status_code(&raw),
+        404,
+        "the raw slash path never reaches a camera"
+    );
+    assert_eq!(body(&raw), "{\"reason\":\"not_found\"}");
+}
+
+#[tokio::test]
+async fn malformed_escapes_and_invalid_utf8_answer_not_found_even_when_registered_verbatim() {
+    let socket = start(
+        "malformed",
+        vec![
+            (
+                "front".to_owned(),
+                CameraEntry::Live(live_handle(running(4), Some(frame(&["a1"])))),
+            ),
+            (
+                "front%".to_owned(),
+                CameraEntry::Live(live_handle(running(4), Some(frame(&["p1"])))),
+            ),
+            (
+                "fr%zznt".to_owned(),
+                CameraEntry::Live(live_handle(running(4), Some(frame(&["z1"])))),
+            ),
+            (
+                "fr%2nt".to_owned(),
+                CameraEntry::Live(live_handle(running(4), Some(frame(&["t1"])))),
+            ),
+        ],
+    );
+    for path in [
+        "/corvette/api/v1/cameras/front%/objects",
+        "/corvette/api/v1/cameras/fr%zznt/objects",
+        "/corvette/api/v1/cameras/fr%2nt/objects",
+        "/corvette/api/v1/cameras/fr%ffnt/objects",
+    ] {
+        let response = request(&socket, &get(path)).await;
+        assert_eq!(status_code(&response), 404, "for {path}");
+        assert_eq!(body(&response), "{\"reason\":\"not_found\"}", "for {path}");
+    }
+    // The only way to reach a name carrying a percent sign is its own escape.
+    let escaped = request(&socket, &get("/corvette/api/v1/cameras/front%25/objects")).await;
+    assert_eq!(status_code(&escaped), 200);
+    assert_eq!(objects_of(&escaped), vec!["p1".to_owned()]);
 }
 
 #[tokio::test]

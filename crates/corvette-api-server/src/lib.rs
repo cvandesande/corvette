@@ -14,6 +14,7 @@ pub mod activity;
 pub mod clip_link;
 pub mod config;
 pub mod database;
+pub mod detection;
 pub mod status;
 pub mod still;
 
@@ -80,6 +81,18 @@ enum Outcome {
     ClosedEarly,
 }
 
+/// Per-connection settings handed to every request the connection carries.
+#[derive(Clone)]
+struct ConnectionContext {
+    timeout: Duration,
+    detection: detection::Relay,
+    config: Arc<ConfigSource>,
+    db_path: PathBuf,
+    media_root: PathBuf,
+    clock: Clock,
+    status_state: Arc<StatusState>,
+}
+
 pub struct ApiServer {
     listener: UnixListener,
     socket_path: PathBuf,
@@ -89,6 +102,7 @@ pub struct ApiServer {
     media_root: PathBuf,
     clock: Clock,
     status_state: Arc<StatusState>,
+    detection: detection::Relay,
 }
 
 impl std::fmt::Debug for ApiServer {
@@ -132,12 +146,25 @@ impl ApiServer {
             media_root: PathBuf::from(activity::DEFAULT_MEDIA_ROOT),
             clock: Arc::new(system_clock),
             status_state: Arc::new(StatusState::default()),
+            detection: detection::Relay::default(),
         })
     }
 
     #[must_use]
     pub fn with_media_root(mut self, media_root: &Path) -> Self {
         self.media_root = media_root.to_path_buf();
+        self
+    }
+
+    #[must_use]
+    pub fn with_detection_socket(mut self, path: PathBuf) -> Self {
+        self.detection.socket = Some(path);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_detection_timeouts(mut self, connect: Duration, total: Duration) -> Self {
+        self.detection.timeouts = Some((connect, total));
         self
     }
 
@@ -162,7 +189,17 @@ impl ApiServer {
             media_root,
             clock,
             status_state,
+            detection,
         } = self;
+        let context = ConnectionContext {
+            timeout: connection_timeout,
+            detection,
+            config,
+            db_path,
+            media_root,
+            clock,
+            status_state,
+        };
         tokio::pin!(shutdown);
         loop {
             tokio::select! {
@@ -170,22 +207,9 @@ impl ApiServer {
                 () = &mut shutdown => break,
                 accepted = listener.accept() => match accepted {
                     Ok((stream, _peer)) => {
-                        let config = Arc::clone(&config);
-                        let db_path = db_path.clone();
-                        let media_root = media_root.clone();
-                        let clock = Arc::clone(&clock);
-                        let status_state = Arc::clone(&status_state);
+                        let context = context.clone();
                         tokio::spawn(async move {
-                            handle_connection(
-                                stream,
-                                connection_timeout,
-                                config,
-                                &db_path,
-                                &media_root,
-                                &clock,
-                                &status_state,
-                            )
-                            .await;
+                            handle_connection(stream, &context).await;
                         });
                     }
                     Err(err) => log_event("listener", "accept-error", err),
@@ -212,27 +236,9 @@ pub async fn shutdown_signal() {
     }
 }
 
-async fn handle_connection(
-    mut stream: UnixStream,
-    timeout: Duration,
-    config: Arc<ConfigSource>,
-    db_path: &Path,
-    media_root: &Path,
-    clock: &Clock,
-    status_state: &StatusState,
-) {
-    let outcome = tokio::time::timeout(
-        timeout,
-        read_route_respond(
-            &mut stream,
-            &config,
-            db_path,
-            media_root,
-            clock,
-            status_state,
-        ),
-    )
-    .await;
+async fn handle_connection(mut stream: UnixStream, context: &ConnectionContext) {
+    let outcome =
+        tokio::time::timeout(context.timeout, read_route_respond(&mut stream, context)).await;
     match outcome {
         Ok(Ok(Outcome::Responded)) => {}
         Ok(Ok(Outcome::ClosedEarly)) => {
@@ -247,7 +253,8 @@ async fn handle_connection(
             "http",
             "connection-timeout",
             format!(
-                "peer did not complete a request within {timeout:?}; closed to avoid leaking the connection"
+                "peer did not complete a request within {:?}; closed to avoid leaking the connection",
+                context.timeout
             ),
         ),
     }
@@ -255,11 +262,7 @@ async fn handle_connection(
 
 async fn read_route_respond(
     stream: &mut UnixStream,
-    config: &ConfigSource,
-    db_path: &Path,
-    media_root: &Path,
-    clock: &Clock,
-    status_state: &StatusState,
+    context: &ConnectionContext,
 ) -> std::io::Result<Outcome> {
     let block = match read_header_block(stream).await {
         HeaderRead::Complete(block) => block,
@@ -272,7 +275,7 @@ async fn read_route_respond(
         HeaderRead::Closed => return Ok(Outcome::ClosedEarly),
     };
     let response = match parse_request(&block) {
-        Ok(request) => route(&request, config, db_path, media_root, clock, status_state).await,
+        Ok(request) => route(&request, context).await,
         Err(reason) => bad_request(&reason),
     };
     write_response(stream, &response).await?;
@@ -460,15 +463,17 @@ pub enum Route {
     CameraStatus,
     Cameras,
     ClipLink,
+    DetectionStatus,
     Health,
 }
 
 impl Route {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Activity,
         Self::CameraStatus,
         Self::Cameras,
         Self::ClipLink,
+        Self::DetectionStatus,
         Self::Health,
     ];
 
@@ -479,19 +484,22 @@ impl Route {
             Self::CameraStatus => format!("{API_PREFIX}cameras/status"),
             Self::Cameras => format!("{API_PREFIX}cameras"),
             Self::ClipLink => format!("{API_PREFIX}clip-link"),
+            Self::DetectionStatus => format!("{API_PREFIX}detection/status"),
             Self::Health => format!("{API_PREFIX}health"),
         }
     }
 }
 
-async fn route(
-    request: &Request,
-    config: &ConfigSource,
-    db_path: &Path,
-    media_root: &Path,
-    clock: &Clock,
-    status_state: &StatusState,
-) -> Response {
+async fn route(request: &Request, context: &ConnectionContext) -> Response {
+    let ConnectionContext {
+        detection,
+        config,
+        db_path,
+        media_root,
+        clock,
+        status_state,
+        ..
+    } = context;
     let Some(_user) = request
         .remote_user
         .as_deref()
@@ -501,6 +509,9 @@ async fn route(
     };
     if let Some(segment) = still::camera_segment(&request.path) {
         return still_picture(request, config, segment, clock, status_state).await;
+    }
+    if let Some(segment) = detection::objects_segment(&request.path) {
+        return detection::objects(request, config, segment, detection).await;
     }
     let Some(route) = Route::ALL
         .into_iter()
@@ -515,6 +526,7 @@ async fn route(
         }
         Route::Cameras => cameras(config, &request.remote_role).await,
         Route::ClipLink => clip_link(request, config, db_path, clock).await,
+        Route::DetectionStatus => detection::status(config, &request.remote_role, detection).await,
         Route::Health => health(config, db_path).await,
     }
 }

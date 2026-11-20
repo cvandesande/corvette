@@ -138,7 +138,7 @@ fn parse_request_line(head: &[u8]) -> Option<(&str, &str)> {
 }
 
 fn route(state: &ServiceState, method: &str, target: &str) -> String {
-    if target.contains(['?', '#', '%']) {
+    if target.contains(['?', '#']) {
         return not_found();
     }
     if target == STATUS_PATH {
@@ -176,7 +176,37 @@ fn objects_index(state: &ServiceState, target: &str) -> Option<usize> {
     if segment.is_empty() || segment.contains('/') {
         return None;
     }
-    state.cameras.iter().position(|(name, _)| name == segment)
+    let decoded = percent_decode(segment)?;
+    state.cameras.iter().position(|(name, _)| *name == decoded)
+}
+
+/// Percent-decodes a raw path segment; `None` on a malformed escape or non-UTF-8 bytes; `+` stays `+`.
+fn percent_decode(segment: &str) -> Option<String> {
+    let mut decoded = Vec::with_capacity(segment.len());
+    let mut bytes = segment.as_bytes().iter();
+    while let Some(&byte) = bytes.next() {
+        if byte != b'%' {
+            decoded.push(byte);
+            continue;
+        }
+        let (Some(&first), Some(&second)) = (bytes.next(), bytes.next()) else {
+            return None;
+        };
+        let (Some(high), Some(low)) = (hex_digit(first), hex_digit(second)) else {
+            return None;
+        };
+        decoded.push(high * 16 + low);
+    }
+    String::from_utf8(decoded).ok()
+}
+
+const fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn objects_response(state: &ServiceState, index: usize) -> String {

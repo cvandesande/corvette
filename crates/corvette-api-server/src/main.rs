@@ -6,8 +6,9 @@ use corvette_api_server::config::{
     CONFIG_ADDR_ENV, ConfigSource, DEFAULT_CACHE_TTL, DEFAULT_CONFIG_ADDR,
 };
 use corvette_api_server::database::{DB_PATH_ENV, DEFAULT_DB_PATH};
+use corvette_api_server::detection::DETECTION_SOCKET_ENV;
 use corvette_api_server::{ApiServer, CONNECTION_TIMEOUT, SOCKET_PATH_ENV, shutdown_signal};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -30,7 +31,13 @@ async fn main() -> std::process::ExitCode {
         config,
         Path::new(&db_path),
     ) {
-        Ok(server) => server.with_media_root(Path::new(&media_root)),
+        Ok(server) => {
+            let server = server.with_media_root(Path::new(&media_root));
+            match std::env::var(DETECTION_SOCKET_ENV) {
+                Ok(path) => server.with_detection_socket(PathBuf::from(path)),
+                Err(_env_not_set) => server,
+            }
+        }
         Err(err) => {
             eprintln!("corvette-api-server: failed to bind {socket_path}: {err}");
             return std::process::ExitCode::FAILURE;
