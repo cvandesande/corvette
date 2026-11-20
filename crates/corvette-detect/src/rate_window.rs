@@ -21,11 +21,11 @@ pub struct RateWindow {
 
 impl RateWindow {
     #[must_use]
-    pub fn new(start: Instant) -> Self {
+    pub fn new(start: Instant, frames_processed: u64, frames_arrived: u64) -> Self {
         Self {
             window_start: start,
-            last_processed: 0,
-            last_arrived: 0,
+            last_processed: frames_processed,
+            last_arrived: frames_arrived,
             published: Rates::default(),
         }
     }

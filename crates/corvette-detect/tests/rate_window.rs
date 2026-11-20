@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 #[test]
 fn a_full_second_of_totals_publishes_three_hundred_and_one_hundred_tenths() {
     let start = Instant::now();
-    let mut window = RateWindow::new(start);
+    let mut window = RateWindow::new(start, 0, 0);
     window.observe(start + Duration::from_secs(1), 10, 30);
     assert_eq!(
         window.rates(),
@@ -18,7 +18,7 @@ fn a_full_second_of_totals_publishes_three_hundred_and_one_hundred_tenths() {
 #[test]
 fn two_seconds_of_the_same_totals_publishes_half_the_tenths() {
     let start = Instant::now();
-    let mut window = RateWindow::new(start);
+    let mut window = RateWindow::new(start, 0, 0);
     window.observe(start + Duration::from_secs(2), 10, 30);
     assert_eq!(
         window.rates(),
@@ -32,7 +32,7 @@ fn two_seconds_of_the_same_totals_publishes_half_the_tenths() {
 #[test]
 fn an_observation_before_the_second_leaves_the_published_rates_alone() {
     let start = Instant::now();
-    let mut window = RateWindow::new(start);
+    let mut window = RateWindow::new(start, 0, 0);
     window.observe(start + Duration::from_millis(900), 27, 9);
     assert_eq!(window.rates(), Rates::default());
     window.observe(start + Duration::from_secs(1), 10, 30);
@@ -50,7 +50,7 @@ fn an_observation_before_the_second_leaves_the_published_rates_alone() {
 #[test]
 fn a_restarted_counter_publishes_zero_instead_of_a_negative_rate() {
     let start = Instant::now();
-    let mut window = RateWindow::new(start);
+    let mut window = RateWindow::new(start, 0, 0);
     window.observe(start + Duration::from_secs(1), 100, 100);
     assert_eq!(
         window.rates(),
@@ -66,7 +66,7 @@ fn a_restarted_counter_publishes_zero_instead_of_a_negative_rate() {
 #[test]
 fn a_long_idle_gap_publishes_zero_rates() {
     let start = Instant::now();
-    let mut window = RateWindow::new(start);
+    let mut window = RateWindow::new(start, 0, 0);
     window.observe(start + Duration::from_secs(1), 30, 30);
     assert_ne!(window.rates(), Rates::default());
     window.observe(start + Duration::from_secs(11), 30, 30);
@@ -76,7 +76,7 @@ fn a_long_idle_gap_publishes_zero_rates() {
 #[test]
 fn five_frames_over_three_seconds_round_to_seventeen_tenths() {
     let start = Instant::now();
-    let mut window = RateWindow::new(start);
+    let mut window = RateWindow::new(start, 0, 0);
     window.observe(start + Duration::from_secs(3), 0, 5);
     assert_eq!(
         window.rates(),
@@ -90,7 +90,7 @@ fn five_frames_over_three_seconds_round_to_seventeen_tenths() {
 #[test]
 fn the_window_restarts_at_the_observation_that_completes_it() {
     let start = Instant::now();
-    let mut window = RateWindow::new(start);
+    let mut window = RateWindow::new(start, 0, 0);
     window.observe(start + Duration::from_secs(1), 10, 30);
     window.observe(start + Duration::from_secs(2), 30, 60);
     assert_eq!(
@@ -99,5 +99,20 @@ fn the_window_restarts_at_the_observation_that_completes_it() {
             fps_in_tenths: 300,
             fps_processed_tenths: 200,
         }
+    );
+}
+
+#[test]
+fn a_seeded_window_publishes_deltas_above_its_seed_totals() {
+    let start = Instant::now();
+    let mut window = RateWindow::new(start, 0, 1000);
+    window.observe(start + Duration::from_secs(1), 30, 1030);
+    assert_eq!(
+        window.rates(),
+        Rates {
+            fps_in_tenths: 300,
+            fps_processed_tenths: 300,
+        },
+        "30 processed and 30 arrived above the seed totals over one second"
     );
 }

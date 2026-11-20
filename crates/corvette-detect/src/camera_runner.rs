@@ -23,6 +23,7 @@ pub struct CameraStatus {
     pub counters: PipelineCounters,
     pub source_gaps: u64,
     pub frames_dropped: u64,
+    pub runner_restarts: u32,
     pub fps_in_tenths: u32,
     pub fps_processed_tenths: u32,
     pub worker_ms: u32,
@@ -76,6 +77,7 @@ pub struct CameraRunner<'a, E: Infer> {
     pipeline: LivePipeline<'a, E>,
     frame_timeout: Duration,
     source_gaps: u64,
+    runner_restarts: u32,
     status: watch::Sender<CameraStatus>,
     objects: watch::Sender<Option<FrameObjects>>,
     window: RateWindow,
@@ -94,6 +96,7 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
             counters: PipelineCounters::default(),
             source_gaps: 0,
             frames_dropped: 0,
+            runner_restarts: 0,
             fps_in_tenths: 0,
             fps_processed_tenths: 0,
             worker_ms: 0,
@@ -102,15 +105,17 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
         };
         let (status, status_rx) = watch::channel(initial);
         let (objects, objects_rx) = watch::channel(None);
+        let arrived_at_start = slot.arrived();
         (
             Self {
                 slot,
                 pipeline,
                 frame_timeout,
                 source_gaps: 0,
+                runner_restarts: 0,
                 status,
                 objects,
-                window: RateWindow::new(Instant::now()),
+                window: RateWindow::new(Instant::now(), 0, arrived_at_start),
                 timings: None,
             },
             CameraHandle {
@@ -124,6 +129,21 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
     #[must_use]
     pub fn with_timings(mut self, timings: LinkTimings) -> Self {
         self.timings = Some(timings);
+        self
+    }
+
+    /// Publishes the waiting status once on these channels; every status this runner publishes carries `restarts`.
+    #[must_use]
+    pub fn publishing_to(
+        mut self,
+        status: watch::Sender<CameraStatus>,
+        objects: watch::Sender<Option<FrameObjects>>,
+        restarts: u32,
+    ) -> Self {
+        self.status = status;
+        self.objects = objects;
+        self.runner_restarts = restarts;
+        self.publish(CameraState::WaitingForFrames);
         self
     }
 
@@ -191,6 +211,7 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
             counters,
             source_gaps: self.source_gaps,
             frames_dropped: self.slot.dropped(),
+            runner_restarts: self.runner_restarts,
             fps_in_tenths: rates.fps_in_tenths,
             fps_processed_tenths: rates.fps_processed_tenths,
             worker_ms,

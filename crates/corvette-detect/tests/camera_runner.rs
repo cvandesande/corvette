@@ -1,9 +1,10 @@
 // Tests may unwrap, expect and index: `docs/standards/STYLE.md` states
 // "Tests may unwrap, expect and index", and the crate lints do not forbid them.
 use corvette_detect::{
-    CameraRunner, CameraState, CandidateStage, DEFAULT_POLICY, Decode, EngineError, Frame,
-    FrameSpec, Infer, Labels, LiveError, LivePipeline, ObjectStage, RegionStage,
-    RegionStageSettings, RunnerError, SharedLink, StepEnd, WorkerLink, frame_slot,
+    CameraHandle, CameraRunner, CameraState, CameraStatus, CandidateStage, DEFAULT_POLICY, Decode,
+    EngineError, Frame, FrameSpec, Infer, Labels, LiveError, LivePipeline, ObjectStage,
+    PipelineCounters, RegionStage, RegionStageSettings, RunnerError, SharedLink, StepEnd,
+    WorkerLink, frame_slot,
 };
 use corvette_detect_proto::{HEADER_LEN, Reply, Request, Row, TENSOR_BYTES, parse_header};
 use corvette_motion::{MotionSettings, Shape, SizeGrid};
@@ -16,6 +17,7 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
 
 const WIDTH: usize = 160;
 const HEIGHT: usize = 120;
@@ -469,5 +471,107 @@ fn a_completed_window_publishes_more_arrivals_than_the_pipeline_processed() {
         "five frames arrived while one was processed, got in {} processed {}",
         status.fps_in_tenths,
         status.fps_processed_tenths
+    );
+}
+
+fn initial_status() -> CameraStatus {
+    CameraStatus {
+        state: CameraState::WaitingForFrames,
+        counters: PipelineCounters::default(),
+        source_gaps: 0,
+        frames_dropped: 0,
+        runner_restarts: 0,
+        fps_in_tenths: 0,
+        fps_processed_tenths: 0,
+        worker_ms: 0,
+        roundtrip_ms: 0,
+        lock_wait_ms: 0,
+    }
+}
+
+#[test]
+fn a_restarted_runner_publishes_on_the_cameras_own_channels() {
+    let (status_tx, status_rx) = watch::channel(initial_status());
+    let (objects_tx, objects_rx) = watch::channel(None);
+    let mut handle = CameraHandle {
+        status: status_rx,
+        objects: objects_rx,
+    };
+    let (sender, receiver) = frame_slot();
+    let first_receiver = receiver.clone();
+    // A regression that keeps run() from ending on its own closes the slot here, so the test fails instead of hanging.
+    let watchdog = first_receiver.closer();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(5));
+        watchdog.close();
+    });
+
+    let (pipeline, _cells) = pipeline_with(true);
+    let (runner, _unused) = CameraRunner::new(first_receiver, pipeline, Duration::from_secs(1));
+    let runner = runner.publishing_to(status_tx.clone(), objects_tx.clone(), 0);
+    sender.put(short_frame());
+    let error = runner.run().expect_err("wrong frame length");
+    assert!(
+        matches!(error, RunnerError::Pipeline(LiveError::Region(_))),
+        "not a region error: {error:?}"
+    );
+    assert_eq!(handle.status.borrow().state, CameraState::Failed);
+
+    let (pipeline, _cells) = pipeline_with(true);
+    let (runner, _unused) = CameraRunner::new(receiver, pipeline, Duration::from_secs(1));
+    let mut runner = runner.publishing_to(status_tx, objects_tx, 1);
+    let status = *handle.status.borrow_and_update();
+    assert_eq!(status.state, CameraState::WaitingForFrames);
+    assert_eq!(status.runner_restarts, 1);
+    assert_eq!(status.counters.frames_in, 0, "fresh counters at hand-over");
+    sender.put(black_frame(0));
+    assert!(matches!(runner.step_once(), Ok(StepEnd::Frame)));
+    let status = *handle.status.borrow();
+    assert_eq!(status.state, CameraState::Running);
+    assert_eq!(status.runner_restarts, 1);
+    assert_eq!(
+        status.counters.frames_in, 1,
+        "the restarted runner counts from zero"
+    );
+}
+
+#[test]
+fn a_runner_with_restarts_publishes_the_count_on_every_status() {
+    let (pipeline, _cells) = pipeline_with(true);
+    let (sender, receiver) = frame_slot();
+    let (runner, _unused) = CameraRunner::new(receiver, pipeline, Duration::from_millis(50));
+    let (status_tx, status_rx) = watch::channel(initial_status());
+    let (objects_tx, objects_rx) = watch::channel(None);
+    let handle = CameraHandle {
+        status: status_rx,
+        objects: objects_rx,
+    };
+    let mut runner = runner.publishing_to(status_tx, objects_tx, 7);
+    assert!(matches!(runner.step_once(), Ok(StepEnd::Gap)));
+    assert_eq!(handle.status.borrow().runner_restarts, 7, "the gap status");
+    sender.put(black_frame(0));
+    assert!(matches!(runner.step_once(), Ok(StepEnd::Frame)));
+    let status = *handle.status.borrow();
+    assert_eq!(status.state, CameraState::Running);
+    assert_eq!(status.runner_restarts, 7, "the frame status");
+}
+
+#[test]
+fn a_first_window_publishes_no_arrivals_from_before_the_runner_was_built() {
+    let (pipeline, _cells) = pipeline_with(true);
+    let (sender, receiver) = frame_slot();
+    for index in 0..5 {
+        sender.put(black_frame(index));
+    }
+    let (mut runner, handle) = CameraRunner::new(receiver, pipeline, Duration::from_secs(1));
+    std::thread::sleep(Duration::from_millis(1_100));
+    assert!(
+        matches!(runner.step_once(), Ok(StepEnd::Frame)),
+        "the newest frame put before construction is taken"
+    );
+    let status = *handle.status.borrow();
+    assert_eq!(
+        status.fps_in_tenths, 0,
+        "the five arrivals before construction must not enter the first window"
     );
 }

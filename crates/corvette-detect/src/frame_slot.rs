@@ -39,7 +39,7 @@ impl Drop for SlotSender {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SlotReceiver {
     shared: Arc<Shared>,
 }

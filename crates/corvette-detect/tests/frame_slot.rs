@@ -145,3 +145,24 @@ fn dropping_the_sender_closes_the_slot() {
         SlotEvent::Closed
     ));
 }
+
+#[test]
+fn a_receiver_clone_takes_and_closes_the_same_slot() {
+    let (sender, receiver) = frame_slot();
+    let clone = receiver.clone();
+    sender.put(frame(5));
+    let taken = receiver.take(Duration::from_millis(50));
+    assert!(
+        matches!(&taken, SlotEvent::Frame(f) if f.index == 5),
+        "{taken:?}"
+    );
+    assert!(
+        matches!(clone.take(Duration::from_millis(50)), SlotEvent::Timeout),
+        "the clone found a frame that had already been taken"
+    );
+    receiver.close();
+    assert!(
+        matches!(clone.take(Duration::from_millis(50)), SlotEvent::Closed),
+        "a close on one handle must be seen by the clone"
+    );
+}

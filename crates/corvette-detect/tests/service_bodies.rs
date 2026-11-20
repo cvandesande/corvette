@@ -141,6 +141,7 @@ const fn status(state: CameraState) -> CameraStatus {
         },
         source_gaps: 3,
         frames_dropped: 0,
+        runner_restarts: 0,
         fps_in_tenths: 0,
         fps_processed_tenths: 0,
         worker_ms: 0,
@@ -185,6 +186,12 @@ fn status_entries_parse_with_exact_names_and_counters() {
                 .expect("frames_dropped number"),
             0
         );
+        assert_eq!(
+            parsed["runner_restarts"]
+                .as_u64()
+                .expect("runner_restarts number"),
+            0
+        );
         assert_eq!(parsed["fps_in"].to_string(), "0.0");
         assert_eq!(parsed["fps_processed"].to_string(), "0.0");
         assert_eq!(parsed["worker_ms"].as_u64().expect("worker_ms number"), 0);
@@ -213,6 +220,7 @@ const fn rates_status(fps_in_tenths: u32, fps_processed_tenths: u32) -> CameraSt
         },
         source_gaps: 3,
         frames_dropped: 9,
+        runner_restarts: 0,
         fps_in_tenths,
         fps_processed_tenths,
         worker_ms: 12,
@@ -245,6 +253,17 @@ fn status_entry_carries_every_new_member_with_its_own_value() {
             .as_u64()
             .expect("lock_wait_ms number"),
         5
+    );
+}
+
+#[test]
+fn runner_restarts_prints_after_frames_dropped_and_before_fps_in() {
+    let mut status = rates_status(300, 7);
+    status.runner_restarts = 4;
+    let text = status_entry("yard", &status, None);
+    assert!(
+        text.contains("\"frames_dropped\":9,\"runner_restarts\":4,\"fps_in\":30.0"),
+        "{text}"
     );
 }
 
