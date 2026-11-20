@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
@@ -6,6 +6,8 @@ use crate::candidate_stage::Infer;
 use crate::frame_slot::{SlotEvent, SlotReceiver};
 use crate::live_pipeline::{FrameOutcome, LiveError, LivePipeline, PipelineCounters};
 use crate::object_stage::FrameObjects;
+use crate::rate_window::RateWindow;
+use crate::shared_link::LinkTimings;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CameraState {
@@ -21,6 +23,11 @@ pub struct CameraStatus {
     pub counters: PipelineCounters,
     pub source_gaps: u64,
     pub frames_dropped: u64,
+    pub fps_in_tenths: u32,
+    pub fps_processed_tenths: u32,
+    pub worker_ms: u32,
+    pub roundtrip_ms: u32,
+    pub lock_wait_ms: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +78,8 @@ pub struct CameraRunner<'a, E: Infer> {
     source_gaps: u64,
     status: watch::Sender<CameraStatus>,
     objects: watch::Sender<Option<FrameObjects>>,
+    window: RateWindow,
+    timings: Option<LinkTimings>,
 }
 
 impl<'a, E: Infer> CameraRunner<'a, E> {
@@ -85,6 +94,11 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
             counters: PipelineCounters::default(),
             source_gaps: 0,
             frames_dropped: 0,
+            fps_in_tenths: 0,
+            fps_processed_tenths: 0,
+            worker_ms: 0,
+            roundtrip_ms: 0,
+            lock_wait_ms: 0,
         };
         let (status, status_rx) = watch::channel(initial);
         let (objects, objects_rx) = watch::channel(None);
@@ -96,12 +110,21 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
                 source_gaps: 0,
                 status,
                 objects,
+                window: RateWindow::new(Instant::now()),
+                timings: None,
             },
             CameraHandle {
                 status: status_rx,
                 objects: objects_rx,
             },
         )
+    }
+
+    /// Carries this link's timings into every published status; without it the timings publish as zero.
+    #[must_use]
+    pub fn with_timings(mut self, timings: LinkTimings) -> Self {
+        self.timings = Some(timings);
+        self
     }
 
     /// # Errors
@@ -150,13 +173,29 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
         StepEnd::Gap
     }
 
-    fn publish(&self, state: CameraState) {
+    fn publish(&mut self, state: CameraState) {
         let counters = self.pipeline.counters();
+        self.window
+            .observe(Instant::now(), counters.frames_in, self.slot.arrived());
+        let rates = self.window.rates();
+        let (worker_ms, roundtrip_ms, lock_wait_ms) =
+            self.timings.as_ref().map_or((0, 0, 0), |timings| {
+                (
+                    timings.worker_ms(),
+                    timings.roundtrip_ms(),
+                    timings.lock_wait_ms(),
+                )
+            });
         self.status.send_replace(CameraStatus {
             state,
             counters,
             source_gaps: self.source_gaps,
             frames_dropped: self.slot.dropped(),
+            fps_in_tenths: rates.fps_in_tenths,
+            fps_processed_tenths: rates.fps_processed_tenths,
+            worker_ms,
+            roundtrip_ms,
+            lock_wait_ms,
         });
     }
 }

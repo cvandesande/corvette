@@ -141,6 +141,11 @@ const fn status(state: CameraState) -> CameraStatus {
         },
         source_gaps: 3,
         frames_dropped: 0,
+        fps_in_tenths: 0,
+        fps_processed_tenths: 0,
+        worker_ms: 0,
+        roundtrip_ms: 0,
+        lock_wait_ms: 0,
     }
 }
 
@@ -174,6 +179,87 @@ fn status_entries_parse_with_exact_names_and_counters() {
             parsed["source_gaps"].as_u64().expect("source_gaps number"),
             3
         );
+        assert_eq!(
+            parsed["frames_dropped"]
+                .as_u64()
+                .expect("frames_dropped number"),
+            0
+        );
+        assert_eq!(parsed["fps_in"].to_string(), "0.0");
+        assert_eq!(parsed["fps_processed"].to_string(), "0.0");
+        assert_eq!(parsed["worker_ms"].as_u64().expect("worker_ms number"), 0);
+        assert_eq!(
+            parsed["roundtrip_ms"]
+                .as_u64()
+                .expect("roundtrip_ms number"),
+            0
+        );
+        assert_eq!(
+            parsed["lock_wait_ms"]
+                .as_u64()
+                .expect("lock_wait_ms number"),
+            0
+        );
+    }
+}
+
+const fn rates_status(fps_in_tenths: u32, fps_processed_tenths: u32) -> CameraStatus {
+    CameraStatus {
+        state: CameraState::Running,
+        counters: PipelineCounters {
+            frames_in: 30,
+            frames_tracked: 29,
+            frames_inference_failed: 1,
+        },
+        source_gaps: 3,
+        frames_dropped: 9,
+        fps_in_tenths,
+        fps_processed_tenths,
+        worker_ms: 12,
+        roundtrip_ms: 34,
+        lock_wait_ms: 5,
+    }
+}
+
+#[test]
+fn status_entry_carries_every_new_member_with_its_own_value() {
+    let text = status_entry("yard", &rates_status(300, 7));
+    let parsed: Value = serde_json::from_str(&text).expect("status parses");
+    assert_eq!(
+        parsed["frames_dropped"]
+            .as_u64()
+            .expect("frames_dropped number"),
+        9
+    );
+    assert_eq!(parsed["fps_in"].to_string(), "30.0");
+    assert_eq!(parsed["fps_processed"].to_string(), "0.7");
+    assert_eq!(parsed["worker_ms"].as_u64().expect("worker_ms number"), 12);
+    assert_eq!(
+        parsed["roundtrip_ms"]
+            .as_u64()
+            .expect("roundtrip_ms number"),
+        34
+    );
+    assert_eq!(
+        parsed["lock_wait_ms"]
+            .as_u64()
+            .expect("lock_wait_ms number"),
+        5
+    );
+}
+
+#[test]
+fn fps_members_print_their_tenths_with_exactly_one_decimal_digit() {
+    for (tenths, want) in [
+        (0u32, "0.0"),
+        (7, "0.7"),
+        (300, "30.0"),
+        (4_294_967_295, "429496729.5"),
+    ] {
+        let text = status_entry("yard", &rates_status(tenths, tenths));
+        let parsed: Value = serde_json::from_str(&text).expect("status parses");
+        assert_eq!(parsed["fps_in"].to_string(), want);
+        assert_eq!(parsed["fps_processed"].to_string(), want);
     }
 }
 

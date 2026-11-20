@@ -1,15 +1,19 @@
 // Tests may unwrap, expect and index: `docs/standards/STYLE.md` states
 // "Tests may unwrap, expect and index", and the crate lints do not forbid them.
 use corvette_detect::{
-    CameraRunner, CameraState, CandidateStage, Decode, EngineError, Frame, FrameSpec, Infer,
-    Labels, LiveError, LivePipeline, ObjectStage, RegionStage, RegionStageSettings, RunnerError,
-    StepEnd, frame_slot,
+    CameraRunner, CameraState, CandidateStage, DEFAULT_POLICY, Decode, EngineError, Frame,
+    FrameSpec, Infer, Labels, LiveError, LivePipeline, ObjectStage, RegionStage,
+    RegionStageSettings, RunnerError, SharedLink, StepEnd, WorkerLink, frame_slot,
 };
-use corvette_detect_proto::{Row, TENSOR_BYTES};
+use corvette_detect_proto::{HEADER_LEN, Reply, Request, Row, TENSOR_BYTES, parse_header};
 use corvette_motion::{MotionSettings, Shape, SizeGrid};
 use corvette_track::{IdSource, ObjectFilter, ObjectFilters, TrackerSettings, ZoneSet};
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixListener;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -371,4 +375,99 @@ fn a_closed_slot_with_an_untaken_frame_ends_the_run() {
         "the untaken frame was never stepped"
     );
     assert_eq!(status.state, CameraState::WaitingForFrames);
+}
+
+fn temp_worker_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("camrunner-{tag}-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("temp dir");
+    let _ = fs::remove_file(dir.join("worker.sock"));
+    dir
+}
+
+fn sample_tensor() -> Box<[u8; TENSOR_BYTES]> {
+    let bytes = vec![0x5Au8; TENSOR_BYTES];
+    <Box<[u8; TENSOR_BYTES]>>::try_from(bytes.into_boxed_slice()).expect("tensor length")
+}
+
+fn answer_one_infer(listener: UnixListener, worker_ms: u32, delay: Duration) {
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut header_bytes = [0u8; HEADER_LEN];
+        if stream.read_exact(&mut header_bytes).is_err() {
+            return;
+        }
+        let header = parse_header(&header_bytes).expect("header decodes");
+        let mut body = vec![0u8; header.body_len];
+        if stream.read_exact(&mut body).is_err() {
+            return;
+        }
+        let mut frame = header_bytes.to_vec();
+        frame.extend_from_slice(&body);
+        let id = match Request::decode(&frame).expect("request decodes") {
+            Request::InferRequest { id, .. } => id,
+            other => panic!("expected an infer request, got {other:?}"),
+        };
+        std::thread::sleep(delay);
+        let reply = Reply::Rows {
+            id,
+            worker_ms,
+            rows: vec![person_row()],
+        };
+        let _ = stream.write_all(&reply.encode().expect("reply encodes"));
+    });
+}
+
+#[test]
+fn a_runner_with_link_timings_publishes_the_values_recorded_on_that_link() {
+    let dir = temp_worker_dir("timings");
+    let listener = UnixListener::bind(dir.join("worker.sock")).expect("bind");
+    answer_one_infer(listener, 41, Duration::from_millis(60));
+    let shared = SharedLink::new(WorkerLink::new(
+        dir.join("worker.sock"),
+        Duration::from_secs(5),
+        DEFAULT_POLICY,
+    ));
+    let mut infer = shared.infer_handle();
+    let timings = infer.timings();
+    infer.infer(&sample_tensor()).expect("one answered request");
+    assert_eq!(timings.worker_ms(), 41, "the fake worker carried its time");
+    assert!(timings.roundtrip_ms() > 0, "the exchange was timed");
+    let (pipeline, _cells) = pipeline_with(false);
+    let (sender, receiver) = frame_slot();
+    let (runner, handle) = CameraRunner::new(receiver, pipeline, Duration::from_secs(1));
+    let mut runner = runner.with_timings(timings.clone());
+    sender.put(black_frame(0));
+    assert!(matches!(runner.step_once(), Ok(StepEnd::Frame)));
+    let status = *handle.status.borrow();
+    assert_eq!(status.worker_ms, timings.worker_ms());
+    assert_eq!(status.roundtrip_ms, timings.roundtrip_ms());
+    assert_eq!(status.lock_wait_ms, timings.lock_wait_ms());
+    fs::remove_dir_all(&dir).expect("remove temp dir");
+}
+
+#[test]
+fn a_completed_window_publishes_more_arrivals_than_the_pipeline_processed() {
+    let (pipeline, _cells) = pipeline_with(true);
+    let (sender, receiver) = frame_slot();
+    let (mut runner, handle) = CameraRunner::new(receiver, pipeline, Duration::from_secs(1));
+    for index in 0..4 {
+        sender.put(black_frame(index));
+    }
+    sender.put(flat_frame(4));
+    assert!(matches!(runner.step_once(), Ok(StepEnd::Frame)));
+    std::thread::sleep(Duration::from_millis(1_100));
+    sender.gap();
+    assert!(matches!(runner.step_once(), Ok(StepEnd::Gap)));
+    let status = *handle.status.borrow();
+    assert!(
+        status.fps_processed_tenths >= 1,
+        "the completed window published the processed frame, got {}",
+        status.fps_processed_tenths
+    );
+    assert!(
+        status.fps_in_tenths > status.fps_processed_tenths,
+        "five frames arrived while one was processed, got in {} processed {}",
+        status.fps_in_tenths,
+        status.fps_processed_tenths
+    );
 }

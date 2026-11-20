@@ -14,6 +14,7 @@ mod ffmpeg;
 mod frame_slot;
 mod live_pipeline;
 mod object_stage;
+mod rate_window;
 mod reader;
 mod record;
 mod region_stage;
@@ -49,6 +50,7 @@ pub use ffmpeg::{Decode, FrameSpec, Input, MAX_FRAME_BYTES, SpecError, decode_co
 pub use frame_slot::{SlotCloser, SlotEvent, SlotReceiver, SlotSender, frame_slot};
 pub use live_pipeline::{FrameOutcome, LiveError, LivePipeline, PipelineCounters};
 pub use object_stage::{FrameObjects, ObjectStage, ObjectStageError, TrackedObject};
+pub use rate_window::{RateWindow, Rates};
 pub use reader::{Frame, FrameReader, ReadError};
 pub use record::{RecordError, RecordHeader, RecordWriter, json_string, object_entries};
 pub use region_stage::{RegionStage, RegionStageError, RegionStageSettings, RegionTensor};
