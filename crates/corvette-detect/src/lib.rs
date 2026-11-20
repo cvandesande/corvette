@@ -59,7 +59,7 @@ pub use replay_segment::{Area, ReplayConfig, ReplaySegmentError, ReplaySummary, 
 pub use revision::revision;
 pub use segment::{SegmentError, SegmentName};
 pub use service_bodies::{
-    OFF_STATE, ObjectsAnswer, objects_answer, off_entry, state_name, status_entry,
+    OFF_STATE, ObjectsAnswer, WorkerReport, objects_answer, off_entry, state_name, status_entry,
 };
 pub use service_socket::{CameraEntry, ServiceState, serve, serve_with_timeout};
 pub use shared_link::{LinkTimings, SharedInfer, SharedLink};

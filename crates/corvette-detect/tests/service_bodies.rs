@@ -1,7 +1,7 @@
 use corvette_detect::{
     CameraState, CameraStatus, FrameObjects, OFF_STATE, ObjectsAnswer, PipelineCounters,
-    RecordError, RecordHeader, RecordWriter, TrackedObject, objects_answer, off_entry, state_name,
-    status_entry,
+    RecordError, RecordHeader, RecordWriter, Status, TrackedObject, WorkerReport, objects_answer,
+    off_entry, state_name, status_entry,
 };
 use serde_json::Value;
 
@@ -158,8 +158,8 @@ fn status_entries_parse_with_exact_names_and_counters() {
         (CameraState::Failed, "failed"),
     ] {
         assert_eq!(state_name(state), name);
-        let parsed: Value =
-            serde_json::from_str(&status_entry("yard", &status(state))).expect("status parses");
+        let parsed: Value = serde_json::from_str(&status_entry("yard", &status(state), None))
+            .expect("status parses");
         assert_eq!(parsed["camera"].as_str().expect("camera string"), "yard");
         assert_eq!(parsed["state"].as_str().expect("state string"), name);
         assert_eq!(parsed["frames_in"].as_u64().expect("frames_in number"), 11);
@@ -223,7 +223,7 @@ const fn rates_status(fps_in_tenths: u32, fps_processed_tenths: u32) -> CameraSt
 
 #[test]
 fn status_entry_carries_every_new_member_with_its_own_value() {
-    let text = status_entry("yard", &rates_status(300, 7));
+    let text = status_entry("yard", &rates_status(300, 7), None);
     let parsed: Value = serde_json::from_str(&text).expect("status parses");
     assert_eq!(
         parsed["frames_dropped"]
@@ -256,7 +256,7 @@ fn fps_members_print_their_tenths_with_exactly_one_decimal_digit() {
         (300, "30.0"),
         (4_294_967_295, "429496729.5"),
     ] {
-        let text = status_entry("yard", &rates_status(tenths, tenths));
+        let text = status_entry("yard", &rates_status(tenths, tenths), None);
         let parsed: Value = serde_json::from_str(&text).expect("status parses");
         assert_eq!(parsed["fps_in"].to_string(), want);
         assert_eq!(parsed["fps_processed"].to_string(), want);
@@ -270,4 +270,70 @@ fn off_entry_parses_with_off_state() {
     assert_eq!(parsed["camera"].as_str().expect("camera string"), "living");
     assert_eq!(parsed["state"].as_str().expect("state string"), "off");
     assert_eq!(parsed["state"].as_str().expect("state string"), OFF_STATE);
+}
+
+#[test]
+fn entry_with_no_worker_carries_no_worker_members() {
+    let parsed: Value =
+        serde_json::from_str(&status_entry("yard", &status(CameraState::Running), None))
+            .expect("status parses");
+    assert!(parsed.get("worker_state").is_none());
+    assert!(parsed.get("worker_restarts").is_none());
+}
+
+#[test]
+fn entry_with_worker_carries_its_state_and_restarts() {
+    for (report, want_state, want_restarts) in [
+        (
+            WorkerReport {
+                running: true,
+                restarts: 0,
+            },
+            "running",
+            0u64,
+        ),
+        (
+            WorkerReport {
+                running: false,
+                restarts: 3,
+            },
+            "exited",
+            3,
+        ),
+    ] {
+        let text = status_entry("yard", &status(CameraState::Running), Some(report));
+        let parsed: Value = serde_json::from_str(&text).expect("status parses");
+        assert_eq!(
+            parsed["worker_state"]
+                .as_str()
+                .expect("worker_state string"),
+            want_state
+        );
+        assert_eq!(
+            parsed["worker_restarts"]
+                .as_u64()
+                .expect("worker_restarts number"),
+            want_restarts
+        );
+    }
+}
+
+#[test]
+fn from_status_maps_starts_to_restarts_and_carries_running_through() {
+    for (starts, exits, running, want_restarts) in [
+        (0, 7, false, 0u64),
+        (1, 7, true, 0),
+        (4, 7, true, 3),
+        (4, 7, false, 3),
+    ] {
+        let sup = Status {
+            starts,
+            exits,
+            running,
+            ..Status::default()
+        };
+        let report = WorkerReport::from_status(&sup);
+        assert_eq!(report.restarts, want_restarts, "starts {starts}");
+        assert_eq!(report.running, running, "starts {starts}");
+    }
 }

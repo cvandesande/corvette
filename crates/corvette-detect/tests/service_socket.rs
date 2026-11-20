@@ -3,12 +3,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use corvette_detect::{
-    CameraEntry, CameraHandle, CameraState, CameraStatus, FrameObjects, PipelineCounters,
-    ServiceState, TrackedObject, serve_with_timeout,
+    CameraEntry, CameraHandle, CameraState, CameraStatus, FrameObjects, PipelineCounters, Policy,
+    ServiceState, Status, Supervised, TrackedObject, serve_with_timeout,
 };
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::process::Command;
 use tokio::sync::watch;
 
 const READ_TIMEOUT: Duration = Duration::from_millis(200);
@@ -26,6 +27,18 @@ fn start(test: &str, cameras: Vec<(String, CameraEntry)>) -> PathBuf {
     let socket = socket_path(test);
     let listener = UnixListener::bind(&socket).expect("bind");
     let state = Arc::new(ServiceState::new(cameras));
+    tokio::spawn(serve_with_timeout(listener, state, READ_TIMEOUT));
+    socket
+}
+
+fn start_with_worker(
+    test: &str,
+    cameras: Vec<(String, CameraEntry)>,
+    worker: watch::Receiver<Status>,
+) -> PathBuf {
+    let socket = socket_path(test);
+    let listener = UnixListener::bind(&socket).expect("bind");
+    let state = Arc::new(ServiceState::new(cameras).with_worker(worker));
     tokio::spawn(serve_with_timeout(listener, state, READ_TIMEOUT));
     socket
 }
@@ -412,6 +425,99 @@ async fn status_lists_cameras_in_registered_order_and_tracks_the_published_statu
     assert_eq!(a["frames_tracked"], 8);
     assert_eq!(a["frames_inference_failed"], 7);
     assert_eq!(a["source_gaps"], 6);
+}
+
+#[tokio::test]
+async fn worker_channel_marks_live_entries_only_and_follows_the_next_publish() {
+    let initial = Status {
+        starts: 2,
+        running: true,
+        ..Status::default()
+    };
+    let (sender, receiver) = watch::channel(initial);
+    let socket = start_with_worker(
+        "worker_channel",
+        vec![
+            (
+                "live".to_owned(),
+                CameraEntry::Live(live_handle(running(3), None)),
+            ),
+            ("dark".to_owned(), CameraEntry::Off),
+        ],
+        receiver,
+    );
+    let response = request(&socket, &get(STATUS)).await;
+    assert_eq!(status_code(&response), 200);
+    let value: Value = serde_json::from_str(body(&response)).expect("json body");
+    let cameras = value["cameras"].as_array().expect("cameras array");
+    assert_eq!(cameras[0]["worker_state"], "running");
+    assert_eq!(cameras[0]["worker_restarts"], 1);
+    assert!(cameras[1].get("worker_state").is_none());
+    assert!(cameras[1].get("worker_restarts").is_none());
+    sender
+        .send(Status {
+            running: false,
+            ..initial
+        })
+        .expect("publish exited");
+    let response = request(&socket, &get(STATUS)).await;
+    let value: Value = serde_json::from_str(body(&response)).expect("json body");
+    let cameras = value["cameras"].as_array().expect("cameras array");
+    assert_eq!(cameras[0]["worker_state"], "exited");
+    assert_eq!(cameras[0]["worker_restarts"], 1);
+    assert!(cameras[1].get("worker_state").is_none());
+}
+
+fn shell(script: &str) -> Command {
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(script);
+    command
+}
+
+#[tokio::test]
+async fn a_restarting_supervised_child_shows_exited_and_rising_restarts() {
+    let policy = Policy {
+        initial: Duration::from_millis(10),
+        max: Duration::from_millis(40),
+        healthy_after: Duration::from_mins(1),
+    };
+    let supervisor = Supervised::spawn(
+        "status-worker".to_string(),
+        policy,
+        || shell("true"),
+        |_| {},
+    );
+    let socket = start_with_worker(
+        "worker_supervised",
+        vec![(
+            "a".to_owned(),
+            CameraEntry::Live(live_handle(running(2), None)),
+        )],
+        supervisor.subscribe(),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = request(&socket, &get(STATUS)).await;
+        let value: Value = serde_json::from_str(body(&response)).expect("json body");
+        let entry = &value["cameras"].as_array().expect("cameras array")[0];
+        if entry["worker_state"] == "exited"
+            && entry["worker_restarts"]
+                .as_u64()
+                .expect("worker_restarts number")
+                >= 1
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the status never showed exited with a restart"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        supervisor.status().starts >= 2,
+        "the subscribed status did not show starts rising"
+    );
 }
 
 #[tokio::test]

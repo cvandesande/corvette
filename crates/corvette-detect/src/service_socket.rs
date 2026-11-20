@@ -5,10 +5,12 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::watch;
 
 use crate::camera_runner::CameraHandle;
 use crate::object_stage::FrameObjects;
-use crate::service_bodies::{ObjectsAnswer, objects_answer, off_entry, status_entry};
+use crate::service_bodies::{ObjectsAnswer, WorkerReport, objects_answer, off_entry, status_entry};
+use crate::supervised::Status;
 
 const MAX_HEAD_BYTES: usize = 8192;
 const STATUS_PATH: &str = "/corvette/api/v1/detection/status";
@@ -25,12 +27,24 @@ pub enum CameraEntry {
 #[derive(Clone, Debug)]
 pub struct ServiceState {
     cameras: Vec<(String, CameraEntry)>,
+    worker: Option<watch::Receiver<Status>>,
 }
 
 impl ServiceState {
     #[must_use]
     pub const fn new(cameras: Vec<(String, CameraEntry)>) -> Self {
-        Self { cameras }
+        Self {
+            cameras,
+            worker: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_worker(self, worker: watch::Receiver<Status>) -> Self {
+        Self {
+            worker: Some(worker),
+            ..self
+        }
     }
 }
 
@@ -237,12 +251,16 @@ fn objects_response(state: &ServiceState, index: usize) -> String {
 }
 
 fn status_body(state: &ServiceState) -> String {
+    let worker: Option<WorkerReport> = state
+        .worker
+        .as_ref()
+        .map(|receiver| WorkerReport::from_status(&receiver.borrow()));
     let entries: Vec<String> = state
         .cameras
         .iter()
         .map(|(name, entry)| match entry {
             CameraEntry::Off => off_entry(name),
-            CameraEntry::Live(handle) => status_entry(name, &handle.status.borrow()),
+            CameraEntry::Live(handle) => status_entry(name, &handle.status.borrow(), worker),
         })
         .collect();
     format!("{{\"cameras\":[{}]}}", entries.join(","))

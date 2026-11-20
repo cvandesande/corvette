@@ -3,6 +3,7 @@
 use crate::camera_runner::{CameraState, CameraStatus};
 use crate::object_stage::FrameObjects;
 use crate::record::{RecordError, json_string, object_entries};
+use crate::supervised::Status;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ObjectsAnswer {
@@ -38,10 +39,33 @@ fn fps_text(tenths: u32) -> String {
     format!("{}.{digit}", tenths / 10, digit = tenths % 10)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkerReport {
+    pub running: bool,
+    pub restarts: u64,
+}
+
+impl WorkerReport {
+    #[must_use]
+    pub const fn from_status(status: &Status) -> Self {
+        Self {
+            running: status.running,
+            restarts: status.starts.saturating_sub(1),
+        }
+    }
+}
+
 #[must_use]
-pub fn status_entry(camera: &str, status: &CameraStatus) -> String {
+pub fn status_entry(camera: &str, status: &CameraStatus, worker: Option<WorkerReport>) -> String {
+    let worker_text = worker.map_or_else(String::new, |report| {
+        let worker_state = if report.running { "running" } else { "exited" };
+        format!(
+            ",\"worker_state\":\"{worker_state}\",\"worker_restarts\":{}",
+            report.restarts
+        )
+    });
     format!(
-        "{{\"camera\":{camera},\"state\":{state},\"frames_in\":{frames_in},\"frames_tracked\":{frames_tracked},\"frames_inference_failed\":{frames_inference_failed},\"source_gaps\":{source_gaps},\"frames_dropped\":{frames_dropped},\"fps_in\":{fps_in},\"fps_processed\":{fps_processed},\"worker_ms\":{worker_ms},\"roundtrip_ms\":{roundtrip_ms},\"lock_wait_ms\":{lock_wait_ms}}}",
+        "{{\"camera\":{camera},\"state\":{state},\"frames_in\":{frames_in},\"frames_tracked\":{frames_tracked},\"frames_inference_failed\":{frames_inference_failed},\"source_gaps\":{source_gaps},\"frames_dropped\":{frames_dropped},\"fps_in\":{fps_in},\"fps_processed\":{fps_processed},\"worker_ms\":{worker_ms},\"roundtrip_ms\":{roundtrip_ms},\"lock_wait_ms\":{lock_wait_ms}{worker_text}}}",
         camera = json_string(camera),
         state = json_string(state_name(status.state)),
         frames_in = status.counters.frames_in,
