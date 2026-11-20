@@ -3,6 +3,7 @@
 
 mod backoff;
 mod camera_runner;
+mod camera_thread;
 mod candidate_stage;
 mod clock;
 mod config;
@@ -33,6 +34,7 @@ pub use backoff::{BACKOFF_INITIAL, BACKOFF_MAX, Backoff, DEFAULT_POLICY, HEALTHY
 pub use camera_runner::{
     CameraHandle, CameraRunner, CameraState, CameraStatus, RunnerError, StepEnd,
 };
+pub use camera_thread::{CameraThreadSettings, CameraThreads, JoinReport, StartError, ThreadEnd};
 pub use candidate_stage::{CandidateError, CandidateStage, Infer};
 pub use clock::FrameClock;
 pub use config::{
