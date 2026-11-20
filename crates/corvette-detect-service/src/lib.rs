@@ -9,23 +9,25 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use corvette_detect::{
     CameraEntry, CameraPlan, CameraThreadSettings, CameraThreads, Config, DEFAULT_POLICY,
-    ServiceState, SharedLink, Supervised, WorkerLink, revision, serve,
+    JoinReport, ServiceState, SharedLink, Supervised, ThreadEnd, WorkerLink, revision, serve,
 };
 use tokio::process::Command;
+use tokio::signal::unix::{Signal, SignalKind};
 
 const USAGE: &str = "\
 usage: corvette-detect-service --config PATH --ffmpeg PROGRAM --restream-address HOST:PORT
            --worker PROGRAM --worker-param PATH --worker-bin PATH
            --worker-max-deadline-ms N --worker-health-socket PATH
            [--socket PATH] [--worker-device VALUE] [--frame-timeout-ms N]
+           [--stop-timeout-ms N]
        corvette-detect-service --probe [--socket PATH]
        corvette-detect-service --help
 exit codes:
-     0  help
+     0  help, or serve ended by SIGTERM or SIGINT
      1  probe failed or serve loop ended with an error
      2  usage error
      3  startup failure (configuration, camera plan, socket claim)
@@ -37,6 +39,9 @@ const EXIT_USAGE: u8 = 2;
 const EXIT_STARTUP: u8 = 3;
 const DEFAULT_FRAME_TIMEOUT_MS: u64 = 10_000;
 const MAX_FRAME_TIMEOUT_MS: u64 = 600_000;
+// Proposal until a measured camera stop time replaces this total shutdown budget.
+const DEFAULT_STOP_TIMEOUT_MS: u64 = 15_000;
+const MAX_STOP_TIMEOUT_MS: u64 = 600_000;
 const PROBE_IO_TIMEOUT: Duration = Duration::from_secs(3);
 const PROBE_REQUEST: &str = "GET /corvette/api/v1/detection/status HTTP/1.1\r\nHost: corvette-detect\r\nConnection: close\r\n\r\n";
 // A peer that streams without a newline cannot grow the probe past this read cap.
@@ -57,6 +62,7 @@ pub struct Options {
     pub restream_address: String,
     pub worker: WorkerLaunch,
     pub frame_timeout: Duration,
+    pub stop_timeout: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -82,6 +88,7 @@ struct FlagSlots {
     worker_health_socket: Option<PathBuf>,
     worker_device: Option<String>,
     frame_timeout_ms: Option<u64>,
+    stop_timeout_ms: Option<u64>,
 }
 
 impl FlagSlots {
@@ -102,6 +109,7 @@ impl FlagSlots {
                 .map(|_| "worker-health-socket"),
             self.worker_device.as_ref().map(|_| "worker-device"),
             self.frame_timeout_ms.as_ref().map(|_| "frame-timeout-ms"),
+            self.stop_timeout_ms.as_ref().map(|_| "stop-timeout-ms"),
         ]
         .into_iter()
         .flatten()
@@ -148,7 +156,20 @@ pub fn parse(args: &[OsString], env_socket: Option<&OsStr>) -> Result<Invocation
                 )?;
             }
             "--frame-timeout-ms" => {
-                set_frame_timeout(&mut slots.frame_timeout_ms, argument(args, index, &flag)?)?;
+                set_millisecond_flag(
+                    &mut slots.frame_timeout_ms,
+                    "frame-timeout-ms",
+                    argument(args, index, &flag)?,
+                    MAX_FRAME_TIMEOUT_MS,
+                )?;
+            }
+            "--stop-timeout-ms" => {
+                set_millisecond_flag(
+                    &mut slots.stop_timeout_ms,
+                    "stop-timeout-ms",
+                    argument(args, index, &flag)?,
+                    MAX_STOP_TIMEOUT_MS,
+                )?;
             }
             name => {
                 let slot = match name {
@@ -200,6 +221,9 @@ fn serve_options(slots: FlagSlots, env_socket: Option<&OsStr>) -> Result<Options
         frame_timeout: Duration::from_millis(
             slots.frame_timeout_ms.unwrap_or(DEFAULT_FRAME_TIMEOUT_MS),
         ),
+        stop_timeout: Duration::from_millis(
+            slots.stop_timeout_ms.unwrap_or(DEFAULT_STOP_TIMEOUT_MS),
+        ),
     })
 }
 
@@ -249,16 +273,21 @@ fn set_max_deadline(slot: &mut Option<u32>, value: &OsStr) -> Result<(), String>
     }
 }
 
-fn set_frame_timeout(slot: &mut Option<u64>, value: &OsStr) -> Result<(), String> {
+fn set_millisecond_flag(
+    slot: &mut Option<u64>,
+    name: &str,
+    value: &OsStr,
+    max: u64,
+) -> Result<(), String> {
     let shown = text(value);
     let found = shown.parse::<u64>().unwrap_or(0);
-    if !(1..=MAX_FRAME_TIMEOUT_MS).contains(&found) {
+    if !(1..=max).contains(&found) {
         return Err(format!(
-            "flag --frame-timeout-ms has value {shown}, expected an integer between 1 and {MAX_FRAME_TIMEOUT_MS}"
+            "flag --{name} has value {shown}, expected an integer between 1 and {max}"
         ));
     }
     if slot.is_some() {
-        return Err("flag --frame-timeout-ms given twice".to_string());
+        return Err(format!("flag --{name} given twice"));
     }
     *slot = Some(found);
     Ok(())
@@ -295,9 +324,9 @@ fn text(value: &OsStr) -> String {
     value.to_string_lossy().into_owned()
 }
 
-/// Runs one startup sequence in order: parse, config read, camera plans, worker child, camera threads, socket claim, then serve until the loop returns.
+/// Runs one startup sequence in order: parse, config read, camera plans, signal handlers, worker child, camera threads, socket claim, then serve.
 ///
-/// The worker child and every started camera thread run until the process ends; the serve loop returns only when `accept` fails.
+/// A first `SIGTERM` or `SIGINT`, and a camera-start failure after earlier cameras started, stops and joins the started cameras within `--stop-timeout-ms`; the worker guard and the runtime then drop so every child process is killed.
 #[must_use]
 pub fn run(args: &[OsString], env_socket: Option<&OsStr>) -> ExitCode {
     let options = match parse(args, env_socket) {
@@ -339,60 +368,144 @@ pub fn run(args: &[OsString], env_socket: Option<&OsStr>) -> ExitCode {
             return ExitCode::from(EXIT_STARTUP);
         }
     };
-    let _entered = runtime.enter();
+    let entered = runtime.enter();
+    let (mut terminate, mut interrupt) = match install_signals() {
+        Ok(streams) => streams,
+        Err(reason) => {
+            log_event("service", "signal-failed", reason);
+            return ExitCode::from(EXIT_STARTUP);
+        }
+    };
     let worker = Supervised::spawn(
         "worker".to_owned(),
         DEFAULT_POLICY,
         worker_command(&options.worker, &config.worker_socket),
         |_child| {},
     );
-    let started = match start_cameras(&options, &config, plans) {
-        Ok(started) => started,
-        Err(reason) => {
-            log_event("service", "camera-start-failed", reason);
-            return ExitCode::from(EXIT_STARTUP);
-        }
-    };
+    let mut started = Vec::new();
+    if let Err(reason) = start_cameras(&mut started, &options, &config, plans) {
+        log_event("service", "camera-start-failed", reason);
+        stop_and_join(started, options.stop_timeout);
+        return ExitCode::from(EXIT_STARTUP);
+    }
     let entries: Vec<(String, CameraEntry)> = started
         .iter()
         .map(|(name, threads)| (name.clone(), CameraEntry::Live(threads.handle())))
         .collect();
-    let listener = match claim_socket(&options.socket) {
+    let listener = match bind_status_socket(&options.socket) {
         Ok(listener) => listener,
         Err(reason) => {
             log_event("service", "socket-refused", reason);
             return ExitCode::from(EXIT_STARTUP);
         }
     };
-    let listener = match listener
-        .set_nonblocking(true)
-        .and_then(|()| tokio::net::UnixListener::from_std(listener))
-    {
-        Ok(listener) => listener,
-        Err(error) => {
-            log_event(
-                "service",
-                "socket-refused",
-                format!(
-                    "{} could not enter the runtime: {error}",
-                    options.socket.display()
-                ),
-            );
-            return ExitCode::from(EXIT_STARTUP);
-        }
-    };
-    log_event(
-        "service",
-        "socket-bound",
-        format!("path={}", options.socket.display()),
-    );
     let state = Arc::new(ServiceState::new(entries).with_worker(worker.subscribe()));
-    match runtime.block_on(serve(listener, Arc::clone(&state))) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
+    match runtime.block_on(serve_or_signal(
+        listener,
+        state,
+        &mut terminate,
+        &mut interrupt,
+    )) {
+        Ended::Served(Ok(())) => ExitCode::SUCCESS,
+        Ended::Served(Err(error)) => {
             log_event("service", "serve-ended", error);
             ExitCode::from(EXIT_SERVE)
         }
+        Ended::Signaled(name) => {
+            log_event("service", "shutdown-signal", format!("signal={name}"));
+            remove_socket(&options.socket);
+            stop_and_join(started, options.stop_timeout);
+            // The worker guard's drop kills its child, so the runtime must outlive the guard.
+            drop(entered);
+            drop(worker);
+            drop(runtime);
+            log_event("service", "shutdown-complete", "exit=0");
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+enum Ended {
+    Served(std::io::Result<()>),
+    Signaled(&'static str),
+}
+
+/// Ends when `serve` returns or a first `SIGTERM` or `SIGINT` arrives; a signal branch dropping the serve future also drops the listener.
+async fn serve_or_signal(
+    listener: tokio::net::UnixListener,
+    state: Arc<ServiceState>,
+    terminate: &mut Signal,
+    interrupt: &mut Signal,
+) -> Ended {
+    tokio::select! {
+        served = serve(listener, state) => Ended::Served(served),
+        Some(()) = terminate.recv() => Ended::Signaled("SIGTERM"),
+        Some(()) = interrupt.recv() => Ended::Signaled("SIGINT"),
+    }
+}
+
+fn install_signals() -> Result<(Signal, Signal), String> {
+    let terminate = install_signal(SignalKind::terminate(), "SIGTERM")?;
+    let interrupt = install_signal(SignalKind::interrupt(), "SIGINT")?;
+    Ok((terminate, interrupt))
+}
+
+fn install_signal(kind: SignalKind, name: &str) -> Result<Signal, String> {
+    tokio::signal::unix::signal(kind)
+        .map_err(|error| format!("{name} handler could not be installed: {error}"))
+}
+
+fn remove_socket(path: &Path) {
+    if let Err(error) = fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log_event(
+            "service",
+            "socket-unlink-failed",
+            format!("{}: {error}", path.display()),
+        );
+    }
+}
+
+/// Stops every started camera at once, then joins each with the time left of the one shared `budget`.
+fn stop_and_join(started: Vec<(String, CameraThreads)>, budget: Duration) {
+    let count = started.len();
+    let deadline = Instant::now() + budget;
+    for (_, threads) in &started {
+        threads.stop();
+    }
+    for (name, threads) in started {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        report_camera(&name, threads.join(remaining));
+    }
+    log_event("service", "cameras-stopped", format!("count={count}"));
+}
+
+fn report_camera(name: &str, report: JoinReport) {
+    let timed_out = report.runner == ThreadEnd::TimedOut || report.producer == ThreadEnd::TimedOut;
+    let event = if timed_out {
+        "stop-timeout"
+    } else if report.runner == ThreadEnd::Panicked || report.producer == ThreadEnd::Panicked {
+        "camera-thread-panicked"
+    } else {
+        return;
+    };
+    log_event(
+        "service",
+        event,
+        format!(
+            "camera={name} runner={} producer={}",
+            end_word(report.runner),
+            end_word(report.producer)
+        ),
+    );
+}
+
+const fn end_word(end: ThreadEnd) -> &'static str {
+    match end {
+        ThreadEnd::Finished => "finished",
+        ThreadEnd::Panicked => "panicked",
+        ThreadEnd::TimedOut => "timed_out",
     }
 }
 
@@ -466,10 +579,11 @@ fn plan_all(config: &Config) -> Result<Vec<CameraPlan>, String> {
 }
 
 fn start_cameras(
+    started: &mut Vec<(String, CameraThreads)>,
     options: &Options,
     config: &Config,
     plans: Vec<CameraPlan>,
-) -> Result<Vec<(String, CameraThreads)>, String> {
+) -> Result<(), String> {
     let link = SharedLink::new(WorkerLink::new(
         config.worker_socket.clone(),
         config.deadline,
@@ -479,7 +593,7 @@ fn start_cameras(
         frame_timeout: options.frame_timeout,
         backoff: DEFAULT_POLICY,
     };
-    let mut started = Vec::with_capacity(plans.len());
+    started.reserve(plans.len());
     for plan in plans {
         let name = plan.name().to_owned();
         let make_command =
@@ -498,7 +612,7 @@ fn start_cameras(
             Err(error) => return Err(format!("camera={name} {error}")),
         }
     }
-    Ok(started)
+    Ok(())
 }
 
 fn read_config(path: &Path) -> Result<(Config, Vec<u8>), String> {
@@ -534,6 +648,20 @@ fn worker_command(
         }
         command
     }
+}
+
+fn bind_status_socket(path: &Path) -> Result<tokio::net::UnixListener, String> {
+    let std_listener = claim_socket(path)?;
+    let listener = std_listener
+        .set_nonblocking(true)
+        .and_then(|()| tokio::net::UnixListener::from_std(std_listener))
+        .map_err(|error| format!("{} could not enter the runtime: {error}", path.display()))?;
+    log_event(
+        "service",
+        "socket-bound",
+        format!("path={}", path.display()),
+    );
+    Ok(listener)
 }
 
 // Same claim rule as the worker binary: a socket file at the path is removed then rebound; any other existing path is refused untouched.

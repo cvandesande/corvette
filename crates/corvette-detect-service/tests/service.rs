@@ -44,6 +44,15 @@ fn executable(dir: &Path, name: &str, body: &str) -> PathBuf {
 
 fn service_command(dir: &Path, worker: &Path, restream: &str) -> Command {
     let fake_ffmpeg = executable(dir, "fake-ffmpeg", "#!/bin/sh\nexec sleep 5\n");
+    service_command_with_ffmpeg(dir, worker, restream, &fake_ffmpeg)
+}
+
+fn service_command_with_ffmpeg(
+    dir: &Path,
+    worker: &Path,
+    restream: &str,
+    ffmpeg: &Path,
+) -> Command {
     let mut command = Command::new(BIN);
     command
         .env_remove("CORVETTE_DETECTION_SOCKET")
@@ -52,7 +61,7 @@ fn service_command(dir: &Path, worker: &Path, restream: &str) -> Command {
         .arg("--socket")
         .arg(dir.join("service.sock"))
         .arg("--ffmpeg")
-        .arg(fake_ffmpeg)
+        .arg(ffmpeg)
         .arg("--restream-address")
         .arg(restream)
         .arg("--worker")
@@ -375,4 +384,176 @@ fn probe_gives_up_on_a_server_that_never_answers() {
         thread::sleep(Duration::from_millis(50));
     };
     assert_eq!(ended.code(), Some(1));
+}
+
+struct Stopping {
+    child: Child,
+    dir: PathBuf,
+    socket: PathBuf,
+    stderr: std::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+// Dropping kills and waits the service and the processes its scripts exec, even when an assertion failed.
+impl Drop for Stopping {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        for name in ["worker.pid", "ffmpeg.pid"] {
+            let shown = fs::read_to_string(self.dir.join(name)).unwrap_or_default();
+            let pid = shown.trim();
+            if !pid.is_empty() {
+                let _ = Command::new("kill").arg("-KILL").arg(pid).status();
+            }
+        }
+    }
+}
+
+fn start_stopping(tag: &str, extra: &[&str]) -> Stopping {
+    let dir = temp_dir(tag);
+    write_labels(&dir);
+    write_config(&dir);
+    // The pid file names the exec'd sleep, so it is the process a clean shutdown must end.
+    let worker = executable(
+        &dir,
+        "pid-worker",
+        &format!(
+            "#!/bin/sh\necho $$ > \"{}\"\nexec sleep 30\n",
+            dir.join("worker.pid").display()
+        ),
+    );
+    let ffmpeg = executable(
+        &dir,
+        "pid-ffmpeg",
+        &format!(
+            "#!/bin/sh\necho $$ > \"{}\"\nexec sleep 5\n",
+            dir.join("ffmpeg.pid").display()
+        ),
+    );
+    let mut command = service_command_with_ffmpeg(&dir, &worker, "127.0.0.1:8554", &ffmpeg);
+    command.args(extra).stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let socket = dir.join("service.sock");
+    wait_until("the service socket", || socket.exists());
+    let (sender, stderr) = std::sync::mpsc::channel();
+    let mut pipe = child.stderr.take().unwrap();
+    thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = pipe.read_to_end(&mut buffer);
+        let _ = sender.send(buffer);
+    });
+    Stopping {
+        child,
+        dir,
+        socket,
+        stderr,
+    }
+}
+
+fn send_signal(child: &Child, name: &str) {
+    let delivered = Command::new("kill")
+        .arg(format!("-{name}"))
+        .arg(child.id().to_string())
+        .status()
+        .unwrap();
+    assert!(delivered.success(), "kill -{name} was not accepted");
+}
+
+fn wait_exit(child: &mut Child) -> std::process::ExitStatus {
+    let started = Instant::now();
+    loop {
+        if let Some(found) = child.try_wait().unwrap() {
+            assert!(
+                started.elapsed() < WAIT,
+                "the service did not exit within {WAIT:?}"
+            );
+            return found;
+        }
+        assert!(
+            started.elapsed() < WAIT,
+            "the service did not exit within {WAIT:?}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn recorded_pid(dir: &Path, name: &str) -> String {
+    let shown = fs::read_to_string(dir.join(name)).unwrap();
+    let pid = shown.trim().to_owned();
+    assert!(!pid.is_empty(), "{name} recorded no pid");
+    pid
+}
+
+fn wait_pid_gone(who: &str, pid: &str) {
+    let proc_dir = Path::new("/proc").join(pid);
+    let end = Instant::now() + Duration::from_secs(5);
+    while proc_dir.exists() {
+        assert!(
+            Instant::now() < end,
+            "{who} pid {pid} still exists after 5 s"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn orderly_shutdown(tag: &str, signal: &str) {
+    let mut service = start_stopping(tag, &["--stop-timeout-ms", "1500"]);
+    wait_until("a status of 200", || {
+        try_get(&service.socket, STATUS).is_some_and(|found| found.0 == 200)
+    });
+    send_signal(&service.child, signal);
+    let status = wait_exit(&mut service.child);
+    assert_eq!(status.code(), Some(0), "the service exited {status}");
+    assert!(
+        !service.socket.exists(),
+        "the socket file survived the shutdown"
+    );
+    let stderr = String::from_utf8_lossy(
+        &service
+            .stderr
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the stderr pipe never ended"),
+    )
+    .into_owned();
+    let signal_at = stderr
+        .find("shutdown-signal")
+        .expect("no shutdown-signal line");
+    let cameras_at = stderr
+        .find("cameras-stopped")
+        .expect("no cameras-stopped line");
+    let complete_at = stderr
+        .find("shutdown-complete")
+        .expect("no shutdown-complete line");
+    assert!(
+        signal_at < cameras_at && cameras_at < complete_at,
+        "shutdown events out of order: {stderr}"
+    );
+    assert!(
+        !stderr.contains("stop-timeout"),
+        "the stop budget was hit: {stderr}"
+    );
+    wait_pid_gone("worker", &recorded_pid(&service.dir, "worker.pid"));
+    wait_pid_gone("camera child", &recorded_pid(&service.dir, "ffmpeg.pid"));
+}
+
+#[test]
+fn sigterm_shutdown_exits_zero_and_leaves_no_socket_or_child() {
+    orderly_shutdown("sigterm", "TERM");
+}
+
+#[test]
+fn sigint_shutdown_exits_zero_and_leaves_no_socket_or_child() {
+    orderly_shutdown("sigint", "INT");
+}
+
+#[test]
+fn probe_after_a_shutdown_exits_one_on_the_unlinked_socket() {
+    let mut service = start_stopping("probe-after-shutdown", &[]);
+    wait_until("a status of 200", || {
+        try_get(&service.socket, STATUS).is_some_and(|found| found.0 == 200)
+    });
+    send_signal(&service.child, "TERM");
+    let status = wait_exit(&mut service.child);
+    assert_eq!(status.code(), Some(0));
+    let probe = probe_command(&service.socket).output().unwrap();
+    assert_eq!(probe.status.code(), Some(1));
 }

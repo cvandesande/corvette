@@ -191,6 +191,7 @@ fn probe_refuses_every_serve_flag() {
         ("--worker-health-socket", "x", "worker-health-socket"),
         ("--worker-device", "x", "worker-device"),
         ("--frame-timeout-ms", "5", "frame-timeout-ms"),
+        ("--stop-timeout-ms", "5", "stop-timeout-ms"),
     ] {
         assert_eq!(
             refused(&["--probe", flag, value]),
@@ -257,6 +258,39 @@ fn frame_timeout_accepts_only_its_bounds() {
                 &["--socket", "/s.sock", "--frame-timeout-ms", shown]
             ))
             .starts_with("flag --frame-timeout-ms has value"),
+            "for {shown}"
+        );
+    }
+}
+
+#[test]
+fn stop_timeout_defaults_to_its_proposal() {
+    let opts = options(&with(&base(), &["--socket", "/s.sock"]), None);
+    assert_eq!(opts.stop_timeout, Duration::from_secs(15));
+}
+
+#[test]
+fn stop_timeout_accepts_only_its_bounds() {
+    for shown in ["1", "600000"] {
+        let opts = options(
+            &with(
+                &base(),
+                &["--socket", "/s.sock", "--stop-timeout-ms", shown],
+            ),
+            None,
+        );
+        assert_eq!(
+            opts.stop_timeout,
+            Duration::from_millis(shown.parse::<u64>().unwrap())
+        );
+    }
+    for shown in ["0", "600001", "abc", "-5", ""] {
+        assert!(
+            refused(&with(
+                &base(),
+                &["--socket", "/s.sock", "--stop-timeout-ms", shown]
+            ))
+            .starts_with("flag --stop-timeout-ms has value"),
             "for {shown}"
         );
     }
