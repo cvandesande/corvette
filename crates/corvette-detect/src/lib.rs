@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod backoff;
+mod camera_plan;
 mod camera_runner;
 mod camera_thread;
 mod candidate_stage;
@@ -31,6 +32,7 @@ mod supervised;
 mod worker_link;
 
 pub use backoff::{BACKOFF_INITIAL, BACKOFF_MAX, Backoff, DEFAULT_POLICY, HEALTHY_RUN, Policy};
+pub use camera_plan::{CameraPlan, PlanError};
 pub use camera_runner::{
     CameraHandle, CameraRunner, CameraState, CameraStatus, RunnerError, StepEnd,
 };

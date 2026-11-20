@@ -93,7 +93,7 @@ impl CameraThreads {
     ///
     /// # Errors
     /// [`StartError::ThreadStart`] when an OS thread cannot be created, [`StartError::ProducerRuntime`] when the producer's runtime cannot be built, [`StartError::NoStopper`] when the producer hands no stopper back within [`STOPPER_WAIT`].
-    pub fn start<M, B>(
+    pub fn start<M, B, E>(
         unit: &str,
         settings: CameraThreadSettings,
         spec: FrameSpec,
@@ -104,9 +104,10 @@ impl CameraThreads {
     ) -> Result<Self, StartError>
     where
         M: FnMut() -> Command + Send + 'static,
-        B: for<'a> Fn(&'a mut IdSource, SharedInfer) -> LivePipeline<'a, SharedInfer>
+        B: for<'a> Fn(&'a mut IdSource, SharedInfer) -> Result<LivePipeline<'a, SharedInfer>, E>
             + Send
             + 'static,
+        E: std::fmt::Display + Send + 'static,
     {
         let (slot_sender, slot_receiver) = frame_slot();
         let slot_closer = slot_receiver.closer();
@@ -290,7 +291,7 @@ async fn produce<M>(
     }
 }
 
-fn run_runner<B>(
+fn run_runner<B, E>(
     slot: &SlotReceiver,
     link: &SharedLink,
     settings: CameraThreadSettings,
@@ -299,13 +300,27 @@ fn run_runner<B>(
     stop_rx: &Receiver<()>,
     build: B,
 ) where
-    B: for<'a> Fn(&'a mut IdSource, SharedInfer) -> LivePipeline<'a, SharedInfer>,
+    B: for<'a> Fn(&'a mut IdSource, SharedInfer) -> Result<LivePipeline<'a, SharedInfer>, E>,
+    E: std::fmt::Display,
 {
     let mut restarts: u32 = 0;
     let mut backoff = Backoff::new(settings.backoff);
     loop {
         let mut ids = IdSource::default();
-        let pipeline = build(&mut ids, link.infer_handle());
+        let pipeline = match build(&mut ids, link.infer_handle()) {
+            Ok(pipeline) => pipeline,
+            Err(_error) => {
+                // A failed build is a runner failure with no runner: the same failed status and back-off restart, published in place because no runner exists to publish it; as with a runner error the status carries the failure and the error value is spent.
+                status_tx.send_modify(|status| status.state = CameraState::Failed);
+                restarts = restarts.saturating_add(1);
+                let delay = backoff.after_run(Duration::ZERO);
+                match stop_rx.recv_timeout(delay) {
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => {}
+                }
+                continue;
+            }
+        };
         let (runner, _handle) = CameraRunner::new(slot.clone(), pipeline, settings.frame_timeout);
         let runner = runner.publishing_to(status_tx.clone(), objects_tx.clone(), restarts);
         let started = Instant::now();

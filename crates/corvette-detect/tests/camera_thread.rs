@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
@@ -96,19 +97,52 @@ const fn tracker() -> TrackerSettings {
 }
 
 // Black frames match the detector's initial background, so no region and no inference: the missing worker socket is never reached.
-fn build_live(ids: &mut IdSource, infer: SharedInfer) -> LivePipeline<'_, SharedInfer> {
-    let objects = ObjectStage::new(tracker(), ids, ZoneSet::new(Vec::new()), 0.5).unwrap();
-    LivePipeline::new(stage_at(WIDTH, HEIGHT), candidate_stage(), objects, infer)
+fn build_live(
+    ids: &mut IdSource,
+    infer: SharedInfer,
+) -> Result<LivePipeline<'_, SharedInfer>, String> {
+    let objects = ObjectStage::new(tracker(), ids, ZoneSet::new(Vec::new()), 0.5)
+        .ok_or("object stage refused")?;
+    Ok(LivePipeline::new(
+        stage_at(WIDTH, HEIGHT),
+        candidate_stage(),
+        objects,
+        infer,
+    ))
 }
 
 // The same pipeline with a stage that refuses every frame: the fatal error from the runner tests, repeated on every frame.
-fn build_fatal(ids: &mut IdSource, infer: SharedInfer) -> LivePipeline<'_, SharedInfer> {
-    let objects = ObjectStage::new(tracker(), ids, ZoneSet::new(Vec::new()), 0.5).unwrap();
-    LivePipeline::new(stage_at(64, 64), candidate_stage(), objects, infer)
+fn build_fatal(
+    ids: &mut IdSource,
+    infer: SharedInfer,
+) -> Result<LivePipeline<'_, SharedInfer>, String> {
+    let objects = ObjectStage::new(tracker(), ids, ZoneSet::new(Vec::new()), 0.5)
+        .ok_or("object stage refused")?;
+    Ok(LivePipeline::new(
+        stage_at(64, 64),
+        candidate_stage(),
+        objects,
+        infer,
+    ))
 }
 
-fn build_panics(_ids: &mut IdSource, _infer: SharedInfer) -> LivePipeline<'_, SharedInfer> {
+fn build_panics(
+    _ids: &mut IdSource,
+    _infer: SharedInfer,
+) -> Result<LivePipeline<'_, SharedInfer>, String> {
     panic!("the build closure panicked");
+}
+
+static BUILD_REFUSALS: AtomicUsize = AtomicUsize::new(0);
+
+fn build_refused_twice_then_live(
+    ids: &mut IdSource,
+    infer: SharedInfer,
+) -> Result<LivePipeline<'_, SharedInfer>, String> {
+    if BUILD_REFUSALS.fetch_add(1, Ordering::SeqCst) < 2 {
+        return Err(String::from("refused"));
+    }
+    build_live(ids, infer)
 }
 
 fn wait_until(what: &str, within: Duration, mut ready: impl FnMut() -> bool) {
@@ -356,6 +390,56 @@ fn a_build_that_panics_reports_the_runner_as_panicked() {
             producer: ThreadEnd::Finished,
         },
         "a panicking runner drops its done sender"
+    );
+}
+
+#[test]
+fn a_failing_pipeline_build_publishes_failed_and_retries_after_the_back_off() {
+    BUILD_REFUSALS.store(0, Ordering::SeqCst);
+    let threads = CameraThreads::start(
+        "failing-build",
+        CameraThreadSettings {
+            frame_timeout: Duration::from_millis(500),
+            backoff: SHORT_FATAL,
+        },
+        spec(),
+        FrameClock::replay(Duration::ZERO, spec()),
+        move || {
+            shell(&format!(
+                "while :; do head -c {BIG_FRAME_BYTES} /dev/zero; done"
+            ))
+        },
+        &missing_worker_link(),
+        build_refused_twice_then_live,
+    )
+    .expect("the camera threads start");
+    let mut handle = threads.handle();
+    wait_until("the first build failure", Duration::from_secs(5), || {
+        handle.status.borrow().state == CameraState::Failed
+    });
+    let failed_at = Instant::now();
+    wait_until(
+        "the third build to run and recover",
+        Duration::from_secs(5),
+        || {
+            let status = *handle.status.borrow_and_update();
+            status.state == CameraState::Running && status.runner_restarts == 2
+        },
+    );
+    assert!(
+        failed_at.elapsed() >= Duration::from_millis(30),
+        "the retry must wait out the injected back-off, recovered after {:?}",
+        failed_at.elapsed()
+    );
+    threads.stop();
+    let report = threads.join(Duration::from_secs(5));
+    assert_eq!(
+        report,
+        JoinReport {
+            runner: ThreadEnd::Finished,
+            producer: ThreadEnd::Finished,
+        },
+        "a recovered camera stops on stop"
     );
 }
 
