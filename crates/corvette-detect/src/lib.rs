@@ -39,7 +39,7 @@ pub use config::{
     MIN_PAD_PIXELS, MIN_POLYGON_COORD, MIN_POLYGON_POINTS, POINT_COORDINATES, REQUIRED_AREA_KEYS,
     REQUIRED_CAMERA_KEYS, REQUIRED_CONFIG_KEYS, Violation, convert_item, syntax_error,
 };
-pub use config_change::{Change, classify};
+pub use config_change::classify;
 pub use config_file::render;
 pub use config_schema::{SCHEMA_ID, SCHEMA_JSON};
 pub use engine::{EngineError, LabelError, Labels, WorkerClient};

@@ -1,6 +1,6 @@
-//! Pins which configuration changes apply live and which need a restart.
+//! Pins the restart-required paths a classification answers; every change is restart-required.
 
-use corvette_detect::{Change, Config, classify};
+use corvette_detect::{Config, classify};
 
 fn config(text: &str) -> Config {
     Config::from_toml(text).expect("valid configuration")
@@ -45,34 +45,25 @@ fn base() -> String {
 
 #[test]
 fn identical_configs_change_nothing() {
-    assert_eq!(
-        classify(&config(&base()), &config(&base())),
-        Change::default()
-    );
+    assert!(classify(&config(&base()), &config(&base())).is_empty());
 }
 
 #[test]
 fn worker_socket_change_requires_restart() {
     let proposed = config(&base().replace("a.sock", "z.sock"));
-    let change = classify(&config(&base()), &proposed);
-    assert_eq!(change.restart_required, ["worker_socket"]);
-    assert!(change.live.is_empty());
+    assert_eq!(classify(&config(&base()), &proposed), ["worker_socket"]);
 }
 
 #[test]
 fn labels_change_requires_restart() {
     let proposed = config(&base().replace("b.txt", "z.txt"));
-    let change = classify(&config(&base()), &proposed);
-    assert_eq!(change.restart_required, ["labels"]);
-    assert!(change.live.is_empty());
+    assert_eq!(classify(&config(&base()), &proposed), ["labels"]);
 }
 
 #[test]
 fn deadline_change_requires_restart() {
     let proposed = config(&base().replace("deadline_ms = 5000", "deadline_ms = 4000"));
-    let change = classify(&config(&base()), &proposed);
-    assert_eq!(change.restart_required, ["deadline_ms"]);
-    assert!(change.live.is_empty());
+    assert_eq!(classify(&config(&base()), &proposed), ["deadline_ms"]);
 }
 
 #[test]
@@ -81,86 +72,87 @@ fn all_global_fields_change_in_declared_order() {
         .replace("a.sock", "z.sock")
         .replace("b.txt", "z.txt")
         .replace("deadline_ms = 5000", "deadline_ms = 4000");
-    let change = classify(&config(&base()), &config(&text));
     assert_eq!(
-        change.restart_required,
+        classify(&config(&base()), &config(&text)),
         ["worker_socket", "labels", "deadline_ms"]
     );
-    assert!(change.live.is_empty());
 }
 
 #[test]
-fn camera_fps_change_is_live() {
+fn camera_fps_change_requires_restart() {
     let proposed = config(&base().replace("fps = 5", "fps = 6"));
-    let change = classify(&config(&base()), &proposed);
-    assert_eq!(change.live, ["front"]);
-    assert!(change.restart_required.is_empty());
+    assert_eq!(classify(&config(&base()), &proposed), ["cameras[front]"]);
 }
 
 #[test]
-fn camera_area_change_is_live() {
+fn camera_area_change_requires_restart() {
     let proposed = config(&base().replace("[0.1, 0.2]", "[0.2, 0.3]"));
-    let change = classify(&config(&base()), &proposed);
-    assert_eq!(change.live, ["front"]);
-    assert!(change.restart_required.is_empty());
+    assert_eq!(classify(&config(&base()), &proposed), ["cameras[front]"]);
 }
 
 #[test]
-fn camera_confirm_threshold_change_is_live() {
+fn camera_confirm_threshold_change_requires_restart() {
     let proposed = config(&base().replace("confirm_threshold = 0.7", "confirm_threshold = 0.8"));
-    let change = classify(&config(&base()), &proposed);
-    assert_eq!(change.live, ["front"]);
-    assert!(change.restart_required.is_empty());
+    assert_eq!(classify(&config(&base()), &proposed), ["cameras[front]"]);
 }
 
 #[test]
-fn two_changed_cameras_live_in_proposed_order() {
+fn two_changed_cameras_in_proposed_order() {
     let text = base()
         .replace("fps = 5", "fps = 6")
         .replace("fps = 10", "fps = 12");
-    let change = classify(&config(&base()), &config(&text));
-    assert_eq!(change.live, ["front", "yard"]);
-    assert!(change.restart_required.is_empty());
+    assert_eq!(
+        classify(&config(&base()), &config(&text)),
+        ["cameras[front]", "cameras[yard]"]
+    );
 }
 
 #[test]
 fn removed_camera_requires_restart() {
-    let change = classify(&config(&base()), &config(&format!("{GLOBAL}{FRONT}")));
-    assert_eq!(change.restart_required, ["cameras[yard]"]);
-    assert!(change.live.is_empty());
+    assert_eq!(
+        classify(&config(&base()), &config(&format!("{GLOBAL}{FRONT}"))),
+        ["cameras[yard]"]
+    );
 }
 
 #[test]
 fn added_camera_requires_restart() {
     let text = format!("{GLOBAL}{FRONT}{YARD}{BACK}");
-    let change = classify(&config(&base()), &config(&text));
-    assert_eq!(change.restart_required, ["cameras[back]"]);
-    assert!(change.live.is_empty());
+    assert_eq!(
+        classify(&config(&base()), &config(&text)),
+        ["cameras[back]"]
+    );
 }
 
 #[test]
 fn removed_camera_is_reported_before_added_camera() {
-    let change = classify(&config(&base()), &config(&format!("{GLOBAL}{FRONT}{BACK}")));
-    assert_eq!(change.restart_required, ["cameras[yard]", "cameras[back]"]);
-    assert!(change.live.is_empty());
+    assert_eq!(
+        classify(&config(&base()), &config(&format!("{GLOBAL}{FRONT}{BACK}"))),
+        ["cameras[yard]", "cameras[back]"]
+    );
 }
 
 #[test]
 fn reordered_cameras_change_nothing() {
-    let change = classify(&config(&base()), &config(&format!("{GLOBAL}{YARD}{FRONT}")));
-    assert_eq!(change, Change::default());
+    assert!(classify(&config(&base()), &config(&format!("{GLOBAL}{YARD}{FRONT}"))).is_empty());
 }
 
 #[test]
-fn combined_change_splits_restart_and_live_paths() {
-    let text = format!(
-        "{}{}",
-        base()
-            .replace("deadline_ms = 5000", "deadline_ms = 4000")
-            .replace("fps = 5", "fps = 6"),
-        BACK
+fn changed_removed_and_added_cameras_pinned_order() {
+    let text = format!("{}{}{}", GLOBAL, FRONT.replace("fps = 5", "fps = 6"), BACK);
+    assert_eq!(
+        classify(&config(&base()), &config(&text)),
+        ["cameras[yard]", "cameras[front]", "cameras[back]"]
     );
-    let change = classify(&config(&base()), &config(&text));
-    assert_eq!(change.restart_required, ["deadline_ms", "cameras[back]"]);
-    assert_eq!(change.live, ["front"]);
+}
+
+#[test]
+fn global_change_precedes_camera_change() {
+    let text = base()
+        .replace("deadline_ms = 5000", "deadline_ms = 4000")
+        .replace("fps = 5", "fps = 6");
+    assert_eq!(
+        classify(&config(&base()), &config(&text)),
+        ["deadline_ms", "cameras[front]"]
+    );
 }
