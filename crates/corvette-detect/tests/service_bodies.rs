@@ -140,6 +140,7 @@ const fn status(state: CameraState) -> CameraStatus {
             frames_inference_failed: 2,
         },
         source_gaps: 3,
+        frames_dropped: 0,
     }
 }
 

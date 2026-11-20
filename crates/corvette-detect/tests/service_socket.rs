@@ -91,6 +91,7 @@ const fn running(frames_in: u64) -> CameraStatus {
             frames_inference_failed: 0,
         },
         source_gaps: 0,
+        frames_dropped: 0,
     }
 }
 
@@ -341,6 +342,7 @@ async fn status_lists_cameras_in_registered_order_and_tracks_the_published_statu
             frames_inference_failed: 5,
         },
         source_gaps: 1,
+        frames_dropped: 0,
     };
     let b = live_handle(unavailable, None);
     let socket = start(
@@ -377,6 +379,7 @@ async fn status_lists_cameras_in_registered_order_and_tracks_the_published_statu
             frames_inference_failed: 7,
         },
         source_gaps: 6,
+        frames_dropped: 0,
     };
     status_tx.send(updated).expect("send status");
     let response = request(&socket, &get(STATUS)).await;
