@@ -10,7 +10,7 @@ use crate::backoff::Policy;
 use crate::clock::FrameClock;
 use crate::ffmpeg::FrameSpec;
 use crate::reader::{Frame, FrameReader, ReadError};
-use crate::supervised::{Status, Supervised};
+use crate::supervised::{Status, Supervised, SupervisedStopper};
 
 pub const STREAM_QUEUE_CAPACITY: usize = 1;
 
@@ -39,6 +39,19 @@ impl std::fmt::Display for SourceError {
 }
 
 impl std::error::Error for SourceError {}
+
+/// A handle that stops a frame source and wakes a blocked reader, usable from any thread.
+#[derive(Clone, Debug)]
+pub struct SourceStopper {
+    supervisor: SupervisedStopper,
+}
+
+impl SourceStopper {
+    /// Ends the supervised child, so a blocked [`FrameSource::next_frame`] returns.
+    pub fn stop(&self) {
+        self.supervisor.stop();
+    }
+}
 
 #[derive(Debug)]
 pub struct FrameSource {
@@ -145,6 +158,13 @@ impl FrameSource {
                     }
                 }
             }
+        }
+    }
+
+    #[must_use]
+    pub fn stopper(&self) -> SourceStopper {
+        SourceStopper {
+            supervisor: self.supervisor.stopper(),
         }
     }
 

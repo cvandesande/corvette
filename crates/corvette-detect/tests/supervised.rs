@@ -1,6 +1,6 @@
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use corvette_detect::{Policy, Status, Supervised};
@@ -192,4 +192,40 @@ async fn the_start_hook_runs_before_each_start_is_reported() {
         status.starts
     );
     assert_eq!(0, missing_stdout.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn a_stopper_stop_kills_the_child_and_ends_respawns_even_when_called_twice() {
+    let pids = Arc::new(AtomicU32::new(0));
+    let hook_pids = Arc::clone(&pids);
+    let supervisor = Supervised::spawn(
+        "stopped".to_string(),
+        SMALL,
+        || shell("sleep 30"),
+        move |child: &mut Child| {
+            if let Some(pid) = child.id() {
+                hook_pids.store(pid, Ordering::SeqCst);
+            }
+        },
+    );
+    let mut rx = supervisor.subscribe();
+    wait_for(&mut rx, |status| status.running).await;
+    let pid = pids.load(Ordering::SeqCst);
+    let _killer = ProcessKiller(pid);
+    assert!(proc_alive(pid), "pid {pid} should be running");
+    assert_eq!(1, supervisor.status().starts);
+    let stopper = supervisor.stopper();
+    stopper.stop();
+    stopper.stop();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while proc_alive(pid) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!proc_alive(pid), "pid {pid} survived the stopper stop");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        1,
+        supervisor.status().starts,
+        "the supervisor respawned after stop"
+    );
 }

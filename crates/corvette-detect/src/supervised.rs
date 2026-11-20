@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use tokio::process::{Child, Command};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 
 use crate::backoff::{Backoff, Policy};
 use crate::log_event;
@@ -17,6 +17,17 @@ pub struct Status {
     pub spawn_failures: u64,
     pub running: bool,
     pub last_exit: Option<ExitStatus>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SupervisedStopper {
+    supervisor: AbortHandle,
+}
+
+impl SupervisedStopper {
+    pub fn stop(&self) {
+        self.supervisor.abort();
+    }
 }
 
 #[derive(Debug)]
@@ -93,6 +104,13 @@ impl Supervised {
     #[must_use]
     pub fn subscribe(&self) -> watch::Receiver<Status> {
         self.status.clone()
+    }
+
+    #[must_use]
+    pub fn stopper(&self) -> SupervisedStopper {
+        SupervisedStopper {
+            supervisor: self.supervisor.abort_handle(),
+        }
     }
 }
 

@@ -207,3 +207,39 @@ fn the_error_messages_name_the_cause() {
     let error: &dyn std::error::Error = &SourceError::Stopped;
     assert_eq!("the frame source stopped", error.to_string());
 }
+
+#[tokio::test]
+async fn a_stop_ends_a_blocked_next_frame_and_later_calls_are_stopped() {
+    let mut source = replay_source("exec sleep 30");
+    let stopper = source.stopper();
+    let blocked = tokio::spawn(async move { (source.next_frame().await, source) });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    stopper.stop();
+    let (first, mut source) = tokio::time::timeout(Duration::from_secs(2), blocked)
+        .await
+        .expect("the blocked next_frame did not return within 2s")
+        .expect("the reader task panicked");
+    assert!(first.is_err(), "a silent child produced a frame: {first:?}");
+    let error = tokio::time::timeout(Duration::from_secs(2), source.next_frame())
+        .await
+        .expect("the second next_frame did not return within 2s")
+        .expect_err("a stopped source returned a frame");
+    assert!(matches!(error, SourceError::Stopped));
+}
+
+#[tokio::test]
+async fn a_stop_before_any_next_frame_leaves_calls_stopped() {
+    let mut source = replay_source("exec sleep 30");
+    let stopper = source.stopper();
+    stopper.stop();
+    let first = tokio::time::timeout(Duration::from_secs(2), source.next_frame())
+        .await
+        .expect("next_frame did not return within 2s")
+        .expect_err("a silent child produced a frame");
+    assert!(matches!(first, SourceError::Stopped), "first: {first:?}");
+    let error = tokio::time::timeout(Duration::from_secs(2), source.next_frame())
+        .await
+        .expect("the second next_frame did not return within 2s")
+        .expect_err("a stopped source returned a frame");
+    assert!(matches!(error, SourceError::Stopped));
+}
