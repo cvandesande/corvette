@@ -139,6 +139,7 @@ pub struct WorkerClient {
     stream: UnixStream,
     request_deadline_ms: u32,
     next_id: u64,
+    last_worker_ms: u32,
 }
 
 impl WorkerClient {
@@ -161,6 +162,7 @@ impl WorkerClient {
             stream,
             request_deadline_ms,
             next_id: 0,
+            last_worker_ms: 0,
         })
     }
 
@@ -189,10 +191,20 @@ impl WorkerClient {
             return Err(EngineError::IdMismatch { sent: id, received });
         }
         match reply {
-            Reply::Rows { rows, .. } => Ok(rows),
+            Reply::Rows {
+                rows, worker_ms, ..
+            } => {
+                self.last_worker_ms = worker_ms;
+                Ok(rows)
+            }
             Reply::Error { code, .. } => Err(EngineError::Worker(format!("{code:?}"))),
             Reply::Raw { .. } | Reply::Health { .. } => Err(EngineError::UnexpectedReply),
         }
+    }
+
+    #[must_use]
+    pub const fn last_worker_ms(&self) -> u32 {
+        self.last_worker_ms
     }
 }
 

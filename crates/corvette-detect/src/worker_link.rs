@@ -23,6 +23,7 @@ pub struct WorkerLink {
     client: Option<WorkerClient>,
     connected_at: Option<Instant>,
     retry_at: Instant,
+    last_worker_ms: u32,
 }
 
 impl WorkerLink {
@@ -35,6 +36,7 @@ impl WorkerLink {
             client: None,
             connected_at: None,
             retry_at: Instant::now(),
+            last_worker_ms: 0,
         }
     }
 
@@ -72,6 +74,9 @@ impl WorkerLink {
             }
         };
         let outcome = client.infer(tensor);
+        if outcome.is_ok() {
+            self.last_worker_ms = client.last_worker_ms();
+        }
         if matches!(&outcome, Ok(_) | Err(EngineError::Worker(_))) {
             self.client = Some(client);
         } else {
@@ -83,6 +88,11 @@ impl WorkerLink {
             self.retry_at = now + self.backoff.after_run(ran_for);
         }
         outcome
+    }
+
+    #[must_use]
+    pub const fn last_worker_ms(&self) -> u32 {
+        self.last_worker_ms
     }
 }
 

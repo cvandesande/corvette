@@ -139,6 +139,39 @@ fn infer_returns_rows_and_reports_connected() {
 }
 
 #[test]
+fn the_link_reports_the_last_worker_time_and_an_error_reply_keeps_it() {
+    let dir = temp_dir("workervals");
+    let socket = dir.join("worker.sock");
+    let listener = UnixListener::bind(&socket).expect("bind");
+    serve_replies_once(
+        listener,
+        vec![
+            Reply::Rows {
+                id: 0,
+                worker_ms: 37,
+                rows: vec![row(1, 0.9)],
+            },
+            Reply::Error {
+                id: 1,
+                code: ErrorCode::DeadlineOverrun,
+            },
+        ],
+    );
+    let mut link = WorkerLink::new(socket, Duration::from_secs(5), DEFAULT_POLICY);
+    let tensor = sample_tensor();
+    assert_eq!(link.last_worker_ms(), 0);
+    link.infer(&tensor).expect("rows reply");
+    assert_eq!(link.last_worker_ms(), 37);
+    let outcome = link.infer(&tensor);
+    assert!(
+        matches!(outcome, Err(EngineError::Worker(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(link.last_worker_ms(), 37);
+    fs::remove_dir_all(&dir).expect("remove temp dir");
+}
+
+#[test]
 fn a_closed_connection_is_an_io_error_and_no_new_connect_until_due() {
     let dir = temp_dir("closed");
     let socket = dir.join("worker.sock");

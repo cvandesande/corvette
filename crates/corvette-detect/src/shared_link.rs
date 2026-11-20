@@ -66,21 +66,22 @@ impl SharedInfer {
 impl Infer for SharedInfer {
     fn infer(&mut self, tensor: &[u8; TENSOR_BYTES]) -> Result<Vec<Row>, EngineError> {
         let waited_at = Instant::now();
-        let (lock_wait, roundtrip, outcome) = {
+        let (lock_wait, roundtrip, worker_ms, outcome) = {
             let mut link = lock_link(&self.link);
             let lock_wait = waited_at.elapsed();
             let started = Instant::now();
             let outcome = link.infer(tensor);
             let roundtrip = started.elapsed();
+            let worker_ms = outcome.is_ok().then_some(link.last_worker_ms());
             drop(link);
-            (lock_wait, roundtrip, outcome)
+            (lock_wait, roundtrip, worker_ms, outcome)
         };
-        self.timings.record(lock_wait, roundtrip);
+        self.timings.record(lock_wait, roundtrip, worker_ms);
         outcome
     }
 }
 
-// Relaxed loads are enough: the two counters are independent diagnostics and nothing else synchronises through them.
+// Relaxed loads are enough: the three counters are independent diagnostics and nothing else synchronises through them.
 #[derive(Clone, Debug, Default)]
 pub struct LinkTimings {
     counters: Arc<LinkCounters>,
@@ -88,28 +89,37 @@ pub struct LinkTimings {
 
 #[derive(Debug, Default)]
 struct LinkCounters {
-    lock_wait_ms: AtomicU32,
-    roundtrip_ms: AtomicU32,
+    lock_wait: AtomicU32,
+    roundtrip: AtomicU32,
+    worker: AtomicU32,
 }
 
 impl LinkTimings {
-    fn record(&self, lock_wait: Duration, roundtrip: Duration) {
+    fn record(&self, lock_wait: Duration, roundtrip: Duration, worker_ms: Option<u32>) {
         self.counters
-            .lock_wait_ms
+            .lock_wait
             .store(saturating_ms(lock_wait), Ordering::Relaxed);
         self.counters
-            .roundtrip_ms
+            .roundtrip
             .store(saturating_ms(roundtrip), Ordering::Relaxed);
+        if let Some(worker_ms) = worker_ms {
+            self.counters.worker.store(worker_ms, Ordering::Relaxed);
+        }
     }
 
     #[must_use]
     pub fn lock_wait_ms(&self) -> u32 {
-        self.counters.lock_wait_ms.load(Ordering::Relaxed)
+        self.counters.lock_wait.load(Ordering::Relaxed)
     }
 
     #[must_use]
     pub fn roundtrip_ms(&self) -> u32 {
-        self.counters.roundtrip_ms.load(Ordering::Relaxed)
+        self.counters.roundtrip.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn worker_ms(&self) -> u32 {
+        self.counters.worker.load(Ordering::Relaxed)
     }
 }
 

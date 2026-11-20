@@ -150,6 +150,38 @@ fn infer_returns_the_rows_a_worker_replies() {
 }
 
 #[test]
+fn a_rows_reply_sets_the_last_worker_time_and_an_error_reply_keeps_it() {
+    let dir = temp_dir("workervals");
+    let socket = dir.join("worker.sock");
+    let listener = UnixListener::bind(&socket).expect("bind");
+    serve_replies(
+        listener,
+        vec![
+            Reply::Rows {
+                id: 0,
+                worker_ms: 37,
+                rows: vec![row(1, 0.9)],
+            },
+            Reply::Error {
+                id: 1,
+                code: ErrorCode::DeadlineOverrun,
+            },
+        ],
+    );
+    let mut client = WorkerClient::connect(&socket, Duration::from_secs(5)).expect("connect");
+    assert_eq!(client.last_worker_ms(), 0);
+    client.infer(&sample_tensor()).expect("rows reply");
+    assert_eq!(client.last_worker_ms(), 37);
+    let outcome = client.infer(&sample_tensor());
+    assert!(
+        matches!(outcome, Err(EngineError::Worker(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(client.last_worker_ms(), 37);
+    fs::remove_dir_all(&dir).expect("remove temp dir");
+}
+
+#[test]
 fn an_error_reply_becomes_worker_with_the_code_message() {
     let dir = temp_dir("error");
     let socket = dir.join("worker.sock");

@@ -42,7 +42,12 @@ fn read_request_id(stream: &mut UnixStream) -> Option<u64> {
     }
 }
 
-fn serve_one_connection(listener: UnixListener, delay: Duration, accepts: Arc<AtomicU32>) {
+fn serve_one_connection(
+    listener: UnixListener,
+    delay: Duration,
+    worker_ms: u32,
+    accepts: Arc<AtomicU32>,
+) {
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept");
         accepts.fetch_add(1, Ordering::Relaxed);
@@ -52,7 +57,7 @@ fn serve_one_connection(listener: UnixListener, delay: Duration, accepts: Arc<At
             }
             let reply = Reply::Rows {
                 id,
-                worker_ms: 1,
+                worker_ms,
                 rows: vec![row(3, 0.75)],
             };
             let bytes = reply.encode().expect("reply encodes");
@@ -86,7 +91,7 @@ fn two_handles_answer_every_request_over_one_connection() {
     let socket = dir.join("worker.sock");
     let listener = UnixListener::bind(&socket).expect("bind");
     let accepts = Arc::new(AtomicU32::new(0));
-    serve_one_connection(listener, Duration::ZERO, Arc::clone(&accepts));
+    serve_one_connection(listener, Duration::ZERO, 1, Arc::clone(&accepts));
     let shared = SharedLink::new(WorkerLink::new(
         socket,
         Duration::from_secs(5),
@@ -138,7 +143,7 @@ fn the_waiting_handle_measures_its_lock_wait_outside_its_roundtrip() {
     let socket = dir.join("worker.sock");
     let listener = UnixListener::bind(&socket).expect("bind");
     let accepts = Arc::new(AtomicU32::new(0));
-    serve_one_connection(listener, Duration::from_millis(60), Arc::clone(&accepts));
+    serve_one_connection(listener, Duration::from_millis(60), 1, Arc::clone(&accepts));
     let shared = SharedLink::new(WorkerLink::new(
         socket,
         Duration::from_secs(5),
@@ -228,12 +233,37 @@ fn a_panicking_handle_leaves_another_handle_working() {
 }
 
 #[test]
+fn a_handle_records_the_worker_time_the_last_request_carried() {
+    let dir = temp_dir("workervals");
+    let socket = dir.join("worker.sock");
+    let listener = UnixListener::bind(&socket).expect("bind");
+    let accepts = Arc::new(AtomicU32::new(0));
+    serve_one_connection(listener, Duration::ZERO, 41, Arc::clone(&accepts));
+    let shared = SharedLink::new(WorkerLink::new(
+        socket,
+        Duration::from_secs(5),
+        DEFAULT_POLICY,
+    ));
+    let mut first = shared.infer_handle();
+    let first_timings = first.timings();
+    assert_eq!(first_timings.worker_ms(), 0);
+    first.infer(&sample_tensor()).expect("first rows");
+    assert_eq!(first_timings.worker_ms(), 41);
+    let mut second = shared.infer_handle();
+    let second_timings = second.timings();
+    second.infer(&sample_tensor()).expect("second rows");
+    assert_eq!(second_timings.worker_ms(), 41);
+    assert_eq!(first_timings.worker_ms(), 41);
+    fs::remove_dir_all(&dir).expect("remove temp dir");
+}
+
+#[test]
 fn state_is_unavailable_before_and_connected_after_a_request() {
     let dir = temp_dir("state");
     let socket = dir.join("worker.sock");
     let listener = UnixListener::bind(&socket).expect("bind");
     let accepts = Arc::new(AtomicU32::new(0));
-    serve_one_connection(listener, Duration::ZERO, Arc::clone(&accepts));
+    serve_one_connection(listener, Duration::ZERO, 1, Arc::clone(&accepts));
     let shared = SharedLink::new(WorkerLink::new(
         socket,
         Duration::from_secs(5),
