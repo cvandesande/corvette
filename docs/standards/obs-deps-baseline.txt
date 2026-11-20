@@ -49,6 +49,7 @@ corvette-api
 corvette-api-server
 corvette-detect
 corvette-detect-proto
+corvette-detect-service
 corvette-detect-tools
 corvette-detect-worker
 corvette-media-bridge

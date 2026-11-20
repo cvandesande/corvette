@@ -463,6 +463,14 @@ name = "corvette-detect-proto"
 version = "0.1.0"
 
 [[package]]
+name = "corvette-detect-service"
+version = "0.1.0"
+dependencies = [
+ "corvette-detect",
+ "tokio",
+]
+
+[[package]]
 name = "corvette-detect-tools"
 version = "0.1.0"
 dependencies = [

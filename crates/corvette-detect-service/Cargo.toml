@@ -1,0 +1,14 @@
+[package]
+name = "corvette-detect-service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The detection service process: command line, startup order and serve loop"
+
+[dependencies]
+corvette-detect = { path = "../corvette-detect" }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
+
+[lints]
+workspace = true
