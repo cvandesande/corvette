@@ -766,15 +766,14 @@ where `code` is a stable machine value to branch on and `message` describes the 
   returned.
 - `unhealthy` (`503`): the health route found failing parts; `message` names each one.
 
-The detection configuration routes answer six more codes, in their problem-details
+The detection configuration routes answer five more codes, in their problem-details
 bodies:
 
 - `forbidden` (`403`): a `PUT` from a role that may not write.
 - `stale_revision` (`412`): `If-Match` does not match the current revision.
 - `revision_required` (`428`): a `PUT` arrived without `If-Match`.
 - `invalid_config` (`422`): the submitted value failed validation.
-- `apply_failed` (`503`): the running configuration refused the change.
-- `apply_incomplete` (`500`): the pipelines took the change; the file write failed.
+- `apply_incomplete` (`500`): the file write failed and nothing changed.
 
 `GET /corvette/api/v1/health` answers `200` `{"database":"ok","config":"ok"}` when both
 probes pass, and `503` `unhealthy` naming each failing part otherwise. The database probe
@@ -1195,11 +1194,26 @@ Per camera the entry carries:
 
 - `state`: one of `running` (frames arriving and inferred), `waiting_for_frames` (detection
   on with no frames arriving), `inference_unavailable` (frames arriving while the worker
-  cannot infer) or `off` (detection switched off for the camera).
-- the frames per second arriving and the frames per second processed;
-- the worker's own inference time beside the request's round-trip time, both in milliseconds,
-  so slow inference and slow transport read differently;
-- the worker's state and its restart count.
+  cannot infer), `off` (detection switched off for the camera) or `failed` (the camera's
+  pipeline met a fatal error and the service is restarting that camera's pipeline; the
+  entry shows `failed` through the back-off wait and returns to `running` when a fresh
+  pipeline runs).
+- `fps_in` and `fps_processed`: the frames per second arriving and the frames per second
+  processed;
+- `frames_dropped`: frames a newer one replaced before the pipeline took them;
+- `runner_restarts`: the service's count of restarts of this camera's pipeline, kept in
+  the service across those restarts;
+- `worker_state` and `worker_restarts`: the worker's state and its restart count;
+- `worker_ms` and `roundtrip_ms`: the worker's own inference time beside the request's
+  round-trip time, both in milliseconds, so slow inference and slow transport read
+  differently; `lock_wait_ms`: the time a request waited for the shared worker link,
+  measured beside `roundtrip_ms` and excluded from it;
+- `running_config_is_saved`: whether the revision the running configuration loaded at
+  start is still the saved file's current one.
+
+The numbers `fps_in`, `fps_processed`, `frames_dropped`, `runner_restarts`,
+`worker_restarts`, `worker_ms`, `roundtrip_ms` and `lock_wait_ms` are each subject to the
+corpus replay run.
 
 The detection service serves both routes on a local socket and the API server relays them,
 so the API server stays the single public door (decided 2026-11-08). Both routes are
@@ -1219,8 +1233,9 @@ The route accepts `GET` only, with the identity rules "Corvette's own API lives 
 
 Three routes read, dry-run and change the saved detection configuration. The API server
 relays all three to the detection service over its local socket, and the detection
-service validates, applies and writes the file; the file lives with the service that
-loads it, and Corvette's process is its only writer (issue 32, decided 2026-11-19).
+service validates and writes the file; an applied configuration takes effect at the next
+service restart; the file lives with the service that loads it, and Corvette's process is
+its only writer (issue 32, decided 2026-11-19).
 
 `GET /corvette/api/v1/detection/config` answers the saved configuration as JSON in the
 loader's value form — the shape `Config::to_value` produces
@@ -1236,17 +1251,18 @@ and runs the loader's complete rule set against it — `Config::from_value`, eve
 behind one entry point (`config.rs:87-90`) — while changing nothing: no file write, no
 pipeline touch. Success answers `200`
 `{"valid":true,"restart_required":[<restart-required paths>]}` — every changed path in
-the proposal that takes effect only after a restart, including the path of an added or
-removed camera; the array is empty when the proposal changes none — and
+the proposal — every change takes effect only after a restart — naming each added,
+removed or changed camera as `cameras[<name>]` and each changed top-level field as its
+key; the array is empty when the proposal changes none — and
 failure answers `422` `invalid_config` with every violation listed together (the error
 body below).
 
 `PUT /corvette/api/v1/detection/config` replaces the configuration as a whole: the body
 is the entire desired value form and the request carries, in `If-Match`, the revision it
 was based on. Success answers `200`
-`{"revision":"<new>","live":[<camera names>],"restart_required":[<restart-required paths>]}`,
-naming exactly what took effect live and every changed path that takes effect only after
-a restart, including the path of an added or removed camera, and the body's
+`{"revision":"<new>","live":[],"restart_required":[<restart-required paths>]}`: every
+change is restart-required, `live` answers empty, and `restart_required` names every
+changed path, each added, removed or changed camera as `cameras[<name>]`; the body's
 `revision` is the token for the next `If-Match`. The apply `200` carries the new
 revision in its body only and sends no `ETag` header: RFC 9110 §9.3.4 forbids a
 validator in a successful `PUT` response unless the saved representation is identical
@@ -1275,10 +1291,11 @@ right closure while the schema is one plain object.
 
 ## The configuration routes answer with these codes and one error body
 
-- `200` — read succeeded; validate passed; apply took effect.
+- `200` — read succeeded; validate passed; the apply wrote the saved file; the applied
+  configuration takes effect at the next restart of the detection service.
 - `400` `bad_request` — the body is missing, not JSON, not a JSON object, or over the
-  service's body-size bound; the bound exists so a stalled or oversized writer cannot
-  grow the service unboundedly, and is sized for a hand-authored detection
+  service's body-size bound, 256 KiB; the bound exists so a stalled or oversized writer
+  cannot grow the service unboundedly, and is sized for a hand-authored detection
   configuration (tens of cameras).
 - `401` `unauthorized` — no or empty `Remote-User`, exactly as every route today.
 - `403` `forbidden` — the `PUT` configuration route and the caller's role may not write.
@@ -1290,11 +1307,9 @@ right closure while the schema is one plain object.
 - `503` `detection_unavailable` — the detection service could not be reached over its
   local socket; the same condition and code the two detection routes already define
   ("The detection service could not be reached.").
-- `503` `apply_failed` — validation passed and the revision matched, but the running
-  configuration refused the change (a camera's new pipeline would not come up); the old
-  configuration keeps running untouched and the `detail` member names the camera.
-- `500` `apply_incomplete` — the pipelines took the change and the file write failed;
-  the running configuration is ahead of the file and its revision.
+- `500` `apply_incomplete` — the file write failed and nothing took effect: the saved
+  file and the running configuration stand unchanged — a write failure changes
+  nothing — and `500` `apply_incomplete` names the file that did not land.
 
 Errors are RFC 9457 problem details, `application/problem+json`, carrying `type`,
 `title`, `status`, `detail` and `instance`, plus two extension members: the stable
@@ -1327,17 +1342,15 @@ problem details appear only on responses a route reaches. The two existing detec
 routes answer `{"code","message"}` today; moving them to problem details is a later
 step of its own, and until then their `503` `detection_unavailable` keeps that body.
 
-## An apply runs in one numbered order and takes effect per camera
+## An apply runs in one numbered order and takes effect at the next service restart
 
-Issue 32 decided that per-camera settings apply live and global ones wait for a restart.
+Every configuration change takes effect at the next service restart (human decision
+2026-11-20); an apply touches no running pipeline.
 
-ASSUMPTION (to confirm): restart-required means the three top-level fields
-`worker_socket`, `labels` and `deadline_ms` — the first two map the issue's words
-("worker socket, model") onto keys that exist; `deadline_ms` joins them because the
-engine binds the socket path and the request deadline together at connect
-(`crates/corvette-detect/src/engine.rs:147-162`). Every field under a camera entry
-applies live. The response shape is stable across changes to the set, and a restart
-stays out of band: an operator or their platform performs it, never a route.
+Restart-required is the whole configuration: the three top-level fields and every field
+of every camera entry — added, removed or changed — take effect at the next service
+restart. The response shape is stable across changes to the set, and a restart stays
+out of band: an operator or their platform performs it, never a route.
 
 One apply runs this order. The API server performs step 1 and relays; the detection
 service performs steps 3 to 7:
@@ -1348,22 +1361,28 @@ service performs steps 3 to 7:
 3. parse and validate the body with the same rule set the dry run uses;
 4. take the service's single apply lock;
 5. check the revision against the saved file; a missing `If-Match` answers `428` here;
-6. bring the changed pipelines up;
+6. classify the change: every camera and top-level change takes effect at the next service restart;
 7. write the file last.
 
 Concurrent applies serialise on the lock at step 4: the second reaches step 5 only after
 the first finishes and then sees the first's new revision, which closes the
-check-versus-write race. Any refusal before step 7 writes nothing. The new
-configuration takes effect only as a whole, and a failed bring-up keeps the previous
-configuration running for every camera and answers `503` `apply_failed`.
+check-versus-write race. An apply that refuses writes nothing and touches no running
+pipeline; the new configuration takes effect only as a whole, at the next service
+restart.
 
-On a live change, each camera whose entry changed gets a fresh detect pipeline: the
-replacement is started and the old one stops after it, so the camera is never left
-without detection mid-change. That pipeline restart restarts the camera's tracking;
-object ids begin anew for it. Cameras whose entries did not change keep running
-untouched. Adding or removing a camera answers `restart_required` naming that camera,
-until the frame-delivery registry that feeds the pipeline — fixed at startup today
-(`crates/corvette-media-bridge/src/restream_provider.rs:39-40`) — can change at runtime.
+An apply never touches a running pipeline: each camera keeps its pipeline until the
+service restarts, so no apply leaves a camera without detection. A camera's pipeline is built fresh at service
+start; that pipeline start restarts the camera's tracking and object ids begin anew.
+Adding, removing or changing a camera answers `restart_required` naming `cameras[<name>]`;
+the frame-delivery registry is fixed at startup
+(`crates/corvette-media-bridge/src/restream_provider.rs:39-40`) and is built by the media
+bridge: `MultiCameraProvider::register` fixes the camera set at startup
+(`crates/corvette-media-bridge/src/restream_provider.rs:37-47`), so a camera added to the
+file is served frames only once the media bridge also restarts; a detection-service
+restart alone leaves it outside the registry, the media bridge and the detection service
+being separate processes (`docs/design/detection.md:139-148`,
+`docs/design/architecture.md:131`); whether anything restarts the media bridge together
+with the detection service is UNVERIFIED.
 
 ASSUMPTION (to confirm): the saved file declares TOML 1.1.0 as its version. The write
 edits the file in place with `toml_edit`, so comments, key order and spacing outside
@@ -1378,13 +1397,13 @@ dotted-key order stable. The current `toml_edit` release reported upstream
 (`0.25.19+spec-1.1.0`) is UNVERIFIED as current; the lock is settled: `Cargo.lock:3404`
 pins `toml_edit 0.25.13+spec-1.1.0`, which already parses and writes to the 1.1.0 spec.
 
-A file-write failure at step 7 — disk full, permissions — leaves the running
-configuration ahead of the file and its revision. The answer is the distinct code
-`apply_incomplete` (`500`), naming that the file did not land, and the service logs it. The
-divergence is bounded: a later successful apply saves the new content, and a restart
-loads the saved file and brings the pipelines back to it, dropping the unsaved change.
-Because the revision is the file's hash, the file and revision stand unchanged and the
-next apply at the current revision passes step 5.
+A file-write failure changes nothing: the saved file and the running configuration stand
+unchanged, the answer is `500` `apply_incomplete` naming that the file did not land, and
+the service logs it. Because the revision is the file's hash, the saved file and its
+revision stand unchanged and the next apply at the current revision passes step 5. The
+running configuration is what the service loaded at start; a successful apply makes the
+saved file newer than it by design, and the next service restart loads that file — a
+saved change is never dropped.
 
 A successful apply records one structured audit entry in the service's log: who
 (`Remote-User`), when, the previous and new revision, and a summary of the changed
@@ -1423,16 +1442,20 @@ every UI write with no revision guard between two writers (`PUT /api/config/set`
 whole-file and no-guard details are UNVERIFIED against the deployed revision), and it
 can restart broadly on a saved change while flagging restart-required fields in its
 editor (docs-sourced; the one-camera-change-restarts-the-system pain is its issue
-#16492 — UNVERIFIED against the deployed revision).
+#16492 — UNVERIFIED against the deployed revision). Corvette's detection adopts the
+restart-on-camera-change model by decision (2026-11-20), at the detection service's own
+restart.
 
 No response ever carries a stream address or a credential. The configuration format has
 no field for one and none is ever added, in the file or in any API or MCP result
-(issue 32). A camera entry names its source by the camera name alone — the same name the
-restream provider uses to dispatch frames (`restream_provider.rs:20`) — so a
+(issue 32). A camera entry names its source by the camera name alone — the base of the
+restream provider's stream name `<name>_sub` — so a
 configuration that is correct never contains a place an address or password could sit,
 and the read response, the validate body and every tool result share that one shape.
-Where stream addresses live — the delivery layer's own configuration — is outside this
-contract.
+The detection service dials the sub-stream `rtsp://<restream-address>/<name>_sub` with
+the camera's `name`; the address comes from the service flag `--restream-address
+HOST:PORT`. Where stream addresses live — the delivery layer's own configuration — is
+outside this contract.
 
 ## The MCP server administers the detection configuration
 
@@ -1450,8 +1473,14 @@ sources and stand as direction, not settled text. The spec revision relied on is
 current 2026-07-28.
 
 It exposes the four intent-level tools issue 32 named; a fifth is not justified, because
-the four close the read-validate-apply-check loop, and endpoint-mirroring is the
-documented anti-pattern (relayed through secondary sources). Each tool's `inputSchema`
+the four close the read-validate-apply-check loop as far as the saved file reaches:
+`read_detection_config` reads the saved configuration and its revision,
+`validate_detection_config` validates the proposal, `apply_detection_config` writes the
+file, then a further `read_detection_config` reads the configuration back to confirm the
+saved revision; `read_detection_status` answers detection state only — whether the
+running configuration is the saved one is the status route's `running_config_is_saved`
+member — and every applied change takes effect at the next service restart.
+Endpoint-mirroring is the documented anti-pattern (relayed through secondary sources). Each tool's `inputSchema`
 and `outputSchema` are JSON Schema documents derived from the route bodies above:
 
 - `read_detection_config` — input `{}`; output `{config, revision}`: the read route's
@@ -1462,7 +1491,9 @@ and `outputSchema` are JSON Schema documents derived from the route bodies above
 - `apply_detection_config` — input `{config, revision}`; the server places the revision
   on `If-Match` and puts the configuration in the body, the route's whole value form;
   output is the apply response `{revision, live,
-  restart_required}`. The one tool that changes state. Annotated `destructiveHint` and
+  restart_required}` as the `PUT` route defines it: `live` answers empty,
+  `restart_required` names every changed path, and the change takes effect at the next
+  service restart. The one tool that changes state. Annotated `destructiveHint` and
   `idempotentHint`, and the server requests a form-mode elicitation confirmation before
   each apply; elicitation is a client capability, so the request reaches a human when
   the client implements it. Annotations are hints and clients must treat them as
