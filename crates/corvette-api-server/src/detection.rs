@@ -17,7 +17,9 @@ pub const DETECTION_SOCKET_ENV: &str = "CORVETTE_DETECTION_SOCKET";
 
 pub(crate) const DETECTION_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
-pub(crate) const DETECTION_TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
+// Stays inside `CONNECTION_TIMEOUT` so the contract 503 is always writable before the
+// caller connection's own deadline closes it out from under the answer.
+pub(crate) const DETECTION_TOTAL_TIMEOUT: Duration = Duration::from_secs(4);
 
 pub(crate) const MAX_ANSWER_BYTES: usize = 1024 * 1024;
 
@@ -248,4 +250,15 @@ pub(crate) async fn status(config: &ConfigSource, role: &str, relay: &Relay) -> 
         serde_json::to_vec(&serde_json::json!({ "cameras": cameras }))
             .expect("status body serializes"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DETECTION_TOTAL_TIMEOUT;
+    use crate::CONNECTION_TIMEOUT;
+
+    #[test]
+    fn relay_total_timeout_leaves_the_connection_deadline_room_to_answer() {
+        assert!(DETECTION_TOTAL_TIMEOUT < CONNECTION_TIMEOUT);
+    }
 }

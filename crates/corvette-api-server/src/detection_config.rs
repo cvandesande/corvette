@@ -51,6 +51,11 @@ fn backend_request(request: &Request, user: &str) -> Vec<u8> {
     out
 }
 
+/// A control byte in a value is a line break to a lenient reader down the line.
+fn has_control_byte(text: &str) -> bool {
+    text.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
+}
+
 struct BackendAnswer {
     status: String,
     content_type: String,
@@ -107,6 +112,19 @@ fn parse_answer(answer: &[u8]) -> Result<BackendAnswer, String> {
         Some(length) if length == body.len() => {}
         Some(_) => return Err("detection body does not match its declared length".to_owned()),
         None => return Err("detection answer carries no Content-Length".to_owned()),
+    }
+    if has_control_byte(reason) {
+        return Err("detection reason phrase contains a control byte".to_owned());
+    }
+    for (label, value) in [
+        ("Content-Type", &content_type),
+        ("Cache-Control", &cache_control),
+        ("ETag", &etag),
+        ("Allow", &allow),
+    ] {
+        if value.as_deref().is_some_and(has_control_byte) {
+            return Err(format!("detection {label} contains a control byte"));
+        }
     }
     Ok(BackendAnswer {
         status: if reason.is_empty() {

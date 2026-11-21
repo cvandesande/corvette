@@ -497,3 +497,126 @@ async fn nonsense_stall_and_early_close_are_all_unavailable_and_the_server_survi
     assert_eq!(status, "HTTP/1.0 200 OK", "the server kept serving");
     env.finish();
 }
+
+#[tokio::test]
+async fn role_strings_shorter_or_longer_than_admin_are_forbidden_on_the_write() {
+    let env = Env::build("role-exact", true, None, None);
+    for role in ["Admin", "ADMIN", "administrator"] {
+        let role_header = format!("Remote-Role: {role}");
+        let (status, _, body) = send(
+            &env,
+            "PUT",
+            CONFIG_PATH,
+            &[USER, role_header.as_str()],
+            Some("{\"a\":1}"),
+        )
+        .await;
+        assert_eq!(status, "HTTP/1.0 403 Forbidden", "role {role:?}");
+        let text = String::from_utf8_lossy(&body).into_owned();
+        assert!(text.contains("\"code\":\"forbidden\""), "role {role:?}");
+        assert_eq!(env.backend().connections(), 0, "role {role:?} relayed");
+    }
+    env.finish();
+}
+
+#[tokio::test]
+async fn control_byte_remote_user_reaches_the_backend_and_its_401_passes_through() {
+    let env = Env::build("control-user", true, None, None);
+    let answer = b"{\"code\":\"unauditable\",\"detail\":\"the caller is not auditable\"}";
+    canned(
+        &env,
+        "401 Unauthorized",
+        "application/problem+json",
+        &[],
+        answer,
+    )
+    .await;
+    let user = "Remote-User: door-front\nX-Injected: yes";
+    let (status, _, got_body) = send(
+        &env,
+        "PUT",
+        CONFIG_PATH,
+        &[
+            user,
+            ADMIN,
+            "If-Match: \"sha256:aa\"",
+            "Content-Type: application/json",
+        ],
+        Some("{\"a\":1}"),
+    )
+    .await;
+    assert_eq!(status, "HTTP/1.0 401 Unauthorized");
+    assert_eq!(got_body, answer.to_vec());
+    let seen = env.backend().seen();
+    let relayed: String = seen.iter().map(|seen| seen.1.clone()).collect();
+    assert!(
+        relayed.contains("Remote-User: door-front\nX-Injected: yes\r\n"),
+        "relay wrote: {relayed}"
+    );
+    env.finish();
+}
+
+#[tokio::test]
+async fn socket_unset_config_route_answers_the_unavailable_answer() {
+    let env = Env::build("socket-unset", false, None, None);
+    let (status, headers, body) = send(&env, "GET", CONFIG_PATH, &[USER], None).await;
+    assert_unavailable(&status, &headers, &body);
+    env.finish();
+}
+
+#[tokio::test]
+async fn non_get_on_a_pre_existing_route_keeps_its_unchanged_refusal_body() {
+    let env = Env::build("pre-change-400", true, None, None);
+    let (status, _, got_body) = send(&env, "DELETE", "/corvette/api/v1/health", &[], None).await;
+    assert_eq!(status, "HTTP/1.0 400 Bad Request");
+    assert_eq!(
+        got_body,
+        br#"{"code":"bad_request","message":"method DELETE is not GET"}"#.as_slice()
+    );
+    env.finish();
+}
+
+fn etag_head(tag: &str) -> Vec<u8> {
+    http_answer("200 OK", "application/json", &[tag], b"{}")
+}
+
+#[tokio::test]
+async fn control_bytes_in_the_backend_head_answer_unavailable_without_reaching_the_caller() {
+    let env = Env::build("head-control-bytes", true, None, None);
+    let heads = [
+        etag_head("ETag: \"v\nX-Injected: y\""),
+        etag_head("ETag: \"v\0X-Injected: y\""),
+        http_answer("200 OK\nX-Injected: y", "application/json", &[], b"{}"),
+        http_answer("200 OK\0X-Injected: y", "application/json", &[], b"{}"),
+    ];
+    for head in heads {
+        env.backend().set(Answer::Bytes(head)).await;
+        let (status, headers, got_body) = send(&env, "GET", CONFIG_PATH, &[USER], None).await;
+        assert_unavailable(&status, &headers, &got_body);
+        assert!(!format!("{headers:?}").contains("njected"));
+    }
+    env.finish();
+}
+
+// The declared length decides the refusal; a body under the 212992-byte default socket
+// buffer completes the caller's write before the drain starts, making this deterministic.
+#[tokio::test]
+async fn over_bound_declaration_drains_buffered_bytes_so_the_refusal_arrives_whole() {
+    let env = Env::build("over-bound-drain", true, None, None);
+    let body = "x".repeat(50 * 1024);
+    let out = format!(
+        "PUT {CONFIG_PATH} HTTP/1.1\r\n{USER}\r\n{ADMIN}\r\nContent-Length: 300000\r\n\r\n{body}"
+    );
+    let mut stream = UnixStream::connect(&env.socket).await.expect("connect");
+    stream.write_all(out.as_bytes()).await.expect("write");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("read to end");
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    assert!(
+        text.starts_with("HTTP/1.0 400 Bad Request\r\n"),
+        "head: {text}"
+    );
+    assert!(text.contains("body over the 262144 byte bound"));
+    assert_eq!(env.backend().connections(), 0);
+    env.finish();
+}

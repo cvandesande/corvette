@@ -314,8 +314,14 @@ async fn read_route_respond(
         }
         request.body = body;
     }
+    let over_bound = request
+        .body_len
+        .is_some_and(|len| len > detection_config::MAX_BODY_BYTES);
     let response = route(&request, context).await;
     write_response(stream, &response).await?;
+    if over_bound {
+        drain_buffered(stream);
+    }
     Ok(Outcome::Responded)
 }
 
@@ -487,7 +493,7 @@ fn parse_request_line(line: &[u8]) -> Result<(&str, &str, &str), String> {
     let target_ok = parts[1].starts_with('/');
     let body_method = matches!(parts[0], "PUT" | "POST");
     if parts[0] != "GET" && !(body_method && target_ok && detection_config::serves(parts[1])) {
-        return Err(format!("method {} is not accepted", parts[0]));
+        return Err(format!("method {} is not GET", parts[0]));
     }
     if parts[2] != "HTTP/1.0" && parts[2] != "HTTP/1.1" {
         return Err(format!("version {} is not HTTP/1.0 or HTTP/1.1", parts[2]));
