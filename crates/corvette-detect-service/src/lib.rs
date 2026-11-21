@@ -4,7 +4,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read as _, Write as _};
-use std::os::unix::fs::FileTypeExt as _;
+use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -394,8 +394,8 @@ pub fn run(args: &[OsString], env_socket: Option<&OsStr>) -> ExitCode {
         .collect();
     let listener = match bind_status_socket(&options.socket) {
         Ok(listener) => listener,
-        Err(reason) => {
-            log_event("service", "socket-refused", reason);
+        Err((event, reason)) => {
+            log_event("service", event, reason);
             return ExitCode::from(EXIT_STARTUP);
         }
     };
@@ -654,12 +654,23 @@ fn worker_command(
     }
 }
 
-fn bind_status_socket(path: &Path) -> Result<tokio::net::UnixListener, String> {
-    let std_listener = claim_socket(path)?;
+// The error names the event the caller logs, so one failure emits one line.
+fn bind_status_socket(path: &Path) -> Result<tokio::net::UnixListener, (&'static str, String)> {
+    let std_listener = claim_socket(path).map_err(|reason| ("socket-refused", reason))?;
     let listener = std_listener
         .set_nonblocking(true)
         .and_then(|()| tokio::net::UnixListener::from_std(std_listener))
-        .map_err(|error| format!("{} could not enter the runtime: {error}", path.display()))?;
+        .map_err(|error| {
+            (
+                "socket-refused",
+                format!("{} could not enter the runtime: {error}", path.display()),
+            )
+        })?;
+    // The API server's uid needs write on the socket file; same mode as corvette-api-server's bind.
+    if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o666)) {
+        remove_socket(path);
+        return Err(("socket-mode-failed", format!("{}: {error}", path.display())));
+    }
     log_event(
         "service",
         "socket-bound",

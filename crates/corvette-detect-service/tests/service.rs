@@ -250,6 +250,48 @@ fn ordinary_file_at_the_socket_path_is_refused_untouched() {
 }
 
 #[test]
+fn socket_file_mode_is_0666_under_a_restrictive_umask() {
+    let dir = temp_dir("socket-mode");
+    write_labels(&dir);
+    write_config(&dir);
+    let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
+    let ffmpeg = executable(&dir, "fake-ffmpeg", "#!/bin/sh\nexec sleep 5\n");
+    let socket = dir.join("service.sock");
+    // The file's helpers cannot set a umask without unsafe, so sh sets it before exec.
+    let quote = |p: &Path| format!("'{}'", p.display());
+    let script = format!(
+        "umask 077 && exec {BIN} --config {config} --socket {socket} --ffmpeg {ffmpeg} \
+         --restream-address 127.0.0.1:8554 --worker {worker} --worker-param {param} \
+         --worker-bin {bindir} --worker-max-deadline-ms 5000 --worker-health-socket {health}",
+        config = quote(&dir.join("config.toml")),
+        socket = quote(&socket),
+        ffmpeg = quote(&ffmpeg),
+        worker = quote(&worker),
+        param = quote(&dir.join("param")),
+        bindir = quote(&dir.join("bin")),
+        health = quote(&dir.join("health.sock")),
+    );
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .env_remove("CORVETTE_DETECTION_SOCKET")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let service = Running { child, socket };
+    wait_until("a status of 200", || {
+        try_get(&service.socket, STATUS).is_some_and(|found| found.0 == 200)
+    });
+    let mode = fs::metadata(&service.socket).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o666,
+        "the socket is not world-connectable under umask 077"
+    );
+}
+
+#[test]
 fn unpublished_camera_answers_objects_unknown() {
     let service = start("objects");
     let mut answer: Option<(u16, String)> = None;
