@@ -2,6 +2,8 @@
 //! so `Remote-User`/`Remote-Role` cannot be spoofed from outside it.
 
 use corvette_api::{ActivityResponse, ErrorBody, Health};
+use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::future::Future;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -15,6 +17,7 @@ pub mod clip_link;
 pub mod config;
 pub mod database;
 pub mod detection;
+pub mod detection_config;
 pub mod status;
 pub mod still;
 
@@ -46,32 +49,43 @@ pub(crate) fn log_event(unit: &str, event: &str, detail: impl std::fmt::Display)
 }
 
 struct Request {
+    method: String,
     path: String,
     query: String,
+    body: Vec<u8>,
+    body_len: Option<usize>,
+    if_match: Option<String>,
+    content_type: Option<String>,
     remote_user: Option<String>,
     remote_role: String,
 }
 
 struct Response {
-    status: &'static str,
+    status: Cow<'static, str>,
     body: Vec<u8>,
-    content_type: &'static str,
+    content_type: Cow<'static, str>,
+    cache_control: Cow<'static, str>,
+    extra: Vec<(Cow<'static, str>, String)>,
 }
 
 impl Response {
     const fn json(status: &'static str, body: Vec<u8>) -> Self {
         Self {
-            status,
+            status: Cow::Borrowed(status),
             body,
-            content_type: "application/json",
+            content_type: Cow::Borrowed("application/json"),
+            cache_control: Cow::Borrowed("no-store"),
+            extra: Vec::new(),
         }
     }
 
     const fn jpeg(body: Vec<u8>) -> Self {
         Self {
-            status: "200 OK",
+            status: Cow::Borrowed("200 OK"),
             body,
-            content_type: "image/jpeg",
+            content_type: Cow::Borrowed("image/jpeg"),
+            cache_control: Cow::Borrowed("no-store"),
+            extra: Vec::new(),
         }
     }
 }
@@ -264,8 +278,8 @@ async fn read_route_respond(
     stream: &mut UnixStream,
     context: &ConnectionContext,
 ) -> std::io::Result<Outcome> {
-    let block = match read_header_block(stream).await {
-        HeaderRead::Complete(block) => block,
+    let (block, body_prefix) = match read_header_block(stream).await {
+        HeaderRead::Complete(block, prefix) => (block, prefix),
         HeaderRead::TooLarge => {
             let response = bad_request("request header block exceeded the size limit");
             write_response(stream, &response).await?;
@@ -274,16 +288,39 @@ async fn read_route_respond(
         }
         HeaderRead::Closed => return Ok(Outcome::ClosedEarly),
     };
-    let response = match parse_request(&block) {
-        Ok(request) => route(&request, context).await,
-        Err(reason) => bad_request(&reason),
+    let mut request = match parse_request(&block) {
+        Ok(request) => request,
+        Err(reason) => {
+            write_response(stream, &bad_request(&reason)).await?;
+            return Ok(Outcome::Responded);
+        }
     };
+    if let Some(length) = request
+        .body_len
+        .filter(|length| *length > 0 && *length <= detection_config::MAX_BODY_BYTES)
+    {
+        let mut body = body_prefix;
+        body.truncate(length);
+        let missing = length - body.len();
+        if missing > 0 {
+            let mut tail = vec![0_u8; missing];
+            match stream.read_exact(&mut tail).await {
+                Ok(_read) => body.extend_from_slice(&tail),
+                Err(err) => {
+                    log_event("http", "request-read-error", err);
+                    return Ok(Outcome::ClosedEarly);
+                }
+            }
+        }
+        request.body = body;
+    }
+    let response = route(&request, context).await;
     write_response(stream, &response).await?;
     Ok(Outcome::Responded)
 }
 
 enum HeaderRead {
-    Complete(Vec<u8>),
+    Complete(Vec<u8>, Vec<u8>),
     TooLarge,
     Closed,
 }
@@ -293,8 +330,10 @@ async fn read_header_block(stream: &mut UnixStream) -> HeaderRead {
     let mut chunk = [0_u8; MAX_REQUEST_HEADER_BYTES];
     loop {
         if let Some(end) = find_header_end(&buffer) {
+            // Body bytes can already sit in the buffer after the terminator.
+            let prefix = buffer.split_off(end + 4);
             buffer.truncate(end);
-            return HeaderRead::Complete(buffer);
+            return HeaderRead::Complete(buffer, prefix);
         }
         // Reads are sized to the room left, so a terminator past the limit is never seen.
         let remaining = MAX_REQUEST_HEADER_BYTES - buffer.len();
@@ -333,18 +372,41 @@ pub(crate) fn split_header_lines(block: &[u8]) -> Vec<&[u8]> {
     lines
 }
 
+/// The body length one `Content-Length` line announces; overflow counts as over the bound.
+fn declared_body_length(value: &[u8]) -> Result<usize, String> {
+    let digits = utf8(value).ok_or_else(|| "Content-Length is not valid UTF-8".to_owned())?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("Content-Length must be a plain number for a request with a body".to_owned());
+    }
+    Ok(digits.parse::<usize>().unwrap_or(usize::MAX))
+}
+
+/// Stores a single-occurrence header value; the second line of the same name is an error.
+fn capture_once(seen: &mut Option<String>, value: &[u8], label: &str) -> Result<(), String> {
+    if seen.is_some() {
+        return Err(format!("more than one {label} header"));
+    }
+    let text = utf8(value).ok_or_else(|| format!("{label} value is not valid UTF-8"))?;
+    *seen = Some(text.to_owned());
+    Ok(())
+}
+
 fn parse_request(block: &[u8]) -> Result<Request, String> {
     let mut lines = split_header_lines(block).into_iter();
     let request_line = lines
         .next()
         .filter(|line| !line.is_empty())
         .ok_or_else(|| "missing request line".to_owned())?;
-    let (path, query) = parse_request_line(request_line)?;
+    let (method, path, query) = parse_request_line(request_line)?;
+    let body_method = matches!(method, "PUT" | "POST");
 
     let mut remote_user: Option<String> = None;
     let mut remote_role: Option<String> = None;
     let mut user_count = 0_u32;
     let mut role_count = 0_u32;
+    let mut body_len: Option<usize> = None;
+    let mut if_match: Option<String> = None;
+    let mut content_type: Option<String> = None;
 
     for line in lines {
         // A leading space or tab is an obs-fold continuation; never accepted.
@@ -365,10 +427,17 @@ fn parse_request(block: &[u8]) -> Result<Request, String> {
                 return Err("Transfer-Encoding is not accepted".to_owned());
             }
             b"content-length" => {
-                if value != b"0" {
+                if body_method {
+                    if body_len.is_some() {
+                        return Err("more than one Content-Length header".to_owned());
+                    }
+                    body_len = Some(declared_body_length(value)?);
+                } else if value != b"0" {
                     return Err("Content-Length other than 0 is not accepted".to_owned());
                 }
             }
+            b"if-match" => capture_once(&mut if_match, value, "If-Match")?,
+            b"content-type" => capture_once(&mut content_type, value, "Content-Type")?,
             b"remote-user" => {
                 user_count += 1;
                 if remote_user.is_none() {
@@ -396,22 +465,29 @@ fn parse_request(block: &[u8]) -> Result<Request, String> {
         return Err("more than one Remote-Role header".to_owned());
     }
     Ok(Request {
+        method: method.to_owned(),
         path: path.to_owned(),
         query: query.to_owned(),
+        body: Vec::new(),
+        body_len,
+        if_match,
+        content_type,
         remote_user,
         remote_role: remote_role.unwrap_or_default(),
     })
 }
 
-fn parse_request_line(line: &[u8]) -> Result<(&str, &str), String> {
+fn parse_request_line(line: &[u8]) -> Result<(&str, &str, &str), String> {
     let line =
         std::str::from_utf8(line).map_err(|_| "request line is not valid UTF-8".to_owned())?;
     let parts: Vec<&str> = line.split(' ').collect();
     if parts.len() != 3 {
         return Err("request line is not `GET <target> HTTP/1.0`".to_owned());
     }
-    if parts[0] != "GET" {
-        return Err(format!("method {} is not GET", parts[0]));
+    let target_ok = parts[1].starts_with('/');
+    let body_method = matches!(parts[0], "PUT" | "POST");
+    if parts[0] != "GET" && !(body_method && target_ok && detection_config::serves(parts[1])) {
+        return Err(format!("method {} is not accepted", parts[0]));
     }
     if parts[2] != "HTTP/1.0" && parts[2] != "HTTP/1.1" {
         return Err(format!("version {} is not HTTP/1.0 or HTTP/1.1", parts[2]));
@@ -420,10 +496,11 @@ fn parse_request_line(line: &[u8]) -> Result<(&str, &str), String> {
     if !target.starts_with('/') {
         return Err("request target does not start with /".to_owned());
     }
-    Ok(match target.split_once('?') {
+    let path_and_query = match target.split_once('?') {
         Some((path, query)) => (path, query),
         None => (target, ""),
-    })
+    };
+    Ok((parts[0], path_and_query.0, path_and_query.1))
 }
 
 pub(crate) fn split_at_byte(bytes: &[u8], byte: u8) -> Option<(&[u8], &[u8])> {
@@ -500,13 +577,16 @@ async fn route(request: &Request, context: &ConnectionContext) -> Response {
         status_state,
         ..
     } = context;
-    let Some(_user) = request
+    let Some(user) = request
         .remote_user
         .as_deref()
         .filter(|user| !user.is_empty())
     else {
         return unauthorized();
     };
+    if detection_config::serves(&request.path) {
+        return detection_config::forward(request, user, detection).await;
+    }
     if let Some(segment) = still::camera_segment(&request.path) {
         return still_picture(request, config, segment, clock, status_state).await;
     }
@@ -816,12 +896,17 @@ fn drain_buffered(stream: &UnixStream) {
 }
 
 async fn write_response(stream: &mut UnixStream, response: &Response) -> std::io::Result<()> {
-    let header = format!(
-        "HTTP/1.0 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+    let mut header = format!(
+        "HTTP/1.0 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\n",
         response.status,
         response.content_type,
-        response.body.len()
+        response.body.len(),
+        response.cache_control
     );
+    for (name, value) in &response.extra {
+        let _ = write!(header, "{name}: {value}\r\n");
+    }
+    header.push_str("Connection: close\r\n\r\n");
     stream.write_all(header.as_bytes()).await?;
     stream.write_all(&response.body).await?;
     stream.shutdown().await

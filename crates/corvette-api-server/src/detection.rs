@@ -19,7 +19,7 @@ pub(crate) const DETECTION_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) const DETECTION_TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
 
-const MAX_ANSWER_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_ANSWER_BYTES: usize = 1024 * 1024;
 
 /// Where the detection service is; `timeouts` `None` means the default consts.
 #[derive(Clone, Debug, Default)]
