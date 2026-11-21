@@ -38,8 +38,9 @@ flowchart TB
     seg --> ingest
     stages <-->|"crops and deadlines, rows or errors"| serve
     track --> api["API server<br/>read-only Corvette routes"]
-    kubelet["Kubelet"] -->|"liveness probe"| health
-    kubelet -.->|"restarts the container"| wrk
+    kubelet["Kubelet"] -->|"liveness probe"| svc
+    kubelet -.->|"restarts the container"| svc
+    svc -->|"supervises, restarts on exit"| wrk
 ```
 
 **The inference worker** is one process. It owns the ncnn Vulkan device, loads
@@ -76,7 +77,7 @@ deadline. A failure travels as a typed error reply. The crate holds pure encode
 and decode functions; the worker and its client own the read and write loops.
 
 The detection service starts without waiting for the worker and reports
-`inference-unavailable` until the worker answers.
+`inference_unavailable` until the worker answers.
 
 ## Worker lifecycle
 
@@ -90,6 +91,8 @@ stateDiagram-v2
     Serving --> Exited: serving socket fails
     Serving --> Exited: deadline overrun
     Serving --> Exited: liveness probe fails
+    Serving --> Exited: service shutdown
+    Exited --> Starting: service restarts the worker with back-off
     Exited --> Starting: kubelet restart
 ```
 
@@ -108,12 +111,21 @@ stateDiagram-v2
 - **Deadlines.** Each inference request carries a deadline. The operator-set cap
   bounds it, and a watchdog thread enforces the result. A health request carries
   a deadline field that the worker does not use.
-- **Liveness.** The worker binary has a probe mode that sends a health request
-  to the health socket and exits with a status. The container's liveness probe
-  runs it. A hung engine call ends in the watchdog's exit, so health stays a
-  plain "is it answering" check.
-- **Restart.** The worker is its container's main process, and the kubelet
-  restarts the container after an exit or a failed probe.
+- **Liveness.** The container's probes run the service's probe mode:
+  `corvette-detect-service --probe --socket PATH` exits `0` on HTTP `200` for
+  the status route. The worker keeps its own probe mode,
+  `corvette-detect-worker --probe --health-socket PATH`, for direct checks
+  against the health socket. Worker liveness rests on process exit plus the
+  watchdog: the service consults the worker's health socket nowhere in its
+  probes. A worker hung outside an engine call makes each camera's inference
+  request time out, and the status body then shows `inference_unavailable`
+  (`worker_link.rs:65`, `camera_runner.rs:163-165`); nothing restarts that
+  worker and the probe still answers `200`. A hung engine call ends in the
+  watchdog's exit, so health stays a plain "is it answering" check.
+- **Restart.** The detection service spawns the worker under `Supervised` and
+  restarts it with the `DEFAULT_POLICY` back-off after an exit; the container
+  keeps running across the worker's restart. The status body reports
+  `worker_state` and `worker_restarts`.
 
 ## Rules both sides keep
 
@@ -137,15 +149,15 @@ is the compiler or a test.
 Adopted 2026-11-08 at the design gate for issue #6, under the human's
 delegation, except a decision that names its own date and adopter.
 
-- **Process split.** The worker is its own container and the kubelet is its
-  supervisor. A restart replaces the process and so the Vulkan instance, the
-  GPU stack stays in the worker's image, and supervision is the kubelet's
-  alone. The split moves to one container with an in-service supervisor
-  only if the kubelet's restart back-off proves too slow in a test window.
-  Revised by the human on 2026-11-16, amendment pending: the pod runs three
-  containers (serving, relay, detection) and the detection service supervises
-  the worker as its child. Until the amendment lands, this paragraph and the
-  worker's container, probe and kubelet-restart statements are superseded.
+- **Process split.** Adopted 2026-11-16 by the human, "for now"; extended
+  2026-11-20. The design is three concerns: serving (Corvette's API and UI),
+  media (transport) and detection. A container runtime — the kubelet on
+  Kubernetes — supervises the containers. The detection container's main
+  process is `corvette-detect-service`; it runs `corvette-detect-worker` as
+  its supervised child and one `ffmpeg` decode child per camera, each decode
+  child supervised by that camera's source. A worker exit restarts the worker
+  inside the container. Today's code decodes on CPU, and GPU decode joins
+  where the user chooses it; that path stays open design in [Open](#open).
 - **Detection configuration.** Corvette owns its detection configuration file.
   A converter seeds it once from a snapshot of the current backing's resolved
   configuration (Frigate), and the file is Corvette's from then on. Comparison
@@ -171,8 +183,9 @@ delegation, except a decision that names its own date and adopter.
 ## Open
 
 - **The GPU decode path.** The pod's GPU claim sits on one container, today the
-  current backing's, so in the target GPU decode would move the ffmpeg children
-  into the worker's container and change the process split. That design is
+  current backing's. When built, GPU decode lands inside the detection
+  container, which holds the worker and the ffmpeg children together.
+  That design is
   written before the option is built, and the service ships CPU decode only
   until then.
 
@@ -188,6 +201,8 @@ delegation, except a decision that names its own date and adopter.
 | Request deadline rule and cap | `serve` in `corvette-detect-worker/src/serve.rs` and its deadline tests |
 | Health listener behaviour | `serve_health` in `corvette-detect-worker/src/health.rs` |
 | ncnn option settings | `configure_options` in `corvette-ncnn/src/net.rs` |
+| Service flags, probe mode and exit codes | the `USAGE` text and `EXIT_*` constants in `corvette-detect-service/src/lib.rs`; `tests/args.rs` and `tests/service.rs` check the behaviour |
+| Worker restart back-off | `DEFAULT_POLICY` in `corvette-detect/src/backoff.rs` |
 | Route shapes | [API and media contracts](api-contracts.md), once the routes are specified |
 | Status and open work | [issue #6][detection-issue] |
 
