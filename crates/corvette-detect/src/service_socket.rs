@@ -1,5 +1,6 @@
-//! Minimal HTTP/1.1 over a Unix socket, one request per connection: one camera's objects answer and the detection status answer; the API server maps any non-`200` here to its public `503 detection_unavailable`.
+//! Minimal HTTP/1.1 over a Unix socket, one request per connection: one camera's objects answer, the detection status answer, and the three configuration routes; the API server maps any non-`200` here to its public `503 detection_unavailable`.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +15,9 @@ use crate::supervised::Status;
 
 const MAX_HEAD_BYTES: usize = 8192;
 const STATUS_PATH: &str = "/corvette/api/v1/detection/status";
+const CONFIG_PATH: &str = "/corvette/api/v1/detection/config";
+const VALIDATE_PATH: &str = "/corvette/api/v1/detection/config/validate";
+const SCHEMA_PATH: &str = "/corvette/api/v1/detection/config/schema";
 const CAMERAS_PREFIX: &str = "/corvette/api/v1/cameras/";
 const OBJECTS_SUFFIX: &str = "/objects";
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -28,6 +32,7 @@ pub enum CameraEntry {
 pub struct ServiceState {
     cameras: Vec<(String, CameraEntry)>,
     worker: Option<watch::Receiver<Status>>,
+    config_path: Option<PathBuf>,
 }
 
 impl ServiceState {
@@ -36,6 +41,7 @@ impl ServiceState {
         Self {
             cameras,
             worker: None,
+            config_path: None,
         }
     }
 
@@ -45,6 +51,18 @@ impl ServiceState {
             worker: Some(worker),
             ..self
         }
+    }
+
+    #[must_use]
+    pub fn with_config_path(self, config_path: PathBuf) -> Self {
+        Self {
+            config_path: Some(config_path),
+            ..self
+        }
+    }
+
+    pub(crate) fn config_path(&self) -> Option<&Path> {
+        self.config_path.as_deref()
     }
 }
 
@@ -76,13 +94,15 @@ enum HeadRead {
     Closed,
 }
 
-async fn read_head(stream: &mut UnixStream) -> Result<Vec<u8>, HeadRead> {
+/// Reads the request head and any body bytes already buffered with it; the body prefix follows the terminator.
+async fn read_head(stream: &mut UnixStream) -> Result<(Vec<u8>, Vec<u8>), HeadRead> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 1024];
     loop {
         if let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            let prefix = buffer.split_off(end + 4);
             buffer.truncate(end);
-            return Ok(buffer);
+            return Ok((buffer, prefix));
         }
         // Reads are sized to the room left, so a terminator past the limit is never seen.
         let remaining = MAX_HEAD_BYTES - buffer.len();
@@ -102,32 +122,87 @@ async fn read_head(stream: &mut UnixStream) -> Result<Vec<u8>, HeadRead> {
 }
 
 async fn answer_one(mut stream: UnixStream, state: &ServiceState, read_timeout: Duration) {
-    let response = match tokio::time::timeout(read_timeout, read_head(&mut stream)).await {
+    let Some(response) = answer(&mut stream, state, read_timeout).await else {
+        return;
+    };
+    if let Err(err) = write_response(&mut stream, &response).await {
+        crate::log_event("service", "response-write-error", err);
+    }
+}
+
+/// Parses one request and prepares its answer; the validation route needs its body first, and `None` ends the connection unanswered.
+async fn answer(
+    stream: &mut UnixStream,
+    state: &ServiceState,
+    read_timeout: Duration,
+) -> Option<String> {
+    let (head, prefix) = match tokio::time::timeout(read_timeout, read_head(stream)).await {
         Err(_elapsed) => {
             crate::log_event(
                 "service",
                 "request-timeout",
                 format!("head did not arrive within {read_timeout:?}"),
             );
-            return;
+            return None;
         }
         Ok(Err(HeadRead::TooLarge)) => {
-            drain_buffered(&stream);
-            http_response(
+            drain_buffered(stream);
+            return Some(http_response(
                 431,
                 "Request Header Fields Too Large",
                 "{\"reason\":\"head_too_large\"}",
-                false,
-            )
+                None,
+            ));
         }
-        Ok(Err(HeadRead::Closed)) => return,
-        Ok(Ok(head)) => match parse_request_line(&head) {
-            None => http_response(400, "Bad Request", "{\"reason\":\"bad_request\"}", false),
-            Some((method, target)) => route(state, method, target),
-        },
+        Ok(Err(HeadRead::Closed)) => return None,
+        Ok(Ok(head_and_prefix)) => head_and_prefix,
     };
-    if let Err(err) = write_response(&mut stream, &response).await {
-        crate::log_event("service", "response-write-error", err);
+    let Some((method, target)) = parse_request_line(&head) else {
+        return Some(http_response(
+            400,
+            "Bad Request",
+            "{\"reason\":\"bad_request\"}",
+            None,
+        ));
+    };
+    match route(state, method, target, &head) {
+        RouteAnswer::Done(response) => Some(response),
+        RouteAnswer::ValidateBody { length } => read_body(stream, length, &prefix, read_timeout)
+            .await
+            .map(|body| state.validate_answer(target, &body)),
+    }
+}
+
+/// Reads exactly `length` body bytes, taking what the head read buffered first; `None` on timeout or early close.
+async fn read_body(
+    stream: &mut UnixStream,
+    length: usize,
+    prefix: &[u8],
+    read_timeout: Duration,
+) -> Option<Vec<u8>> {
+    let mut body: Vec<u8> = prefix.iter().copied().take(length).collect();
+    let missing = length - body.len();
+    if missing == 0 {
+        return Some(body);
+    }
+    let mut tail = vec![0_u8; missing];
+    match tokio::time::timeout(read_timeout, stream.read_exact(&mut tail)).await {
+        Err(_elapsed) => {
+            crate::log_event(
+                "service",
+                "body-timeout",
+                format!("body did not arrive within {read_timeout:?}"),
+            );
+            None
+        }
+        Ok(Err(err)) => {
+            crate::log_event("service", "body-read-error", err);
+            None
+        }
+        Ok(Ok(_)) => {
+            body.extend_from_slice(&tail);
+            Some(body)
+        }
     }
 }
 
@@ -151,35 +226,62 @@ fn parse_request_line(head: &[u8]) -> Option<(&str, &str)> {
     Some((method, target))
 }
 
-fn route(state: &ServiceState, method: &str, target: &str) -> String {
+enum RouteAnswer {
+    Done(String),
+    ValidateBody { length: usize },
+}
+
+fn route(state: &ServiceState, method: &str, target: &str, head: &[u8]) -> RouteAnswer {
+    use RouteAnswer::Done;
     if target.contains(['?', '#']) {
-        return not_found();
+        return Done(not_found());
     }
     if target == STATUS_PATH {
         if method != "GET" {
-            return method_not_allowed();
+            return Done(method_not_allowed("GET"));
         }
-        return http_response(200, "OK", &status_body(state), false);
+        return Done(http_response(200, "OK", &status_body(state), None));
+    }
+    if target == CONFIG_PATH {
+        if method != "GET" {
+            return Done(method_not_allowed("GET"));
+        }
+        return Done(state.config_answer(target));
+    }
+    if target == SCHEMA_PATH {
+        if method != "GET" {
+            return Done(method_not_allowed("GET"));
+        }
+        return Done(state.schema_answer(target));
+    }
+    if target == VALIDATE_PATH {
+        if method != "POST" {
+            return Done(method_not_allowed("POST"));
+        }
+        return match ServiceState::validate_length(target, head) {
+            Ok(length) => RouteAnswer::ValidateBody { length },
+            Err(answer) => Done(answer),
+        };
     }
     if let Some(index) = objects_index(state, target) {
         if method != "GET" {
-            return method_not_allowed();
+            return Done(method_not_allowed("GET"));
         }
-        return objects_response(state, index);
+        return Done(objects_response(state, index));
     }
-    not_found()
+    Done(not_found())
 }
 
 fn not_found() -> String {
-    http_response(404, "Not Found", "{\"reason\":\"not_found\"}", false)
+    http_response(404, "Not Found", "{\"reason\":\"not_found\"}", None)
 }
 
-fn method_not_allowed() -> String {
+fn method_not_allowed(method: &str) -> String {
     http_response(
         405,
         "Method Not Allowed",
         "{\"reason\":\"method_not_allowed\"}",
-        true,
+        Some(method),
     )
 }
 
@@ -225,16 +327,16 @@ const fn hex_digit(byte: u8) -> Option<u8> {
 
 fn objects_response(state: &ServiceState, index: usize) -> String {
     match &state.cameras[index].1 {
-        CameraEntry::Off => http_response(200, "OK", "{\"objects\":[]}", false),
+        CameraEntry::Off => http_response(200, "OK", "{\"objects\":[]}", None),
         CameraEntry::Live(handle) => {
             let published: Option<FrameObjects> = (*handle.objects.borrow()).clone();
             match objects_answer(published.as_ref()) {
-                Ok(ObjectsAnswer::Objects(body)) => http_response(200, "OK", &body, false),
+                Ok(ObjectsAnswer::Objects(body)) => http_response(200, "OK", &body, None),
                 Ok(ObjectsAnswer::Unknown) => http_response(
                     503,
                     "Service Unavailable",
                     "{\"reason\":\"objects_unknown\"}",
-                    false,
+                    None,
                 ),
                 Err(err) => {
                     crate::log_event("service", "objects-serialisation", err);
@@ -242,7 +344,7 @@ fn objects_response(state: &ServiceState, index: usize) -> String {
                         500,
                         "Internal Server Error",
                         "{\"reason\":\"serialisation_failed\"}",
-                        false,
+                        None,
                     )
                 }
             }
@@ -266,8 +368,8 @@ fn status_body(state: &ServiceState) -> String {
     format!("{{\"cameras\":[{}]}}", entries.join(","))
 }
 
-fn http_response(status: u16, reason: &str, body: &str, allow_get: bool) -> String {
-    let allow = if allow_get { "Allow: GET\r\n" } else { "" };
+fn http_response(status: u16, reason: &str, body: &str, allow: Option<&str>) -> String {
+    let allow = allow.map_or_else(String::new, |methods| format!("Allow: {methods}\r\n"));
     format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n{allow}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()

@@ -10,6 +10,7 @@ mod clock;
 mod config;
 mod config_change;
 mod config_file;
+mod config_routes;
 mod config_schema;
 mod engine;
 mod ffmpeg;

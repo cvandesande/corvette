@@ -399,7 +399,11 @@ pub fn run(args: &[OsString], env_socket: Option<&OsStr>) -> ExitCode {
             return ExitCode::from(EXIT_STARTUP);
         }
     };
-    let state = Arc::new(ServiceState::new(entries).with_worker(worker.subscribe()));
+    let state = Arc::new(
+        ServiceState::new(entries)
+            .with_worker(worker.subscribe())
+            .with_config_path(options.config.clone()),
+    );
     match runtime.block_on(serve_or_signal(
         listener,
         state,
