@@ -94,6 +94,12 @@ enum HeadRead {
     Closed,
 }
 
+enum BodyRead {
+    Complete(Vec<u8>),
+    Missing,
+    Broken,
+}
+
 /// Reads the request head and any body bytes already buffered with it; the body prefix follows the terminator.
 async fn read_head(stream: &mut UnixStream) -> Result<(Vec<u8>, Vec<u8>), HeadRead> {
     let mut buffer = Vec::new();
@@ -167,23 +173,27 @@ async fn answer(
     };
     match route(state, method, target, &head) {
         RouteAnswer::Done(response) => Some(response),
-        RouteAnswer::ValidateBody { length } => read_body(stream, length, &prefix, read_timeout)
-            .await
-            .map(|body| state.validate_answer(target, &body)),
+        RouteAnswer::ValidateBody { length } => {
+            match read_body(stream, length, &prefix, read_timeout).await {
+                BodyRead::Complete(body) => Some(state.validate_answer(target, &body)),
+                BodyRead::Missing => Some(ServiceState::missing_body_answer(target)),
+                BodyRead::Broken => None,
+            }
+        }
     }
 }
 
-/// Reads exactly `length` body bytes, taking what the head read buffered first; `None` on timeout or early close.
+/// Reads exactly `length` body bytes, taking what the head read buffered first; `Missing` is the read timeout, `Broken` an early close.
 async fn read_body(
     stream: &mut UnixStream,
     length: usize,
     prefix: &[u8],
     read_timeout: Duration,
-) -> Option<Vec<u8>> {
+) -> BodyRead {
     let mut body: Vec<u8> = prefix.iter().copied().take(length).collect();
     let missing = length - body.len();
     if missing == 0 {
-        return Some(body);
+        return BodyRead::Complete(body);
     }
     let mut tail = vec![0_u8; missing];
     match tokio::time::timeout(read_timeout, stream.read_exact(&mut tail)).await {
@@ -193,15 +203,15 @@ async fn read_body(
                 "body-timeout",
                 format!("body did not arrive within {read_timeout:?}"),
             );
-            None
+            BodyRead::Missing
         }
         Ok(Err(err)) => {
             crate::log_event("service", "body-read-error", err);
-            None
+            BodyRead::Broken
         }
         Ok(Ok(_)) => {
             body.extend_from_slice(&tail);
-            Some(body)
+            BodyRead::Complete(body)
         }
     }
 }

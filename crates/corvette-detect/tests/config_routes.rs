@@ -306,6 +306,116 @@ async fn every_configuration_route_without_a_config_path_answers_unavailable() {
 }
 
 #[tokio::test]
+async fn duplicate_content_length_headers_are_refused_whatever_their_order() {
+    let path = saved_file("dup_cl", SAVED);
+    let socket = start("dup_cl", Some(path));
+    let body: &[u8] = br#"{"a":1}"#;
+    let length = body.len();
+    for headers in [
+        format!("Content-Length: {length}\r\nContent-Length: {length}"),
+        format!("Content-Length: x\r\nContent-Length: {length}"),
+    ] {
+        let mut bytes = format!("POST {VALIDATE_PATH} HTTP/1.1\r\n{headers}\r\n\r\n").into_bytes();
+        bytes.extend_from_slice(body);
+        let response = request(&socket, &bytes).await;
+        assert_eq!(status_code(&response), 400, "for {headers:?}");
+        let problem = problem(&response);
+        assert_eq!(problem["code"], "bad_request");
+        assert_eq!(problem["detail"], "a POST needs a valid Content-Length");
+    }
+}
+
+#[tokio::test]
+async fn signed_or_spaced_content_length_values_are_refused() {
+    let path = saved_file("cl_values", SAVED);
+    let socket = start("cl_values", Some(path));
+    let body: &[u8] = br#"{"a":1}"#;
+    let length = body.len();
+    for value in [
+        format!("+{length}"),
+        format!("-{length}"),
+        format!("{length} {length}"),
+        format!("{length}x"),
+        String::new(),
+    ] {
+        let mut bytes = format!("POST {VALIDATE_PATH} HTTP/1.1\r\nContent-Length: {value}\r\n\r\n")
+            .into_bytes();
+        bytes.extend_from_slice(body);
+        let response = request(&socket, &bytes).await;
+        assert_eq!(status_code(&response), 400, "for Content-Length: {value:?}");
+        assert_eq!(problem(&response)["code"], "bad_request");
+    }
+}
+
+#[tokio::test]
+async fn an_announced_body_that_never_arrives_answers_bad_request() {
+    let path = saved_file("short_body", SAVED);
+    let socket = start("short_body", Some(path));
+    let mut bytes =
+        format!("POST {VALIDATE_PATH} HTTP/1.1\r\nContent-Length: 40\r\n\r\n").into_bytes();
+    bytes.extend_from_slice(br#"{"a":1}"#);
+    let response = request(&socket, &bytes).await;
+    assert_eq!(status_code(&response), 400);
+    let problem = problem(&response);
+    assert_eq!(problem["code"], "bad_request");
+    assert_eq!(problem["detail"], "the body is missing");
+    assert_eq!(problem["instance"], VALIDATE_PATH);
+}
+
+#[tokio::test]
+async fn a_body_exactly_at_the_size_bound_is_not_refused_for_size() {
+    let path = saved_file("exact_bound", SAVED);
+    let socket = start("exact_bound", Some(path));
+    // The object wrapper costs 10 bytes, so the padding lands the body on the bound exactly.
+    let json = format!(r#"{{"pad":"{}"}}"#, "x".repeat(262_144 - 10));
+    assert_eq!(json.len(), 262_144);
+    let response = request(&socket, &post(VALIDATE_PATH, json.as_bytes())).await;
+    let problem = problem(&response);
+    assert_eq!(status_code(&response), 422, "detail: {}", problem["detail"]);
+    assert_eq!(problem["code"], "invalid_config");
+}
+
+#[tokio::test]
+async fn a_non_string_value_under_an_address_field_is_not_echoed() {
+    let path = saved_file("address_object", SAVED);
+    let socket = start("address_object", Some(path));
+    let proposed = PROPOSED_SAME.replace(
+        "\"worker_socket\":\"/run/detect.sock\"",
+        "\"worker_socket\":{\"login\":\"rtsp://user:s3cret@host\"}",
+    );
+    let response = request(&socket, &post(VALIDATE_PATH, proposed.as_bytes())).await;
+    assert_eq!(status_code(&response), 422);
+    assert!(
+        !response.contains("s3cret"),
+        "the response echoed the address: {response}"
+    );
+    let problem = problem(&response);
+    let errors = problem["errors"].as_array().expect("errors array");
+    let entry = errors
+        .iter()
+        .find(|error| error["path"] == "worker_socket")
+        .expect("a worker_socket error");
+    assert_eq!(entry["rule"], "expected a string, found a table");
+    assert!(entry.get("found").is_none());
+}
+
+#[tokio::test]
+async fn a_lowercase_content_length_header_is_accepted() {
+    let path = saved_file("lower_cl", SAVED);
+    let socket = start("lower_cl", Some(path));
+    let body: &[u8] = br#"{"a":1}"#;
+    let mut bytes = format!(
+        "POST {VALIDATE_PATH} HTTP/1.1\r\ncontent-length: {}\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    bytes.extend_from_slice(body);
+    let response = request(&socket, &bytes).await;
+    assert_eq!(status_code(&response), 422);
+    assert_eq!(problem(&response)["code"], "invalid_config");
+}
+
+#[tokio::test]
 async fn a_saved_file_deleted_after_start_answers_unavailable() {
     let path = saved_file("deleted", SAVED);
     let socket = start("deleted", Some(path.clone()));

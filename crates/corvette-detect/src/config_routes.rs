@@ -90,11 +90,15 @@ impl ServiceState {
             &Value::Object(answer).to_string(),
         )
     }
+
+    pub(crate) fn missing_body_answer(target: &str) -> String {
+        bad_request(target, "the body is missing")
+    }
 }
 
 fn content_length(head: &[u8]) -> Option<usize> {
     let text = std::str::from_utf8(head).ok()?;
-    let mut found: Option<usize> = None;
+    let mut announced: Option<&str> = None;
     for line in text.split("\r\n").skip(1) {
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -102,12 +106,16 @@ fn content_length(head: &[u8]) -> Option<usize> {
         if !name.eq_ignore_ascii_case("content-length") {
             continue;
         }
-        if found.is_some() {
+        if announced.is_some() {
             return None;
         }
-        found = value.trim().parse::<usize>().ok();
+        announced = Some(value.trim());
     }
-    found
+    let digits = announced?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<usize>().ok()
 }
 
 fn saved(state: &ServiceState) -> Result<(Vec<u8>, Config), String> {
@@ -135,7 +143,7 @@ fn violation_entry(violation: &Violation) -> Value {
     entry.insert("path".to_owned(), Value::String(violation.path.clone()));
     entry.insert("rule".to_owned(), Value::String(violation.rule.clone()));
     if let Some(found) = &violation.found
-        && !(found.is_string() && names_address_field(&violation.path))
+        && !holds_address_value(found, &violation.path)
     {
         entry.insert("found".to_owned(), found.clone());
     }
@@ -145,10 +153,11 @@ fn violation_entry(violation: &Violation) -> Value {
     Value::Object(entry)
 }
 
-fn names_address_field(path: &str) -> bool {
+fn holds_address_value(found: &Value, path: &str) -> bool {
     let last = path.rsplit('.').next().unwrap_or(path);
     let field = last.split('[').next().unwrap_or(last);
-    ADDRESS_FIELDS.contains(&field)
+    let could_hold_address = found.is_string() || found.is_object() || found.is_array();
+    could_hold_address && ADDRESS_FIELDS.contains(&field)
 }
 
 fn problem(
