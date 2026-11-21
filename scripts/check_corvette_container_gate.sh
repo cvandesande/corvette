@@ -104,12 +104,14 @@ else
 fi
 
 detect_script="$(cat <<'DETECT_GATE'
-printf "worker_socket = \"/run/c/worker.sock\"\nlabels = \"/run/c/labels.txt\"\ndeadline_ms = 5000\ncameras = []\n" > /run/c/config.toml
+printf "worker_socket = \"/run/c/worker.sock\"\nlabels = \"/run/c/labels.txt\"\ndeadline_ms = 5000\n\n[[cameras]]\nname = \"front\"\nwidth = 640\nheight = 480\nfps = 5\n" > /run/c/config.toml
 printf "0 person\n" > /run/c/labels.txt
 : > /run/c/param
 : > /run/c/bin
+printf '#!/bin/sh\nexec sleep 3600\n' > /run/c/stay
+chmod +x /run/c/stay
 corvette-detect-service --config /run/c/config.toml --socket /run/c/status.sock \
-  --ffmpeg /usr/bin/ffmpeg --restream-address 127.0.0.1:8554 --worker /bin/false \
+  --ffmpeg /run/c/stay --restream-address 127.0.0.1:8554 --worker /run/c/stay \
   --worker-param /run/c/param --worker-bin /run/c/bin --worker-max-deadline-ms 5000 \
   --worker-health-socket /run/c/health.sock &
 srv=$!
