@@ -176,8 +176,9 @@ fn ReviewPlayback(
             if motion {
                 motion_outcome(&crate::api::fetch_clip_link(&camera, start_time, end_time).await)
             } else {
+                let (after, before) = clip_query_range(start_time, end_time);
                 clip_outcome(
-                    &crate::api::fetch_activity_reviews(&camera, start_time, end_time).await,
+                    &crate::api::fetch_activity_reviews(&camera, after, before).await,
                     &review_id,
                 )
             }
@@ -523,6 +524,19 @@ fn motion_outcome(link: &Result<Option<MediaLink>, String>) -> ClipOutcome {
         Ok(Some(link)) => ClipOutcome::Playable(link.url.clone()),
         Ok(None) => ClipOutcome::NoRecording,
         Err(_) => ClipOutcome::LoadFailed,
+    }
+}
+
+/// The window Frigate's own interface plays an alert of no stored length.
+const MIN_QUERY_SECONDS: f64 = 8.0;
+
+/// The `after`/`before` range for an alert's clip query: when the stored end
+/// is not after the start, widen to the minimum window from the start.
+fn clip_query_range(start: f64, end: f64) -> (f64, f64) {
+    if end <= start {
+        (start, start + MIN_QUERY_SECONDS)
+    } else {
+        (start, end)
     }
 }
 
@@ -983,5 +997,26 @@ mod tests {
             clip_outcome(&reviews, "alert"),
             ClipOutcome::Playable("/alert.m3u8".to_owned())
         );
+    }
+
+    #[test]
+    fn equal_alert_times_query_the_minimum_window() {
+        assert_eq!(clip_query_range(100.0, 100.0), (100.0, 108.0));
+    }
+
+    #[test]
+    fn an_alert_end_before_its_start_queries_the_minimum_window() {
+        assert_eq!(clip_query_range(100.0, 90.0), (100.0, 108.0));
+    }
+
+    #[test]
+    fn a_normal_alert_range_is_queried_unchanged() {
+        assert_eq!(clip_query_range(100.0, 130.0), (100.0, 130.0));
+    }
+
+    #[test]
+    fn a_fractional_start_with_equal_end_widens_from_the_start() {
+        let start = 1_795_260_459.047_344;
+        assert_eq!(clip_query_range(start, start), (start, start + 8.0));
     }
 }
