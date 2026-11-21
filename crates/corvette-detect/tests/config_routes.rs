@@ -602,6 +602,31 @@ async fn apply_without_or_with_an_empty_remote_user_answers_unauthorized() {
 }
 
 #[tokio::test]
+async fn apply_with_a_tab_in_the_remote_user_answers_unauthorized_and_changes_nothing() {
+    let path = saved_file("apply_tab_user", SAVED);
+    let socket = start("apply_tab_user", Some(path.clone()));
+    let current = revision(&std::fs::read(&path).expect("read"));
+    let response = request(
+        &socket,
+        &put_request(
+            PROPOSED_SAME.as_bytes(),
+            Some("first\tlast"),
+            Some(&format!("\"{current}\"")),
+        ),
+    )
+    .await;
+    assert_eq!(status_code(&response), 401);
+    let problem = problem(&response);
+    assert_eq!(problem["code"], "unauthorized");
+    assert_eq!(problem["detail"], "no Remote-User arrived with the request");
+    assert!(
+        !response.contains("first\tlast"),
+        "the answer echoed the user: {response}"
+    );
+    assert_eq!(std::fs::read(&path).expect("read after"), SAVED.as_bytes());
+}
+
+#[tokio::test]
 async fn apply_into_a_read_only_directory_answers_apply_incomplete_and_changes_nothing() {
     if std::fs::read_to_string("/proc/self/uid").is_ok_and(|uid| uid.trim() == "0") {
         println!("skipped: running as uid 0, which writes into a read-only directory anyway");

@@ -105,7 +105,8 @@ impl ServiceState {
             Ok(value) => value,
             Err(answer) => return answer,
         };
-        let Some(user) = header(head, "Remote-User").filter(|user| !user.is_empty()) else {
+        let Some(user) = header(head, "Remote-User").filter(|user| remote_user_is_auditable(user))
+        else {
             return unauthorized(target);
         };
         let proposed = match Config::validate_all(&value) {
@@ -218,6 +219,15 @@ fn config_body(target: &str, body: &[u8]) -> Result<Value, String> {
     }
 }
 
+/// Whether a `Remote-User` is safe inside the audit line's quotes: a control
+/// character or a double quote there could split or forge a line.
+fn remote_user_is_auditable(user: &str) -> bool {
+    !user.is_empty()
+        && user
+            .bytes()
+            .all(|byte| (0x20..0x7f).contains(&byte) && byte != b'"')
+}
+
 fn header<'a>(head: &'a [u8], name: &str) -> Option<&'a str> {
     let text = std::str::from_utf8(head).ok()?;
     text.split("\r\n").skip(1).find_map(|line| {
@@ -238,12 +248,19 @@ fn write_saved(path: &Path, text: &str) -> std::io::Result<()> {
     landed
 }
 
+#[cfg(test)]
+thread_local! { static FAIL_RENAME_ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
 fn write_temp_then_rename(temp: &Path, path: &Path, text: &str, mode: u32) -> std::io::Result<()> {
     let mut file = std::fs::File::create(temp)?;
     file.write_all(text.as_bytes())?;
     file.set_permissions(std::fs::Permissions::from_mode(mode))?;
     file.sync_all()?;
     drop(file);
+    #[cfg(test)]
+    if FAIL_RENAME_ONCE.with(std::cell::Cell::take) {
+        return Err(std::io::Error::other("injected rename failure"));
+    }
     std::fs::rename(temp, path)
 }
 
@@ -510,6 +527,60 @@ mod apply_unit_tests {
         assert!(
             !line.contains("sekret9"),
             "the audit line echoed a value: {line}"
+        );
+    }
+
+    #[test]
+    fn a_remote_user_with_a_control_character_or_quote_is_refused() {
+        for (user, auditable) in [
+            ("operator", true),
+            ("first last.name", true),
+            ("", false),
+            ("first\nlast", false),
+            ("first\rlast", false),
+            ("first\tlast", false),
+            ("first\u{7f}last", false),
+            ("first\"last", false),
+        ] {
+            let head = format!("PUT {TARGET} HTTP/1.1\r\nRemote-User: {user}\r\n\r\n").into_bytes();
+            let accepted = header(&head, "Remote-User").is_some_and(remote_user_is_auditable);
+            assert_eq!(accepted, auditable, "for user {user:?}");
+        }
+    }
+
+    #[test]
+    fn a_rename_failure_after_the_temp_landed_removes_the_temp_and_answers_apply_incomplete() {
+        let (state, path) = state_with_saved("rename_fail");
+        let current = revision(&std::fs::read(&path).expect("read"));
+        let head = put_head("operator", &format!("\"{current}\""));
+        FAIL_RENAME_ONCE.with(|armed| armed.set(true));
+        let body = GOOD.replace("\"fps\":5", "\"fps\":7");
+        let answer = state.apply_answer(TARGET, &head, body.as_bytes());
+        assert!(
+            answer.starts_with("HTTP/1.1 500 "),
+            "the injected rename failure should answer 500: {answer}"
+        );
+        assert!(
+            answer.contains("\"code\":\"apply_incomplete\""),
+            "problem body: {answer}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read after"),
+            FILE.as_bytes(),
+            "the saved file must stand unchanged"
+        );
+        let leftovers: Vec<String> = std::fs::read_dir(path.parent().expect("directory"))
+            .expect("read directory")
+            .filter_map(|entry| {
+                entry
+                    .ok()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            })
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
         );
     }
 }
