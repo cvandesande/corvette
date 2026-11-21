@@ -1,7 +1,7 @@
-//! Minimal HTTP/1.1 over a Unix socket, one request per connection: one camera's objects answer, the detection status answer, and the three configuration routes; the API server maps any non-`200` here to its public `503 detection_unavailable`.
+//! Minimal HTTP/1.1 over a Unix socket, one request per connection: one camera's objects answer, the detection status answer, and the configuration routes; the API server maps any non-`200` here to its public `503 detection_unavailable`.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -33,15 +33,17 @@ pub struct ServiceState {
     cameras: Vec<(String, CameraEntry)>,
     worker: Option<watch::Receiver<Status>>,
     config_path: Option<PathBuf>,
+    apply_lock: Arc<Mutex<()>>,
 }
 
 impl ServiceState {
     #[must_use]
-    pub const fn new(cameras: Vec<(String, CameraEntry)>) -> Self {
+    pub fn new(cameras: Vec<(String, CameraEntry)>) -> Self {
         Self {
             cameras,
             worker: None,
             config_path: None,
+            apply_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -63,6 +65,11 @@ impl ServiceState {
 
     pub(crate) fn config_path(&self) -> Option<&Path> {
         self.config_path.as_deref()
+    }
+
+    /// Process-wide apply lock: held from the revision check through the file rename, so no second apply reads a stale revision underneath a write.
+    pub(crate) fn apply_lock(&self) -> &Mutex<()> {
+        &self.apply_lock
     }
 }
 
@@ -180,6 +187,13 @@ async fn answer(
                 BodyRead::Broken => None,
             }
         }
+        RouteAnswer::ApplyBody { length } => {
+            match read_body(stream, length, &prefix, read_timeout).await {
+                BodyRead::Complete(body) => Some(state.apply_answer(target, &head, &body)),
+                BodyRead::Missing => Some(ServiceState::missing_body_answer(target)),
+                BodyRead::Broken => None,
+            }
+        }
     }
 }
 
@@ -239,6 +253,7 @@ fn parse_request_line(head: &[u8]) -> Option<(&str, &str)> {
 enum RouteAnswer {
     Done(String),
     ValidateBody { length: usize },
+    ApplyBody { length: usize },
 }
 
 fn route(state: &ServiceState, method: &str, target: &str, head: &[u8]) -> RouteAnswer {
@@ -253,10 +268,14 @@ fn route(state: &ServiceState, method: &str, target: &str, head: &[u8]) -> Route
         return Done(http_response(200, "OK", &status_body(state), None));
     }
     if target == CONFIG_PATH {
-        if method != "GET" {
-            return Done(method_not_allowed("GET"));
-        }
-        return Done(state.config_answer(target));
+        return match method {
+            "GET" => Done(state.config_answer(target)),
+            "PUT" => match ServiceState::apply_length(target, head) {
+                Ok(length) => RouteAnswer::ApplyBody { length },
+                Err(answer) => Done(answer),
+            },
+            _ => Done(method_not_allowed("GET, PUT")),
+        };
     }
     if target == SCHEMA_PATH {
         if method != "GET" {

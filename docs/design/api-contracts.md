@@ -1271,9 +1271,11 @@ to the content received, and the saved form is normalized. Re-applying identical
 content against
 the current revision changes nothing and answers that same revision. A retry whose first
 attempt already succeeded carries the pre-apply revision and answers `412` like any
-stale write; the `412` body carries the current configuration value, so a client compares
-it — once its omitted defaulted fields are filled in — against the normalized form the
-read route returns, and recognizes its own completed write.
+stale write; the `412` body carries the current configuration value in its `config`
+member and the current revision in its `revision` member, so a client compares `config`
+— once its omitted defaulted fields are filled in — against the normalized form the
+read route returns, recognizes its own completed write, and retries with `revision`
+without a second request.
 
 The revision is one strong token for the saved file: `sha256:<hex>` over the saved file
 bytes, quoted in `ETag` and `If-Match` exactly as RFC 9110 defines for lost-update
@@ -1301,7 +1303,8 @@ right closure while the schema is one plain object.
 - `401` `unauthorized` — no or empty `Remote-User`, exactly as every route today.
 - `403` `forbidden` — the `PUT` configuration route and the caller's role may not write.
 - `412` `stale_revision` — `If-Match` does not match the current revision; nothing was
-  written and nothing was applied; the body carries the current configuration value.
+  written and nothing was applied; the body carries the current configuration value in
+  `config` and the current revision in `revision`.
 - `422` `invalid_config` — the value failed validation; the error body below.
 - `428` `revision_required` — `PUT` arrived without `If-Match`, answered after
   validation in the apply order below.

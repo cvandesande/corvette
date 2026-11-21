@@ -1,8 +1,11 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use corvette_detect::{Config, SCHEMA_JSON, ServiceState, revision, serve_with_timeout};
+use corvette_detect::{
+    Config, SCHEMA_JSON, ServiceState, classify, render, revision, serve_with_timeout,
+};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -26,6 +29,19 @@ fps = 5
 "#;
 
 const PROPOSED_SAME: &str = r#"{"worker_socket":"/run/detect.sock","labels":"/run/labels.txt","deadline_ms":5000,"cameras":[{"name":"front","width":640,"height":480,"fps":5,"confirm_threshold":0.7}]}"#;
+
+const COMMENTED: &str = "# kept-top\nworker_socket = \"/run/detect.sock\"\nlabels = \"/run/labels.txt\"\ndeadline_ms = 5000\n\n[[cameras]]\n# kept-camera\nname = \"front\"\nwidth = 640\nheight = 480\nfps = 5\n";
+
+fn put_request(body: &[u8], user: Option<&str>, if_match: Option<&str>) -> Vec<u8> {
+    let user_line = user.map_or_else(String::new, |user| format!("Remote-User: {user}\r\n"));
+    let match_line =
+        if_match.map_or_else(String::new, |if_match| format!("If-Match: {if_match}\r\n"));
+    let length_line = format!("Content-Length: {}\r\n\r\n", body.len());
+    let mut bytes =
+        format!("PUT {CONFIG_PATH} HTTP/1.1\r\n{user_line}{match_line}{length_line}").into_bytes();
+    bytes.extend_from_slice(body);
+    bytes
+}
 
 fn dir(test: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -275,7 +291,7 @@ async fn wrong_methods_answer_not_allowed_with_the_methods_that_route_accepts() 
         (get(VALIDATE_PATH), "POST"),
         (
             format!("POST {CONFIG_PATH} HTTP/1.1\r\n\r\n").into_bytes(),
-            "GET",
+            "GET, PUT",
         ),
         (
             format!("POST {SCHEMA_PATH} HTTP/1.1\r\n\r\n").into_bytes(),
@@ -426,4 +442,351 @@ async fn a_saved_file_deleted_after_start_answers_unavailable() {
     let validated = request(&socket, &post(VALIDATE_PATH, PROPOSED_SAME.as_bytes())).await;
     assert_eq!(status_code(&validated), 503);
     assert_eq!(problem(&validated)["code"], "config_unavailable");
+}
+
+#[tokio::test]
+async fn apply_a_changed_value_writes_the_rendered_file_and_answers_the_new_revision() {
+    let path = saved_file("apply_ok", SAVED);
+    let socket = start("apply_ok", Some(path.clone()));
+    let before = std::fs::read(&path).expect("read before");
+    let proposed = PROPOSED_SAME.replace("\"fps\":5", "\"fps\":7");
+    let response = request(
+        &socket,
+        &put_request(
+            proposed.as_bytes(),
+            Some("operator"),
+            Some(&format!("\"{}\"", revision(&before))),
+        ),
+    )
+    .await;
+    assert_eq!(status_code(&response), 200);
+    assert_eq!(header_value(&response, "Content-Type"), "application/json");
+    assert_eq!(header_value(&response, "Cache-Control"), "no-store");
+    assert!(
+        !response.contains("ETag:"),
+        "the apply answer must carry no ETag: {response}"
+    );
+    let answer: Value = serde_json::from_str(body(&response)).expect("json body");
+    let written = std::fs::read(&path).expect("read after");
+    let proposed_config =
+        Config::from_value(&serde_json::from_str::<Value>(&proposed).expect("proposed json"))
+            .expect("proposed valid");
+    assert_eq!(
+        written,
+        render(Some(SAVED), &proposed_config)
+            .expect("render")
+            .as_bytes()
+    );
+    assert_eq!(answer["revision"], revision(&written));
+    let restart: Vec<Value> = classify(&Config::from_toml(SAVED).expect("saved"), &proposed_config)
+        .into_iter()
+        .map(Value::String)
+        .collect();
+    assert_eq!(answer["restart_required"], Value::Array(restart));
+}
+
+#[tokio::test]
+async fn apply_of_the_saved_value_writes_nothing_and_answers_the_same_revision() {
+    let path = saved_file("apply_same", SAVED);
+    let socket = start("apply_same", Some(path.clone()));
+    let before = std::fs::read(&path).expect("read before");
+    let response = request(
+        &socket,
+        &put_request(
+            PROPOSED_SAME.as_bytes(),
+            Some("operator"),
+            Some(&format!("\"{}\"", revision(&before))),
+        ),
+    )
+    .await;
+    assert_eq!(status_code(&response), 200);
+    let answer: Value = serde_json::from_str(body(&response)).expect("json body");
+    assert_eq!(answer["revision"], revision(&before));
+    assert_eq!(answer["restart_required"], json!([]));
+    assert_eq!(std::fs::read(&path).expect("read after"), before);
+}
+
+#[tokio::test]
+async fn apply_without_if_match_answers_revision_required_and_writes_nothing() {
+    let path = saved_file("apply_no_if_match", SAVED);
+    let socket = start("apply_no_if_match", Some(path.clone()));
+    let response = request(
+        &socket,
+        &put_request(PROPOSED_SAME.as_bytes(), Some("operator"), None),
+    )
+    .await;
+    assert_eq!(status_code(&response), 428);
+    let problem = problem(&response);
+    assert_eq!(problem["code"], "revision_required");
+    assert_eq!(problem["status"], 428);
+    assert_eq!(problem["instance"], CONFIG_PATH);
+    assert!(problem.get("config").is_none());
+    assert_eq!(std::fs::read(&path).expect("read after"), SAVED.as_bytes());
+}
+
+#[tokio::test]
+async fn apply_with_a_stale_or_weak_if_match_answers_stale_revision_carrying_the_current_value() {
+    let path = saved_file("apply_stale", SAVED);
+    let socket = start("apply_stale", Some(path.clone()));
+    let before = std::fs::read(&path).expect("read before");
+    let current = revision(&before);
+    let read_value: Value =
+        serde_json::from_str(body(&request(&socket, &get(CONFIG_PATH)).await)).expect("read value");
+    let proposed = PROPOSED_SAME.replace("\"fps\":5", "\"fps\":7");
+    for if_match in [
+        format!("\"sha256:{}\"", "0".repeat(64)),
+        format!("W/\"{current}\""),
+    ] {
+        let response = request(
+            &socket,
+            &put_request(proposed.as_bytes(), Some("operator"), Some(&if_match)),
+        )
+        .await;
+        assert_eq!(status_code(&response), 412, "for If-Match: {if_match}");
+        let problem = problem(&response);
+        assert_eq!(problem["code"], "stale_revision");
+        assert_eq!(problem["status"], 412);
+        assert_eq!(problem["config"], read_value);
+        assert_eq!(problem["revision"], current);
+        assert_eq!(std::fs::read(&path).expect("file untouched"), before);
+    }
+}
+
+#[tokio::test]
+async fn apply_validates_the_body_before_the_revision_check_and_leaves_the_file() {
+    let path = saved_file("apply_invalid", SAVED);
+    let socket = start("apply_invalid", Some(path.clone()));
+    let before = std::fs::read(&path).expect("read before");
+    let invalid = PROPOSED_SAME.replace("\"deadline_ms\":5000", "\"deadline_ms\":0");
+    let response = request(
+        &socket,
+        &put_request(
+            invalid.as_bytes(),
+            Some("operator"),
+            Some("\"sha256:0000000000000000000000000000000000000000000000000000000000000000\""),
+        ),
+    )
+    .await;
+    assert_eq!(status_code(&response), 422);
+    assert_eq!(problem(&response)["code"], "invalid_config");
+    assert_eq!(std::fs::read(&path).expect("read after"), before);
+    let read_again = request(&socket, &get(CONFIG_PATH)).await;
+    assert_eq!(
+        header_value(&read_again, "ETag"),
+        format!("\"{}\"", revision(&before))
+    );
+}
+
+#[tokio::test]
+async fn apply_without_or_with_an_empty_remote_user_answers_unauthorized() {
+    let path = saved_file("apply_user", SAVED);
+    let socket = start("apply_user", Some(path.clone()));
+    let current = revision(&std::fs::read(&path).expect("read"));
+    for user in [None, Some("")] {
+        let response = request(
+            &socket,
+            &put_request(
+                PROPOSED_SAME.as_bytes(),
+                user,
+                Some(&format!("\"{current}\"")),
+            ),
+        )
+        .await;
+        assert_eq!(status_code(&response), 401);
+        let problem = problem(&response);
+        assert_eq!(problem["code"], "unauthorized");
+        assert_eq!(problem["status"], 401);
+        assert_eq!(problem["instance"], CONFIG_PATH);
+        assert_eq!(std::fs::read(&path).expect("read after"), SAVED.as_bytes());
+    }
+}
+
+#[tokio::test]
+async fn apply_into_a_read_only_directory_answers_apply_incomplete_and_changes_nothing() {
+    if std::fs::read_to_string("/proc/self/uid").is_ok_and(|uid| uid.trim() == "0") {
+        println!("skipped: running as uid 0, which writes into a read-only directory anyway");
+        return;
+    }
+    let path = saved_file("apply_ro", SAVED);
+    let socket = start("apply_ro", Some(path.clone()));
+    let dir = path.parent().expect("directory");
+    let before = std::fs::read(&path).expect("read before");
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500))
+        .expect("make the directory read-only");
+    let proposed = PROPOSED_SAME.replace("\"fps\":5", "\"fps\":7");
+    let response = request(
+        &socket,
+        &put_request(
+            proposed.as_bytes(),
+            Some("operator"),
+            Some(&format!("\"{}\"", revision(&before))),
+        ),
+    )
+    .await;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .expect("restore the directory");
+    assert_eq!(status_code(&response), 500);
+    let problem = problem(&response);
+    assert_eq!(problem["code"], "apply_incomplete");
+    assert_eq!(problem["status"], 500);
+    assert!(
+        !body(&response).contains(&dir.display().to_string()),
+        "the answer body names a path: {}",
+        body(&response)
+    );
+    assert_eq!(std::fs::read(&path).expect("read after"), before);
+    let leftovers: Vec<String> = std::fs::read_dir(dir)
+        .expect("read directory")
+        .filter_map(|entry| {
+            entry
+                .ok()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        })
+        .filter(|name| name.contains(".tmp-"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temp files left behind: {leftovers:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_applies_at_one_revision_leave_exactly_one_winner() {
+    for round in 0..20 {
+        let test = format!("apply_race{round}");
+        let path = saved_file(&test, SAVED);
+        let socket = start(&test, Some(path.clone()));
+        let current = revision(&std::fs::read(&path).expect("read"));
+        let quoted = format!("\"{current}\"");
+        let first = PROPOSED_SAME.replace("\"fps\":5", "\"fps\":7");
+        let second = PROPOSED_SAME.replace("\"fps\":5", "\"fps\":9");
+        let first_bytes = put_request(first.as_bytes(), Some("operator"), Some(&quoted));
+        let second_bytes = put_request(second.as_bytes(), Some("operator"), Some(&quoted));
+        let (one, two) = tokio::join!(
+            request(&socket, &first_bytes),
+            request(&socket, &second_bytes)
+        );
+        let (first_code, second_code) = (status_code(&one), status_code(&two));
+        assert!(
+            (first_code == 200 && second_code == 412) || (first_code == 412 && second_code == 200),
+            "round {round}: codes {first_code} and {second_code}"
+        );
+        let winner = if first_code == 200 { &first } else { &second };
+        let proposed = Config::from_value(&serde_json::from_str::<Value>(winner).expect("json"))
+            .expect("valid");
+        let expected = render(Some(SAVED), &proposed).expect("render");
+        assert_eq!(
+            std::fs::read(&path).expect("read final"),
+            expected.as_bytes(),
+            "round {round}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn apply_rewriting_a_camera_keeps_the_comments_around_it() {
+    let path = saved_file("apply_comments", COMMENTED);
+    let socket = start("apply_comments", Some(path.clone()));
+    let current = revision(&std::fs::read(&path).expect("read"));
+    let proposed = PROPOSED_SAME.replace("\"fps\":5", "\"fps\":7");
+    let response = request(
+        &socket,
+        &put_request(
+            proposed.as_bytes(),
+            Some("operator"),
+            Some(&format!("\"{current}\"")),
+        ),
+    )
+    .await;
+    assert_eq!(status_code(&response), 200);
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert!(text.contains("# kept-top"), "top comment lost: {text}");
+    assert!(
+        text.contains("# kept-camera"),
+        "camera comment lost: {text}"
+    );
+}
+
+#[tokio::test]
+async fn apply_bodies_over_bound_missing_or_unshaped_each_answer_bad_request() {
+    let path = saved_file("apply_bad_bodies", SAVED);
+    let socket = start("apply_bad_bodies", Some(path.clone()));
+    let current = revision(&std::fs::read(&path).expect("read"));
+    let quoted = format!("\"{current}\"");
+    let over = format!(
+        "PUT {CONFIG_PATH} HTTP/1.1\r\nRemote-User: operator\r\nContent-Length: {BOUND_PLUS_ONE}\r\n\r\n"
+    )
+    .into_bytes();
+    let no_length =
+        format!("PUT {CONFIG_PATH} HTTP/1.1\r\nRemote-User: operator\r\n\r\n").into_bytes();
+    for bytes in [
+        over,
+        no_length,
+        put_request(b"abc", Some("operator"), Some(&quoted)),
+        put_request(b"[1,2]", Some("operator"), Some(&quoted)),
+    ] {
+        let response = request(&socket, &bytes).await;
+        assert_eq!(status_code(&response), 400);
+        let problem = problem(&response);
+        assert_eq!(problem["code"], "bad_request");
+        assert_eq!(problem["instance"], CONFIG_PATH);
+    }
+}
+
+#[tokio::test]
+async fn patch_and_delete_on_the_config_path_answer_not_allowed_with_get_and_put() {
+    let path = saved_file("apply_methods", SAVED);
+    let socket = start("apply_methods", Some(path));
+    for method in ["PATCH", "DELETE"] {
+        let response = request(
+            &socket,
+            format!("{method} {CONFIG_PATH} HTTP/1.1\r\n\r\n").as_bytes(),
+        )
+        .await;
+        assert_eq!(status_code(&response), 405);
+        assert_eq!(header_value(&response, "Allow"), "GET, PUT");
+    }
+}
+
+#[tokio::test]
+async fn a_get_after_an_apply_answers_the_new_value_with_the_new_etag() {
+    let path = saved_file("apply_then_get", SAVED);
+    let socket = start("apply_then_get", Some(path.clone()));
+    let before = std::fs::read(&path).expect("read before");
+    let proposed = PROPOSED_SAME.replace("\"fps\":5", "\"fps\":7");
+    let applied = request(
+        &socket,
+        &put_request(
+            proposed.as_bytes(),
+            Some("operator"),
+            Some(&format!("\"{}\"", revision(&before))),
+        ),
+    )
+    .await;
+    assert_eq!(status_code(&applied), 200);
+    let read = request(&socket, &get(CONFIG_PATH)).await;
+    let written = std::fs::read(&path).expect("read final");
+    assert_eq!(
+        header_value(&read, "ETag"),
+        format!("\"{}\"", revision(&written))
+    );
+    let value: Value = serde_json::from_str(body(&read)).expect("json body");
+    assert_eq!(value["cameras"][0]["fps"], 7);
+}
+
+#[tokio::test]
+async fn apply_without_a_config_path_answers_config_unavailable() {
+    let socket = start("apply_no_path", None);
+    let response = request(
+        &socket,
+        &put_request(
+            PROPOSED_SAME.as_bytes(),
+            Some("operator"),
+            Some("\"sha256:0000000000000000000000000000000000000000000000000000000000000000\""),
+        ),
+    )
+    .await;
+    assert_eq!(status_code(&response), 503);
+    assert_eq!(problem(&response)["code"], "config_unavailable");
+    assert_eq!(problem(&response)["instance"], CONFIG_PATH);
 }

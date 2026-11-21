@@ -72,6 +72,16 @@ pub use source::{FrameSource, STREAM_QUEUE_CAPACITY, SourceError};
 pub use supervised::{Status, Supervised};
 pub use worker_link::{LinkState, WorkerLink};
 
+/// Lines `log_event` printed this process; in-process stderr cannot be captured otherwise, and the apply audit test reads it here.
+#[cfg(test)]
+pub(crate) static TEST_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 pub(crate) fn log_event(unit: &str, event: &str, detail: impl std::fmt::Display) {
-    eprintln!("corvette-detect unit=\"{unit}\" event={event} detail=\"{detail}\"");
+    let line = format!("corvette-detect unit=\"{unit}\" event={event} detail=\"{detail}\"");
+    eprintln!("{line}");
+    #[cfg(test)]
+    TEST_LOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(line);
 }
