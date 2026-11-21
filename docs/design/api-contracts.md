@@ -1208,8 +1208,9 @@ Per camera the entry carries:
   round-trip time, both in milliseconds, so slow inference and slow transport read
   differently; `lock_wait_ms`: the time a request waited for the shared worker link,
   measured beside `roundtrip_ms` and excluded from it;
-- `running_config_is_saved`: whether the revision the running configuration loaded at
-  start is still the saved file's current one.
+- `running_revision` (PENDING until the service builds it): the revision the running
+  configuration loaded at start; a client compares it with the read route's `ETag` to see
+  whether a saved change still waits on a restart.
 
 The numbers `fps_in`, `fps_processed`, `frames_dropped`, `runner_restarts`,
 `worker_restarts`, `worker_ms`, `roundtrip_ms` and `lock_wait_ms` are each subject to the
@@ -1260,10 +1261,10 @@ body below).
 `PUT /corvette/api/v1/detection/config` replaces the configuration as a whole: the body
 is the entire desired value form and the request carries, in `If-Match`, the revision it
 was based on. Success answers `200`
-`{"revision":"<new>","live":[],"restart_required":[<restart-required paths>]}`: every
-change is restart-required, `live` answers empty, and `restart_required` names every
-changed path, each added, removed or changed camera as `cameras[<name>]`; the body's
-`revision` is the token for the next `If-Match`. The apply `200` carries the new
+`{"revision":"<new>","restart_required":[<changed paths>]}`: every change is
+restart-required, and `restart_required` names every changed path, each added, removed
+or changed camera as `cameras[<name>]`; the body's `revision` is the token for the next
+`If-Match`. The apply `200` carries the new
 revision in its body only and sends no `ETag` header: RFC 9110 §9.3.4 forbids a
 validator in a successful `PUT` response unless the saved representation is identical
 to the content received, and the saved form is normalized. Re-applying identical
@@ -1361,7 +1362,7 @@ service performs steps 3 to 7:
 3. parse and validate the body with the same rule set the dry run uses;
 4. take the service's single apply lock;
 5. check the revision against the saved file; a missing `If-Match` answers `428` here;
-6. classify the change: every camera and top-level change takes effect at the next service restart;
+6. diff the proposal against the saved value: the changed paths answer as `restart_required` and as the audit entry's summary;
 7. write the file last.
 
 Concurrent applies serialise on the lock at step 4: the second reaches step 5 only after
@@ -1382,7 +1383,8 @@ file is served frames only once the media bridge also restarts; a detection-serv
 restart alone leaves it outside the registry, the media bridge and the detection service
 being separate processes (`docs/design/detection.md:139-148`,
 `docs/design/architecture.md:131`); whether anything restarts the media bridge together
-with the detection service is UNVERIFIED.
+with the detection service is UNVERIFIED; the operator action that brings a camera change
+into effect is a restart of the pod, which restarts every container together.
 
 ASSUMPTION (to confirm): the saved file declares TOML 1.1.0 as its version. The write
 edits the file in place with `toml_edit`, so comments, key order and spacing outside
@@ -1477,9 +1479,9 @@ the four close the read-validate-apply-check loop as far as the saved file reach
 `read_detection_config` reads the saved configuration and its revision,
 `validate_detection_config` validates the proposal, `apply_detection_config` writes the
 file, then a further `read_detection_config` reads the configuration back to confirm the
-saved revision; `read_detection_status` answers detection state only — whether the
-running configuration is the saved one is the status route's `running_config_is_saved`
-member — and every applied change takes effect at the next service restart.
+saved revision; `read_detection_status` answers detection state only — the status
+route's `running_revision` member tells a client whether the running configuration is
+the saved one — and every applied change takes effect at the next service restart.
 Endpoint-mirroring is the documented anti-pattern (relayed through secondary sources). Each tool's `inputSchema`
 and `outputSchema` are JSON Schema documents derived from the route bodies above:
 
@@ -1490,9 +1492,8 @@ and `outputSchema` are JSON Schema documents derived from the route bodies above
   read-only.
 - `apply_detection_config` — input `{config, revision}`; the server places the revision
   on `If-Match` and puts the configuration in the body, the route's whole value form;
-  output is the apply response `{revision, live,
-  restart_required}` as the `PUT` route defines it: `live` answers empty,
-  `restart_required` names every changed path, and the change takes effect at the next
+  output is the apply response `{revision, restart_required}` as the `PUT` route defines
+  it: `restart_required` names every changed path, and the change takes effect at the next
   service restart. The one tool that changes state. Annotated `destructiveHint` and
   `idempotentHint`, and the server requests a form-mode elicitation confirmation before
   each apply; elicitation is a client capability, so the request reaches a human when
