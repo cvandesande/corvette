@@ -1281,7 +1281,13 @@ The revision is one strong token for the saved file: `sha256:<hex>` over the sav
 bytes, quoted in `ETag` and `If-Match` exactly as RFC 9110 defines for lost-update
 prevention. A `PUT` whose `If-Match` does not match answers `412` with nothing written
 and nothing applied; a `PUT` without `If-Match` answers `428`, because unconditional
-writes are never applied — which is what RFC 6585 added 428 for.
+writes are never applied — which is what RFC 6585 added 428 for. `If-Match` carries one
+strong revision tag; `*` and a list of tags never match, so they answer `412`, and a weak
+tag (`W/"…"`) never matches. The file is written through a temporary file in the same
+directory, synced, then renamed over the original; the containing directory is not synced,
+so a `200` survives a process crash but a power loss in the instant after it can restore
+the previous file. The next read then shows the previous revision, and a client that
+retries with its saved revision is answered by the same rules.
 
 `GET /corvette/api/v1/detection/config/schema` answers the schema document, so editors
 get completion and hover against the live deployment; one more `GET` under the existing
