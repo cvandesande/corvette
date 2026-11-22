@@ -160,6 +160,7 @@
             # runtime.
             pkgs.ffmpeg
             pkgs.gnumake
+            pkgs.kind
             pkgs.nixfmt
             pkgs.nginx
             pkgs.nodejs_24
