@@ -136,6 +136,57 @@ for uid_run in 0 65532; do
   fi
 done
 
+direct_script="$(cat <<'DIRECT_GATE'
+printf 'worker_socket = "/run/c/worker.sock"\nlabels = "/run/c/labels.txt"\ndeadline_ms = 5000\n\n[[cameras]]\nname = "front"\nwidth = 640\nheight = 480\nfps = 5\n\n[cameras.source.main]\nhost = "cam.invalid"\nport = 554\npath = "/main"\nusername = "gate"\nsecret_env = "GATE_CAM_SECRET"\n' > /run/c/config.toml
+printf '0 person\n' > /run/c/labels.txt
+: > /run/c/param
+: > /run/c/bin
+printf '#!/bin/sh\nexec sleep 3600\n' > /run/c/stay
+chmod +x /run/c/stay
+raw='p@ss:wor/d 1'
+enc='p%40ss%3Awor%2Fd%201'
+cat > /run/c/ffmpeg <<'FF_STUB'
+#!/bin/sh
+printf '%s\n' "$@" >> /run/c/ffmpeg-argv
+printf '%s\n' "$@" >&2
+exit 1
+FF_STUB
+chmod +x /run/c/ffmpeg
+corvette-detect-service --config /run/c/config.toml --socket /run/c/status.sock \
+  --ffmpeg /run/c/ffmpeg --worker /run/c/stay \
+  --worker-param /run/c/param --worker-bin /run/c/bin --worker-max-deadline-ms 5000 \
+  --worker-health-socket /run/c/health.sock > /run/c/service.log 2>&1 &
+srv=$!
+i=0
+until [ -S /run/c/status.sock ] && [ -s /run/c/ffmpeg-argv ] || [ "$i" -ge 50 ]; do i=$((i + 1)); sleep 0.2; done
+socket_bound=0
+[ -S /run/c/status.sock ] && socket_bound=1
+corvette-detect-service --probe --socket /run/c/status.sock > /dev/null 2>&1
+probe_rc=$?
+kill "$srv" 2>/dev/null
+log="$(cat /run/c/service.log 2>/dev/null)"
+argv="$(cat /run/c/ffmpeg-argv 2>/dev/null)"
+fails=""
+case "$log" in *event=config-loaded*) ;; *) fails="$fails no-config-loaded" ;; esac
+case "$log" in *"$raw"*) fails="$fails raw-canary-in-log" ;; esac
+case "$log" in *"$enc"*) fails="$fails encoded-canary-in-log" ;; esac
+case "$argv" in *"$enc"*) ;; *) fails="$fails address-not-dialed" ;; esac
+[ "$socket_bound" -eq 1 ] || fails="$fails no-socket"
+[ "$probe_rc" -eq 0 ] || fails="$fails probe-failed"
+[ -n "$fails" ] && echo "expectations failed:$fails"
+[ -z "$fails" ]
+DIRECT_GATE
+)"
+name=direct-source-config-ok
+out="$(timeout 180 podman run --rm --pull=never --network none --user 65532 --tmpfs /run/c:mode=1777 \
+  -e "GATE_CAM_SECRET=p@ss:wor/d 1" "$image" sh -c "$direct_script" 2>&1)"
+rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  pass "$name"
+else
+  fail "$name" "exit $rc: ${out:0:200}"
+fi
+
 if [[ "$failed" -ne 0 ]]; then
   exit 1
 fi
