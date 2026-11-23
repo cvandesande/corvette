@@ -42,6 +42,7 @@ fn front_camera() -> CameraConfig {
         height: 480,
         fps: 10,
         confirm_threshold: 0.7,
+        source: None,
         area: None,
     }
 }
@@ -137,6 +138,7 @@ fn an_area_point_outside_the_pixel_range_is_an_area_error() {
         height: 480,
         fps: 10,
         confirm_threshold: 0.7,
+        source: None,
         area: Some(Area {
             name: "yard".to_owned(),
             // A point whose scaled pixel leaves i32: Config's own bounds refuse such a polygon, so the camera is built directly.
@@ -160,6 +162,7 @@ fn a_frame_too_narrow_for_the_motion_shape_is_a_stage_error() {
         height: 1600,
         fps: 10,
         confirm_threshold: 0.7,
+        source: None,
         area: None,
     };
     let error = CameraPlan::new(&config(&labels_in(&dir)), &camera)

@@ -36,10 +36,18 @@ pub const CAMERA_KEYS: &[&str] = &[
     "fps",
     "confirm_threshold",
     "area",
+    "source",
 ];
 pub const REQUIRED_CAMERA_KEYS: &[&str] = &["name", "width", "height", "fps"];
 pub const AREA_KEYS: &[&str] = &["name", "polygon", "pad_pixels"];
 pub const REQUIRED_AREA_KEYS: &[&str] = &["name", "polygon"];
+pub const SOURCE_KEYS: &[&str] = &["main", "sub"];
+pub const STREAM_KEYS: &[&str] = &["host", "port", "path", "username", "secret_env"];
+pub const REQUIRED_STREAM_KEYS: &[&str] = &["host"];
+pub const MIN_STREAM_PORT: u32 = 1;
+pub const MAX_STREAM_PORT: u32 = 65535;
+pub const DEFAULT_STREAM_PORT: u32 = 554;
+pub const DEFAULT_STREAM_PATH: &str = "/";
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -57,6 +65,22 @@ pub struct CameraConfig {
     pub fps: u32,
     pub confirm_threshold: f64,
     pub area: Option<Area>,
+    pub source: Option<CameraSource>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CameraSource {
+    pub main: Option<StreamSource>,
+    pub sub: Option<StreamSource>,
+}
+
+#[derive(Clone, Debug)]
+pub struct StreamSource {
+    pub host: String,
+    pub port: u32,
+    pub path: String,
+    pub username: String,
+    pub secret_env: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,13 +154,17 @@ impl Config {
         let Some(root) = object_at(value, "", &mut out) else {
             return Err(out);
         };
-        reject_unknown(root, "", CONFIG_KEYS, &mut out);
-        require_present(root, "", REQUIRED_CONFIG_KEYS, &mut out);
-        let worker_socket = text_at(root, "", "worker_socket", &mut out).map(PathBuf::from);
-        let labels = text_at(root, "", "labels", &mut out).map(PathBuf::from);
+        let at = Locator {
+            base: "",
+            link: dotted,
+        };
+        reject_unknown(root, at, CONFIG_KEYS, &mut out);
+        require_present(root, at, REQUIRED_CONFIG_KEYS, &mut out);
+        let worker_socket = text_at(root, at, "worker_socket", &mut out).map(PathBuf::from);
+        let labels = text_at(root, at, "labels", &mut out).map(PathBuf::from);
         let deadline = integer_at(
             root,
-            "",
+            at,
             "deadline_ms",
             MIN_DEADLINE_MS,
             MAX_DEADLINE_MS,
@@ -311,9 +339,10 @@ fn camera_at(
     out: &mut Vec<Violation>,
 ) -> Option<CameraConfig> {
     let object = object_at(value, base, out)?;
-    reject_unknown(object, base, CAMERA_KEYS, out);
-    require_present(object, base, REQUIRED_CAMERA_KEYS, out);
-    let mut name = text_at(object, base, "name", out).map(str::to_owned);
+    let at = Locator { base, link: dotted };
+    reject_unknown(object, at, CAMERA_KEYS, out);
+    require_present(object, at, REQUIRED_CAMERA_KEYS, out);
+    let mut name = text_at(object, at, "name", out).map(str::to_owned);
     if name.as_deref() == Some("") {
         out.push(Violation {
             found: Some(Value::String(String::new())),
@@ -321,12 +350,19 @@ fn camera_at(
         });
         name = None;
     }
-    let width = integer_at(object, base, "width", MIN_EDGE, MAX_EDGE, None, out);
-    let height = integer_at(object, base, "height", MIN_EDGE, MAX_EDGE, None, out);
-    let fps = integer_at(object, base, "fps", MIN_FPS, MAX_FPS, None, out);
+    let width = integer_at(object, at, "width", MIN_EDGE, MAX_EDGE, None, out);
+    let height = integer_at(object, at, "height", MIN_EDGE, MAX_EDGE, None, out);
+    let fps = integer_at(object, at, "fps", MIN_FPS, MAX_FPS, None, out);
     let confirm_threshold = confirm_at(object, base, out);
     let area = object.get("area").map_or(Some(None), |area| {
         Some(area_at(area, &dotted(base, "area"), out))
+    });
+    let source_label = name
+        .as_ref()
+        .map_or_else(|| base.to_owned(), |name| format!("camera {name}"));
+    let source_base = format!("{source_label}: source");
+    let source = object.get("source").map_or(Some(None), |source| {
+        Some(source_at(source, &source_base, out))
     });
     if let Some(name) = &name
         && !names.insert(name.clone())
@@ -346,18 +382,20 @@ fn camera_at(
         fps: fps?,
         confirm_threshold: confirm_threshold?,
         area: area?,
+        source: source?,
     })
 }
 
 fn area_at(value: &Value, base: &str, out: &mut Vec<Violation>) -> Option<Area> {
     let object = object_at(value, base, out)?;
-    reject_unknown(object, base, AREA_KEYS, out);
-    require_present(object, base, REQUIRED_AREA_KEYS, out);
-    let name = text_at(object, base, "name", out);
+    let at = Locator { base, link: dotted };
+    reject_unknown(object, at, AREA_KEYS, out);
+    require_present(object, at, REQUIRED_AREA_KEYS, out);
+    let name = text_at(object, at, "name", out);
     let polygon = polygon_at(object, base, out);
     let pad_pixels = integer_at(
         object,
-        base,
+        at,
         "pad_pixels",
         MIN_PAD_PIXELS,
         MAX_PAD_PIXELS,
@@ -368,6 +406,94 @@ fn area_at(value: &Value, base: &str, out: &mut Vec<Violation>) -> Option<Area> 
         name: name?.to_owned(),
         polygon: polygon?,
         pad_pixels: pad_pixels?,
+    })
+}
+
+/// Parses one camera's `source` table. `base` names the camera in refusal text,
+/// by name when usable and by indexed path otherwise.
+fn source_at(value: &Value, base: &str, out: &mut Vec<Violation>) -> Option<CameraSource> {
+    let object = object_at(value, base, out)?;
+    let at = Locator {
+        base,
+        link: colonic,
+    };
+    reject_unknown(object, at, SOURCE_KEYS, out);
+    if !object.contains_key("main") && !object.contains_key("sub") {
+        out.push(Violation::new(
+            base.to_owned(),
+            "expected main or sub".to_owned(),
+        ));
+        return None;
+    }
+    let main = object.get("main").map_or(Some(None), |main| {
+        Some(stream_at(main, &format!("{base} main"), out))
+    });
+    let sub = object.get("sub").map_or(Some(None), |sub| {
+        Some(stream_at(sub, &format!("{base} sub"), out))
+    });
+    Some(CameraSource {
+        main: main?,
+        sub: sub?,
+    })
+}
+
+fn stream_at(value: &Value, base: &str, out: &mut Vec<Violation>) -> Option<StreamSource> {
+    let object = object_at(value, base, out)?;
+    let at = Locator {
+        base,
+        link: colonic,
+    };
+    reject_unknown(object, at, STREAM_KEYS, out);
+    require_present(object, at, REQUIRED_STREAM_KEYS, out);
+    let mut host = text_at(object, at, "host", out).map(str::to_owned);
+    if host.as_deref() == Some("") {
+        out.push(Violation {
+            found: Some(Value::String(String::new())),
+            ..Violation::new(at.key("host"), "empty".to_owned())
+        });
+        host = None;
+    }
+    if host.as_deref().is_some_and(|host| host.contains('/')) {
+        out.push(Violation::new(
+            at.key("host"),
+            "expected a host without /".to_owned(),
+        ));
+        host = None;
+    }
+    let port = integer_at(
+        object,
+        at,
+        "port",
+        MIN_STREAM_PORT,
+        MAX_STREAM_PORT,
+        Some(DEFAULT_STREAM_PORT),
+        out,
+    );
+    let mut path = match object.get("path") {
+        None => Some(DEFAULT_STREAM_PATH.to_owned()),
+        Some(_) => text_at(object, at, "path", out).map(str::to_owned),
+    };
+    if path.as_deref().is_some_and(|path| !path.starts_with('/')) {
+        out.push(Violation::new(
+            at.key("path"),
+            "expected a path starting with /".to_owned(),
+        ));
+        path = None;
+    }
+    let username = match object.get("username") {
+        None => Some(String::new()),
+        Some(_) => text_at(object, at, "username", out).map(str::to_owned),
+    };
+    let secret_env = match object.get("secret_env") {
+        None => Some(None),
+        Some(_) => text_at(object, at, "secret_env", out).map(|env| Some(env.to_owned())),
+    };
+    Some(StreamSource {
+        host: host?,
+        port: port?,
+        path: path?,
+        username: username?,
+        secret_env: secret_env?,
     })
 }
 
@@ -499,14 +625,14 @@ fn confirm_at(object: &Map<String, Value>, base: &str, out: &mut Vec<Violation>)
 
 fn integer_at(
     object: &Map<String, Value>,
-    base: &str,
+    at: Locator<'_>,
     key: &str,
     min: u32,
     max: u32,
     default: Option<u32>,
     out: &mut Vec<Violation>,
 ) -> Option<u32> {
-    let path = dotted(base, key);
+    let path = at.key(key);
     let Some(found) = object.get(key) else {
         return default;
     };
@@ -535,13 +661,13 @@ fn integer_at(
 
 fn text_at<'v>(
     object: &'v Map<String, Value>,
-    base: &str,
+    at: Locator<'_>,
     key: &str,
     out: &mut Vec<Violation>,
 ) -> Option<&'v str> {
     let found = object.get(key)?;
     let Some(text) = found.as_str() else {
-        out.push(wrong_type_at(dotted(base, key), "a string", found));
+        out.push(wrong_type_at(at.key(key), "a string", found));
         return None;
     };
     Some(text)
@@ -563,7 +689,7 @@ fn object_at<'v>(
 
 fn reject_unknown(
     object: &Map<String, Value>,
-    base: &str,
+    at: Locator<'_>,
     known: &[&str],
     out: &mut Vec<Violation>,
 ) {
@@ -577,7 +703,7 @@ fn reject_unknown(
             out.push(Violation {
                 found: scalar.then(|| value.clone()),
                 allowed: Some(Value::Array(names.clone())),
-                ..Violation::new(dotted(base, key), "unknown key".to_owned())
+                ..Violation::new(at.key(key), "unknown key".to_owned())
             });
         }
     }
@@ -585,13 +711,13 @@ fn reject_unknown(
 
 fn require_present(
     object: &Map<String, Value>,
-    base: &str,
+    at: Locator<'_>,
     required: &[&str],
     out: &mut Vec<Violation>,
 ) {
     for key in required {
         if !object.contains_key(*key) {
-            out.push(Violation::new(dotted(base, key), "missing".to_owned()));
+            out.push(Violation::new(at.key(key), "missing".to_owned()));
         }
     }
 }
@@ -633,6 +759,7 @@ fn ranged(path: String, rule: String, found: Value, allowed: Value) -> Violation
 }
 
 fn camera_to_value(camera: &CameraConfig) -> Value {
+    // `source` stays out on purpose: no route reads or serves stream sources.
     let mut object = Map::new();
     object.insert("name".to_owned(), Value::String(camera.name.clone()));
     object.insert("width".to_owned(), Value::from(u64::from(camera.width)));
@@ -669,6 +796,23 @@ fn dotted(base: &str, key: &str) -> String {
         key.to_owned()
     } else {
         format!("{base}.{key}")
+    }
+}
+
+fn colonic(base: &str, key: &str) -> String {
+    format!("{base}: {key}")
+}
+
+/// Where a key sits in the document: the table's path and how a key appends to it.
+#[derive(Clone, Copy)]
+struct Locator<'a> {
+    base: &'a str,
+    link: fn(&str, &str) -> String,
+}
+
+impl Locator<'_> {
+    fn key(self, key: &str) -> String {
+        (self.link)(self.base, key)
     }
 }
 

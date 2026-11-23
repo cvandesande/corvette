@@ -5,6 +5,42 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["worker_socket", "labels", "deadline_ms", "cameras"],
+  "$defs": {
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host"],
+      "description": "One direct stream address with its secret reference; no credential value sits in the file.",
+      "properties": {
+        "host": {
+          "type": "string",
+          "pattern": "^[^/]+$",
+          "description": "Camera IP address or host name."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 554,
+          "description": "RTSP port."
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/",
+          "default": "/",
+          "description": "RTSP path, starting with a slash."
+        },
+        "username": {
+          "type": "string",
+          "description": "Stream username, plain in the file."
+        },
+        "secret_env": {
+          "type": "string",
+          "description": "Name of the environment variable holding the stream password."
+        }
+      }
+    }
+  },
   "properties": {
     "worker_socket": {
       "type": "string",
@@ -94,6 +130,16 @@
                 "default": 16,
                 "description": "Keep-mask square dilation in frame pixels."
               }
+            }
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "anyOf": [{ "required": ["main"] }, { "required": ["sub"] }],
+            "description": "Direct camera streams, at least one of main or sub; absent means the camera is dialed through the restream.",
+            "properties": {
+              "main": { "$ref": "#/$defs/stream" },
+              "sub": { "$ref": "#/$defs/stream" }
             }
           }
         }

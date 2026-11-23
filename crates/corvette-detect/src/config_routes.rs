@@ -64,6 +64,9 @@ impl ServiceState {
             Ok(value) => value,
             Err(answer) => return answer,
         };
+        if let Some(refusal) = source_refusal_answer(target, &value) {
+            return refusal;
+        }
         let proposed = match Config::validate_all(&value) {
             Ok(proposed) => proposed,
             Err(violations) => return invalid_config(target, &violations),
@@ -109,6 +112,9 @@ impl ServiceState {
         else {
             return unauthorized(target);
         };
+        if let Some(refusal) = source_refusal_answer(target, &value) {
+            return refusal;
+        }
         let proposed = match Config::validate_all(&value) {
             Ok(proposed) => proposed,
             Err(violations) => return invalid_config(target, &violations),
@@ -226,6 +232,24 @@ fn remote_user_is_auditable(user: &str) -> bool {
         && user
             .bytes()
             .all(|byte| (0x20..0x7f).contains(&byte) && byte != b'"')
+}
+
+/// Refuses a body whose cameras carry a `source` table: the route view has no
+/// stream keys, so stream details can only arrive by editing the file.
+fn source_refusal_answer(target: &str, value: &Value) -> Option<String> {
+    let carries = value
+        .get("cameras")
+        .and_then(Value::as_array)
+        .is_some_and(|cameras| cameras.iter().any(|camera| camera.get("source").is_some()));
+    carries.then(|| {
+        problem(
+            422,
+            "source_not_allowed",
+            "a camera source table is not accepted on this route",
+            target,
+            None,
+        )
+    })
 }
 
 fn header<'a>(head: &'a [u8], name: &str) -> Option<&'a str> {

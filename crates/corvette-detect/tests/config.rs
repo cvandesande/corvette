@@ -3,10 +3,11 @@ use std::time::Duration;
 
 use corvette_detect::{
     AREA_KEYS, CAMERA_KEYS, CONFIG_KEYS, CONFIRM_MAX, CONFIRM_MIN_EXCLUSIVE, Config,
-    DEFAULT_CONFIRM_THRESHOLD, DEFAULT_PAD_PIXELS, MAX_DEADLINE_MS, MAX_EDGE, MAX_FPS,
-    MAX_PAD_PIXELS, MAX_POLYGON_COORD, MIN_CAMERAS, MIN_DEADLINE_MS, MIN_EDGE, MIN_FPS,
-    MIN_POLYGON_COORD, MIN_POLYGON_POINTS, POINT_COORDINATES, REQUIRED_AREA_KEYS,
-    REQUIRED_CAMERA_KEYS, REQUIRED_CONFIG_KEYS,
+    DEFAULT_CONFIRM_THRESHOLD, DEFAULT_PAD_PIXELS, DEFAULT_STREAM_PATH, DEFAULT_STREAM_PORT,
+    MAX_DEADLINE_MS, MAX_EDGE, MAX_FPS, MAX_PAD_PIXELS, MAX_POLYGON_COORD, MAX_STREAM_PORT,
+    MIN_CAMERAS, MIN_DEADLINE_MS, MIN_EDGE, MIN_FPS, MIN_POLYGON_COORD, MIN_POLYGON_POINTS,
+    MIN_STREAM_PORT, POINT_COORDINATES, REQUIRED_AREA_KEYS, REQUIRED_CAMERA_KEYS,
+    REQUIRED_CONFIG_KEYS, REQUIRED_STREAM_KEYS, SOURCE_KEYS, STREAM_KEYS,
 };
 use toml_edit::DocumentMut;
 
@@ -595,6 +596,47 @@ fn schema_agrees_with_the_loader_bounds_and_lists() {
     );
 }
 
+#[test]
+fn schema_agrees_with_the_source_and_stream_keys() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/design/detection-config.schema.json"
+    );
+    let text = std::fs::read_to_string(path).expect("schema file present");
+    let schema: serde_json::Value = serde_json::from_str(&text).expect("schema parses");
+    let number =
+        |value: &serde_json::Value| value.as_f64().expect("a number in the schema").to_bits();
+    let camera = &schema["properties"]["cameras"]["items"];
+    let source = &camera["properties"]["source"];
+    assert_eq!(
+        schema_names(source["properties"].as_object().expect("source properties")),
+        sorted(SOURCE_KEYS)
+    );
+    let stream = &schema["$defs"]["stream"];
+    assert_eq!(
+        schema_names(stream["properties"].as_object().expect("stream properties")),
+        sorted(STREAM_KEYS)
+    );
+    assert_eq!(schema_strings(&stream["required"]), REQUIRED_STREAM_KEYS);
+    let port = &stream["properties"]["port"];
+    assert_eq!(
+        number(&port["minimum"]),
+        f64::from(MIN_STREAM_PORT).to_bits()
+    );
+    assert_eq!(
+        number(&port["maximum"]),
+        f64::from(MAX_STREAM_PORT).to_bits()
+    );
+    assert_eq!(
+        number(&port["default"]),
+        f64::from(DEFAULT_STREAM_PORT).to_bits()
+    );
+    assert_eq!(
+        stream["properties"]["path"]["default"].as_str(),
+        Some(DEFAULT_STREAM_PATH)
+    );
+}
+
 const TWO_AREAS: &str = r#"[[cameras]]
 [cameras.area]
 name = "zone"
@@ -793,4 +835,176 @@ fn from_value_maps_the_first_violation_of_a_multi_fault_document() {
     });
     let error = Config::from_value(&value).expect_err("refused");
     assert_eq!(error.to_string(), "deadline_ms: 0 is below 1");
+}
+
+const MAIN_FULL: &str = r#"[cameras.source.main]
+host = "cam.example"
+port = 554
+path = "/live"
+username = "op"
+secret_env = "CAM_SECRET"
+"#;
+
+const SUB_FULL: &str = r#"[cameras.source.sub]
+host = "cam-sub.example"
+port = 8554
+path = "/sub"
+username = "sub-op"
+secret_env = "CAM_SUB_SECRET"
+"#;
+
+const SECRET_CANARY: &str = "p@ss:wor/d 1";
+
+fn camera_source(streams: &str) -> String {
+    format!(
+        r#"worker_socket = "/s"
+labels = "l.txt"
+deadline_ms = 100
+[[cameras]]
+name = "front"
+width = 640
+height = 480
+fps = 5
+
+{streams}"#
+    )
+}
+
+#[test]
+fn source_tables_parse_whole_partial_and_with_defaults() {
+    let both = Config::from_toml(&camera_source(&format!("{MAIN_FULL}\n{SUB_FULL}")))
+        .expect("a camera with both streams is accepted");
+    let source = both.cameras[0].source.as_ref().expect("source parsed");
+    let main = source.main.as_ref().expect("main parsed");
+    assert_eq!(main.host, "cam.example");
+    assert_eq!(main.port, 554);
+    assert_eq!(main.path, "/live");
+    assert_eq!(main.username, "op");
+    assert_eq!(main.secret_env.as_deref(), Some("CAM_SECRET"));
+    let sub = source.sub.as_ref().expect("sub parsed");
+    assert_eq!(sub.host, "cam-sub.example");
+    assert_eq!(sub.port, 8554);
+    assert_eq!(sub.secret_env.as_deref(), Some("CAM_SUB_SECRET"));
+    let main_only = Config::from_toml(&camera_source(MAIN_FULL)).expect("main only");
+    let source = main_only.cameras[0].source.as_ref().expect("source parsed");
+    assert!(source.main.is_some() && source.sub.is_none());
+    let sub_only = Config::from_toml(&camera_source(SUB_FULL)).expect("sub only");
+    let source = sub_only.cameras[0].source.as_ref().expect("source parsed");
+    assert!(source.main.is_none() && source.sub.is_some());
+    let sparse = Config::from_toml(&camera_source(
+        "[cameras.source.main]\nhost = \"cam.example\"\n",
+    ))
+    .expect("a stream of one key is accepted");
+    let main = sparse.cameras[0]
+        .source
+        .as_ref()
+        .expect("source parsed")
+        .main
+        .as_ref()
+        .expect("main parsed");
+    assert_eq!(main.port, DEFAULT_STREAM_PORT);
+    assert_eq!(main.path, DEFAULT_STREAM_PATH);
+    assert_eq!(main.username, "");
+    assert_eq!(main.secret_env, None);
+}
+
+#[test]
+fn source_refusals_name_the_camera_key_and_rule_and_never_a_credential() {
+    let with_canary = |key: &str| {
+        MAIN_FULL.replace(
+            "host = \"cam.example\"",
+            &format!("{key} = \"{SECRET_CANARY}\"\nhost = \"cam.example\""),
+        )
+    };
+    let cases = [
+        (
+            "[cameras.source]\n".to_owned(),
+            "camera front: source: expected main or sub",
+        ),
+        (
+            MAIN_FULL.replace("port = 554", "port = 0"),
+            "camera front: source main: port: 0 is below 1",
+        ),
+        (
+            MAIN_FULL.replace("port = 554", "port = 65536"),
+            "camera front: source main: port: 65536 is above 65535",
+        ),
+        (
+            MAIN_FULL.replace("path = \"/live\"", "path = \"live\""),
+            "camera front: source main: path: expected a path starting with /",
+        ),
+        (
+            MAIN_FULL.replace("host = \"cam.example\"", "host = \"cam.example/live\""),
+            "camera front: source main: host: expected a host without /",
+        ),
+        (
+            MAIN_FULL.replace("host = \"cam.example\"", "host = \"\""),
+            "camera front: source main: host: empty",
+        ),
+        (
+            with_canary("password"),
+            "camera front: source main: password: unknown key",
+        ),
+        (
+            with_canary("secret_file"),
+            "camera front: source main: secret_file: unknown key",
+        ),
+    ];
+    for (streams, want) in cases {
+        let refusal = Config::from_toml(&camera_source(&streams)).expect_err("refused");
+        assert_eq!(refusal.to_string(), want);
+        assert!(
+            !refusal.to_string().contains(SECRET_CANARY),
+            "the refusal echoed the canary: {refusal}"
+        );
+    }
+}
+
+#[test]
+fn a_source_refusal_without_a_usable_camera_name_names_the_indexed_path() {
+    let value = serde_json::json!({
+        "worker_socket": "/s",
+        "labels": "l.txt",
+        "deadline_ms": 100,
+        "cameras": [{"width": 640, "height": 480, "fps": 5, "source": {"main": {"host": ""}}}],
+    });
+    let violations = Config::validate_all(&value).expect_err("refused");
+    let listed: Vec<(&str, &str)> = violations
+        .iter()
+        .map(|violation| (violation.path.as_str(), violation.rule.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("cameras[0].name", "missing"),
+            ("cameras[0]: source main: host", "empty"),
+        ]
+    );
+}
+
+#[test]
+fn the_direct_source_sample_loads_with_placeholders_only() {
+    let text = include_str!("fixtures/detection-direct.toml");
+    let sample = Config::from_toml(text).expect("sample accepted");
+    assert_eq!(sample.cameras.len(), 2);
+    let names: Vec<&str> = sample
+        .cameras
+        .iter()
+        .map(|camera| camera.name.as_str())
+        .collect();
+    assert_eq!(names, ["front", "back"]);
+    let front = sample.cameras[0].source.as_ref().expect("front source");
+    let main = front.main.as_ref().expect("front main");
+    assert_eq!(main.host, "HOST_PLACEHOLDER");
+    assert_eq!(main.port, 554);
+    assert_eq!(main.path, "/PATH_PLACEHOLDER");
+    assert_eq!(main.username, "USERNAME_PLACEHOLDER");
+    assert_eq!(main.secret_env.as_deref(), Some("CORVETTE_CAM_FRONT"));
+    let back = sample.cameras[1].source.as_ref().expect("back source");
+    let sub = back.sub.as_ref().expect("back sub");
+    assert_eq!(sub.secret_env.as_deref(), Some("CORVETTE_CAM_BACK"));
+    assert!(
+        !text.contains(SECRET_CANARY),
+        "no credential value belongs in the sample"
+    );
 }

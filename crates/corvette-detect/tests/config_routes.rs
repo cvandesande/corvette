@@ -815,3 +815,79 @@ async fn apply_without_a_config_path_answers_config_unavailable() {
     assert_eq!(problem(&response)["code"], "config_unavailable");
     assert_eq!(problem(&response)["instance"], CONFIG_PATH);
 }
+
+fn body_with_source(secret: &str) -> String {
+    json!({
+        "worker_socket": "/run/detect.sock",
+        "labels": "/run/labels.txt",
+        "deadline_ms": 5000,
+        "cameras": [{
+            "name": "front",
+            "width": 640,
+            "height": 480,
+            "fps": 5,
+            "source": {"main": {"host": "cam.example", "password": secret}},
+        }],
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn validate_of_a_body_carrying_a_source_is_refused_without_validating() {
+    let path = saved_file("validate_source", SAVED);
+    let socket = start("validate_source", Some(path));
+    let response = request(
+        &socket,
+        &post(VALIDATE_PATH, body_with_source("sekret9canary").as_bytes()),
+    )
+    .await;
+    assert_eq!(status_code(&response), 422);
+    assert_eq!(problem(&response)["code"], "source_not_allowed");
+    assert!(
+        !body(&response).contains("sekret9canary"),
+        "the refusal echoed a value: {}",
+        body(&response)
+    );
+}
+
+#[tokio::test]
+async fn apply_of_a_body_carrying_a_source_is_refused_and_writes_nothing() {
+    let path = saved_file("apply_source", SAVED);
+    let socket = start("apply_source", Some(path.clone()));
+    let current = revision(&std::fs::read(&path).expect("read"));
+    let proposed = body_with_source("sekret9canary");
+    let response = request(
+        &socket,
+        &put_request(
+            proposed.as_bytes(),
+            Some("operator"),
+            Some(&format!("\"{current}\"")),
+        ),
+    )
+    .await;
+    assert_eq!(status_code(&response), 422);
+    assert_eq!(problem(&response)["code"], "source_not_allowed");
+    assert!(
+        !body(&response).contains("sekret9canary"),
+        "the refusal echoed a value: {}",
+        body(&response)
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("read after"),
+        SAVED.as_bytes(),
+        "the saved file must stand unchanged"
+    );
+}
+
+#[tokio::test]
+async fn get_config_never_serves_a_source_the_saved_file_carries() {
+    let saved = format!("{SAVED}\n[cameras.source.main]\nhost = \"cam.example\"\n");
+    let path = saved_file("get_source", &saved);
+    let socket = start("get_source", Some(path));
+    let response = request(&socket, &get(CONFIG_PATH)).await;
+    assert_eq!(status_code(&response), 200);
+    let value: Value = serde_json::from_str(body(&response)).expect("json body");
+    assert!(value["cameras"][0].get("source").is_none());
+    assert!(!body(&response).contains("cam.example"));
+    assert!(!body(&response).contains("source"));
+}

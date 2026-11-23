@@ -1,0 +1,56 @@
+# Direct-source soak copy of window/detection.toml: front and back dial their
+# cameras directly. Hosts, paths and usernames are placeholders for the operator.
+worker_socket = "/run/corvette-detect/worker.sock"
+labels = "/config/model_cache/yolov9t-640-20260715-labelmap.txt"
+deadline_ms = 10000
+
+[[cameras]]
+name = "front"
+width = 704
+height = 576
+fps = 5
+confirm_threshold = 0.7
+[cameras.area]
+name = "Front-Detection-Area"
+polygon = [
+  [0.002, 0.618], [0.0, 0.754], [0.042, 0.959], [0.056, 1.0],
+  [0.831, 1.0], [0.914, 0.289], [0.555, 0.108],
+]
+
+[cameras.source.main]
+host = "HOST_PLACEHOLDER"
+port = 554
+path = "/PATH_PLACEHOLDER"
+username = "USERNAME_PLACEHOLDER"
+secret_env = "CORVETTE_CAM_FRONT"
+
+[cameras.source.sub]
+host = "HOST_PLACEHOLDER"
+port = 554
+path = "/PATH_PLACEHOLDER"
+username = "USERNAME_PLACEHOLDER"
+secret_env = "CORVETTE_CAM_FRONT"
+
+[[cameras]]
+name = "back"
+width = 704
+height = 576
+fps = 5
+confirm_threshold = 0.7
+[cameras.area]
+name = "Back-Detection-Area"
+polygon = [[0.041, 0.427], [0.533, 0.246], [0.846, 0.381], [1.0, 0.483], [1.0, 1.0], [0.131, 0.998]]
+
+[cameras.source.main]
+host = "HOST_PLACEHOLDER"
+port = 554
+path = "/PATH_PLACEHOLDER"
+username = "USERNAME_PLACEHOLDER"
+secret_env = "CORVETTE_CAM_BACK"
+
+[cameras.source.sub]
+host = "HOST_PLACEHOLDER"
+port = 554
+path = "/PATH_PLACEHOLDER"
+username = "USERNAME_PLACEHOLDER"
+secret_env = "CORVETTE_CAM_BACK"
