@@ -124,5 +124,6 @@ pub fn decode_command(
     }
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
+    command.stderr(Stdio::null());
     command
 }

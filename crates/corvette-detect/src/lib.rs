@@ -29,6 +29,7 @@ mod service_bodies;
 mod service_socket;
 mod shared_link;
 mod source;
+mod source_url;
 mod supervised;
 mod worker_link;
 
@@ -71,6 +72,7 @@ pub use service_bodies::{
 pub use service_socket::{CameraEntry, ServiceState, serve, serve_with_timeout};
 pub use shared_link::{LinkTimings, SharedInfer, SharedLink};
 pub use source::{FrameSource, STREAM_QUEUE_CAPACITY, SourceError};
+pub use source_url::{StreamAddressError, StreamKind, resolve_stream_url};
 pub use supervised::{Status, Supervised};
 pub use worker_link::{LinkState, WorkerLink};
 
