@@ -729,3 +729,98 @@ fn an_unset_or_empty_secret_refuses_startup_naming_camera_and_key_without_the_va
         assert!(!dir.join("service.sock").exists());
     }
 }
+
+#[test]
+fn the_camera_secret_never_reaches_service_output_or_status_across_restarts() {
+    let canary = "p@ss:wor/d 1";
+    let encoded_canary = "p%40ss%3Awor%2Fd%201";
+    let dir = temp_dir("secret-leak");
+    write_labels(&dir);
+    let text = format!(
+        "worker_socket = \"{w}\"\nlabels = \"{l}\"\ndeadline_ms = 5000\n\n[[cameras]]\nname = \"front\"\nwidth = 640\nheight = 480\nfps = 5\n\n[cameras.source.main]\nhost = \"cam-main\"\nport = 554\npath = \"/main\"\nusername = \"u\"\nsecret_env = \"FRONT_SECRET\"\n\n[cameras.source.sub]\nhost = \"cam-sub\"\nport = 554\npath = \"/sub\"\nusername = \"u\"\nsecret_env = \"FRONT_SECRET\"\n",
+        w = dir.join("worker.sock").display(),
+        l = dir.join("labels.txt").display(),
+    );
+    fs::write(dir.join("config.toml"), text).unwrap();
+    let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
+    // The stub fails at once, so the runner restarts it: its inherited stderr is the child's only path to the service's.
+    let runs = dir.join("ffmpeg-runs");
+    let argv_log = dir.join("ffmpeg-argv");
+    let ffmpeg = executable(
+        &dir,
+        "echo-ffmpeg",
+        &format!(
+            "#!/bin/sh\nprintf 'run\\n' >> \"{r}\"\nprintf '%s\\n' \"$@\" >> \"{a}\"\nprintf '%s\\n' \"$@\" >&2\nexit 1\n",
+            r = runs.display(),
+            a = argv_log.display(),
+        ),
+    );
+    let mut command = service_command_without_restream(&dir, &worker, &ffmpeg);
+    command
+        .env("FRONT_SECRET", canary)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut stdout_pipe = child.stdout.take().unwrap();
+    let mut stderr_pipe = child.stderr.take().unwrap();
+    let (stdout_tx, stdout_done) = std::sync::mpsc::channel();
+    let (stderr_tx, stderr_done) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut captured = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut captured);
+        let _ = stdout_tx.send(captured);
+    });
+    thread::spawn(move || {
+        let mut captured = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut captured);
+        let _ = stderr_tx.send(captured);
+    });
+    let socket = dir.join("service.sock");
+    let mut service = Running {
+        child,
+        socket: socket.clone(),
+    };
+    wait_until("the direct service socket", || socket.exists());
+    wait_until("a second run of the stub decoder", || {
+        fs::read_to_string(&runs).is_ok_and(|shown| shown.lines().count() >= 2)
+    });
+    let mut answer: Option<(u16, String)> = None;
+    wait_until("the status over the socket", || {
+        answer = try_get(&socket, STATUS).filter(|found| found.0 == 200);
+        answer.is_some()
+    });
+    let _ = service.child.kill();
+    let _ = service.child.wait();
+    let stdout = String::from_utf8_lossy(
+        &stdout_done
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the stdout pipe never ended"),
+    )
+    .into_owned();
+    let stderr = String::from_utf8_lossy(
+        &stderr_done
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the stderr pipe never ended"),
+    )
+    .into_owned();
+    let (_, body) = answer.expect("a status answer");
+    for captured in [&stderr, &stdout, &body] {
+        assert!(
+            !captured.contains(canary),
+            "the secret reached service output: {captured}"
+        );
+        assert!(
+            !captured.contains(encoded_canary),
+            "the encoded secret reached service output: {captured}"
+        );
+    }
+    assert!(
+        stderr.contains("event=config-loaded"),
+        "no startup line in the capture: {stderr}"
+    );
+    let dialed = fs::read_to_string(&argv_log).unwrap();
+    assert!(
+        dialed.contains(encoded_canary),
+        "the stub was never handed the dialled address: {dialed}"
+    );
+}
