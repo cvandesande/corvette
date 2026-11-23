@@ -400,6 +400,43 @@ fn duplicate_camera_names_are_refused() {
 }
 
 #[test]
+fn camera_name_with_unallowed_character_is_refused() {
+    // Each row is the camera's name as TOML basic-string text; \n and \" are TOML
+    // escapes, so the parsed name holds a newline or a quote respectively.
+    let cases = [
+        r#"name = "a\"b""#,
+        r#"name = "a\nb""#,
+        r#"name = "a b""#,
+        r#"name = "é""#,
+        r#"name = "a.b""#,
+    ];
+    for replacement in cases {
+        let text = MINIMAL_AREA.replace("name = \"a\"", replacement);
+        let shown = Config::from_toml(&text).expect_err("refused").to_string();
+        assert_eq!(
+            shown,
+            "cameras[0].name: name may hold only letters, digits, _ and -"
+        );
+        assert!(
+            !shown.contains('"'),
+            "a quote forged into the error: {shown}"
+        );
+        assert!(
+            !shown.contains('\n'),
+            "a newline forged into the error: {shown}"
+        );
+    }
+}
+
+#[test]
+fn camera_name_with_allowed_characters_loads() {
+    for name in ["front", "back_2", "cam-3", "A1"] {
+        let text = MINIMAL_AREA.replace("name = \"a\"", &format!("name = \"{name}\""));
+        Config::from_toml(&text).unwrap_or_else(|error| panic!("name {name}: {error}"));
+    }
+}
+
+#[test]
 fn zero_cameras_is_refused() {
     let text = "worker_socket = \"/s\"\nlabels = \"l.txt\"\ndeadline_ms = 100\ncameras = []\n";
     let error = Config::from_toml(text).expect_err("refused");

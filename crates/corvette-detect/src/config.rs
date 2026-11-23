@@ -350,6 +350,22 @@ fn camera_at(
         });
         name = None;
     }
+    // The name reaches every log line as unit="<name>" without escaping, so a quote or
+    // newline in it could forge a line; only plain characters are accepted.
+    if let Some(found) = name.clone().filter(|name| {
+        !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }) {
+        out.push(Violation {
+            found: Some(Value::String(found)),
+            ..Violation::new(
+                dotted(base, "name"),
+                "name may hold only letters, digits, _ and -".to_owned(),
+            )
+        });
+        name = None;
+    }
     let width = integer_at(object, at, "width", MIN_EDGE, MAX_EDGE, None, out);
     let height = integer_at(object, at, "height", MIN_EDGE, MAX_EDGE, None, out);
     let fps = integer_at(object, at, "fps", MIN_FPS, MAX_FPS, None, out);

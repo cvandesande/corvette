@@ -1252,12 +1252,12 @@ camera's decoder error text never reaches the log. A camera pipeline restart bui
 runner, so the first frame after a restart logs `connected` with `first_frame` and no
 downtime figure; `runner-failed` and `runner-restart` precede it.
 
-Finding: the configuration check accepts any camera name that is non-empty and unique, so a
-name holding a quote or a newline can forge a log line, because the line writer does not
-escape the name. The intended contract rejects a camera name outside letters, digits,
-`_` and `-` when the configuration is validated. The finding predates the lifecycle lines
-and applies to every line the service writes under a camera name; the validation rule is
-pending.
+Finding: the line writer does not escape the camera name, so a name holding a quote or a
+newline could forge a log line. The detection configuration check now rejects a camera
+name outside ASCII letters, digits, `_` and `-` (rule text `name may hold only letters,
+digits, _ and -`, which never echoes the name). The media bridge's own configuration and
+the request path it logs as a unit are not covered by this rule; that is a separate
+contract decision.
 
 ## The detection configuration is read, validated and applied through the API
 
