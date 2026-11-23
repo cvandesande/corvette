@@ -599,3 +599,133 @@ fn probe_after_a_shutdown_exits_one_on_the_unlinked_socket() {
     let probe = probe_command(&service.socket).output().unwrap();
     assert_eq!(probe.status.code(), Some(1));
 }
+
+fn write_two_source_config(dir: &Path) {
+    let text = format!(
+        "worker_socket = \"{w}\"\nlabels = \"{l}\"\ndeadline_ms = 5000\n\n[[cameras]]\nname = \"front\"\nwidth = 640\nheight = 480\nfps = 5\n\n[cameras.source.main]\nhost = \"cam-main\"\nport = 554\npath = \"/main\"\nusername = \"u\"\nsecret_env = \"FRONT_SECRET\"\n\n[cameras.source.sub]\nhost = \"cam-sub\"\nport = 554\npath = \"/sub\"\nusername = \"u\"\nsecret_env = \"FRONT_SECRET\"\n\n[[cameras]]\nname = \"back\"\nwidth = 640\nheight = 480\nfps = 5\n\n[cameras.source.main]\nhost = \"cam-back\"\nport = 554\npath = \"/back\"\nusername = \"u\"\nsecret_env = \"BACK_SECRET\"\n",
+        w = dir.join("worker.sock").display(),
+        l = dir.join("labels.txt").display(),
+    );
+    fs::write(dir.join("config.toml"), text).unwrap();
+}
+
+fn service_command_without_restream(dir: &Path, worker: &Path, ffmpeg: &Path) -> Command {
+    let mut command = Command::new(BIN);
+    command
+        .env_remove("CORVETTE_DETECTION_SOCKET")
+        .arg("--config")
+        .arg(dir.join("config.toml"))
+        .arg("--socket")
+        .arg(dir.join("service.sock"))
+        .arg("--ffmpeg")
+        .arg(ffmpeg)
+        .arg("--worker")
+        .arg(worker)
+        .arg("--worker-param")
+        .arg(dir.join("param"))
+        .arg("--worker-bin")
+        .arg(dir.join("bin"))
+        .arg("--worker-max-deadline-ms")
+        .arg("5000")
+        .arg("--worker-health-socket")
+        .arg(dir.join("health.sock"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+#[test]
+fn a_source_camera_starts_without_the_restream_flag_and_dials_its_sub_stream() {
+    let dir = temp_dir("direct-sub");
+    write_labels(&dir);
+    let text = format!(
+        "worker_socket = \"{w}\"\nlabels = \"{l}\"\ndeadline_ms = 5000\n\n[[cameras]]\nname = \"front\"\nwidth = 640\nheight = 480\nfps = 5\n\n[cameras.source.main]\nhost = \"cam-main\"\nport = 554\npath = \"/main\"\nusername = \"u\"\nsecret_env = \"FRONT_SECRET\"\n\n[cameras.source.sub]\nhost = \"cam-sub\"\nport = 554\npath = \"/sub\"\nusername = \"u\"\nsecret_env = \"FRONT_SECRET\"\n",
+        w = dir.join("worker.sock").display(),
+        l = dir.join("labels.txt").display(),
+    );
+    fs::write(dir.join("config.toml"), text).unwrap();
+    let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
+    let (ffmpeg, log) = (
+        executable(
+            &dir,
+            "logged-ffmpeg",
+            &format!(
+                "#!/bin/sh\necho \"$*\" >> \"{}\"\nexec sleep 30\n",
+                dir.join("ffmpeg.log").display()
+            ),
+        ),
+        dir.join("ffmpeg.log"),
+    );
+    let mut command = service_command_without_restream(&dir, &worker, &ffmpeg);
+    command.env("FRONT_SECRET", "p@ss:wor/d 1");
+    let mut child = command.spawn().unwrap();
+    let socket = dir.join("service.sock");
+    wait_until("the direct service socket", || socket.exists());
+    wait_until("the recorded ffmpeg arguments", || {
+        fs::read_to_string(&log).is_ok_and(|shown| !shown.is_empty())
+    });
+    let dialed = fs::read_to_string(&log).unwrap();
+    assert!(
+        dialed.contains("rtsp://u:p%40ss%3Awor%2Fd%201@cam-sub:554/sub"),
+        "the ffmpeg arguments should dial sub: {dialed}"
+    );
+    assert_eq!(try_get(&socket, STATUS).map(|found| found.0), Some(200));
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn a_camera_without_a_source_and_no_restream_flag_refuses_startup() {
+    let dir = temp_dir("no-restream");
+    write_labels(&dir);
+    write_config(&dir);
+    let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
+    let mut command = service_command_without_restream(&dir, &worker, Path::new("/bin/true"));
+    command.stderr(Stdio::piped());
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let shown = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(shown.contains("camera-plan-failed"), "{shown}");
+    assert!(
+        shown.contains(
+            "camera=front: --restream-address is required for a camera without a source table"
+        ),
+        "{shown}"
+    );
+    assert!(!dir.join("service.sock").exists());
+}
+
+#[test]
+fn an_unset_or_empty_secret_refuses_startup_naming_camera_and_key_without_the_value() {
+    for (what, set_back_secret, rule) in [
+        ("unset", false, "variable is not set"),
+        ("empty", true, "variable is empty"),
+    ] {
+        let dir = temp_dir(&format!("secret-{what}"));
+        write_labels(&dir);
+        write_two_source_config(&dir);
+        let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
+        let mut command = service_command_without_restream(&dir, &worker, Path::new("/bin/true"));
+        command
+            .env("FRONT_SECRET", "p@ss:wor/d 1")
+            .env_remove("BACK_SECRET")
+            .stderr(Stdio::piped());
+        if set_back_secret {
+            command.env("BACK_SECRET", "");
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(3), "for {what}");
+        let shown = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(shown.contains("camera-plan-failed"), "for {what}: {shown}");
+        assert!(
+            shown.contains(&format!("camera back: source main: secret_env: {rule}")),
+            "for {what}: {shown}"
+        );
+        assert!(
+            !shown.contains("p@ss:wor/d 1"),
+            "the canary must never reach the log, for {what}: {shown}"
+        );
+        assert!(!dir.join("service.sock").exists());
+    }
+}

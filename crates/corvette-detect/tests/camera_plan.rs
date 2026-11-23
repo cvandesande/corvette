@@ -1,6 +1,6 @@
 use corvette_detect::{
-    Area, CameraConfig, CameraPlan, Config, DEFAULT_POLICY, FrameClock, FrameOutcome,
-    PipelineCounters, PlanError, SharedLink, WorkerLink,
+    Area, CameraConfig, CameraPlan, CameraSource, Config, DEFAULT_POLICY, FrameClock, FrameOutcome,
+    PipelineCounters, PlanError, SharedLink, StreamSource, WorkerLink, stream_address,
 };
 use corvette_track::IdSource;
 use std::fs;
@@ -45,6 +45,71 @@ fn front_camera() -> CameraConfig {
         source: None,
         area: None,
     }
+}
+
+const CANARY: &str = "p@ss:wor/d 1";
+
+type SecretPair = (&'static str, &'static str);
+type SecretRow = (&'static str, &'static [SecretPair], &'static str);
+
+const fn no_secret(_: &str) -> Option<String> {
+    None
+}
+
+fn env_lookup<'a>(pairs: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {
+    move |name| {
+        pairs
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| (*value).to_owned())
+    }
+}
+
+fn plain_stream(host: &str, path: &str) -> StreamSource {
+    StreamSource {
+        host: host.to_owned(),
+        port: 554,
+        path: path.to_owned(),
+        username: String::new(),
+        secret_env: None,
+    }
+}
+
+fn secret_stream(host: &str, path: &str, variable: &str) -> StreamSource {
+    StreamSource {
+        host: host.to_owned(),
+        port: 554,
+        path: path.to_owned(),
+        username: "u".to_owned(),
+        secret_env: Some(variable.to_owned()),
+    }
+}
+
+fn camera_with_source(main: Option<StreamSource>, sub: Option<StreamSource>) -> CameraConfig {
+    CameraConfig {
+        source: Some(CameraSource { main, sub }),
+        ..front_camera()
+    }
+}
+
+fn dialed_url(
+    plan: &CameraPlan,
+    camera: &CameraConfig,
+    restream_address: &str,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> String {
+    let address = stream_address(camera, restream_address, lookup).expect("the dial");
+    let mut factory = plan.command_factory(PathBuf::from("/usr/bin/ffmpeg"), address);
+    let args: Vec<String> = factory()
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let at = args
+        .iter()
+        .position(|arg| arg == "-i")
+        .expect("the input flag");
+    args[at + 1].clone()
 }
 
 fn missing_socket_link() -> SharedLink {
@@ -175,10 +240,8 @@ fn a_frame_too_narrow_for_the_motion_shape_is_a_stage_error() {
 fn the_decode_command_names_the_sub_stream_url_exactly_once() {
     let dir = temp_dir("command");
     let plan = CameraPlan::new(&config(&labels_in(&dir)), &front_camera()).expect("the plan");
-    let mut factory = plan.command_factory(
-        PathBuf::from("/usr/bin/ffmpeg"),
-        String::from("127.0.0.1:8554"),
-    );
+    let address = stream_address(&front_camera(), "127.0.0.1:8554", &no_secret).expect("the dial");
+    let mut factory = plan.command_factory(PathBuf::from("/usr/bin/ffmpeg"), address);
     let url = "rtsp://127.0.0.1:8554/front_sub";
     let first = factory();
     assert_eq!(first.as_std().get_program(), "/usr/bin/ffmpeg");
@@ -196,4 +259,88 @@ fn the_decode_command_names_the_sub_stream_url_exactly_once() {
         .collect();
     assert_eq!(second_args, args);
     fs::remove_dir_all(&dir).expect("remove temp dir");
+}
+
+#[test]
+fn the_plan_dials_the_sub_stream_then_main_then_the_restream_form() {
+    let dir = temp_dir("dial");
+    let plan = CameraPlan::new(&config(&labels_in(&dir)), &front_camera()).expect("the plan");
+    let lookup = env_lookup(&[("CAM_SECRET", CANARY)]);
+    let rows = [
+        (
+            "a camera without a source keeps today's restream address byte for byte",
+            front_camera(),
+            "127.0.0.1:8554",
+            "rtsp://127.0.0.1:8554/front_sub",
+        ),
+        (
+            "a camera with sub and main dials sub",
+            camera_with_source(
+                Some(secret_stream("cam-main", "/main", "CAM_SECRET")),
+                Some(secret_stream("cam-sub", "/sub", "CAM_SECRET")),
+            ),
+            "",
+            "rtsp://u:p%40ss%3Awor%2Fd%201@cam-sub:554/sub",
+        ),
+        (
+            "a camera with only main dials main",
+            camera_with_source(Some(plain_stream("cam-main", "/live")), None),
+            "",
+            "rtsp://cam-main:554/live",
+        ),
+    ];
+    for (what, camera, restream_address, expected) in rows {
+        assert_eq!(
+            dialed_url(&plan, &camera, restream_address, &lookup),
+            expected,
+            "{what}"
+        );
+    }
+    fs::remove_dir_all(&dir).expect("remove temp dir");
+}
+
+#[test]
+fn two_cameras_in_one_config_dial_their_own_streams() {
+    let dir = temp_dir("two-dials");
+    let mut config = config(&labels_in(&dir));
+    let front = camera_with_source(
+        Some(secret_stream("cam-front-main", "/main", "CAM_SECRET")),
+        Some(secret_stream("cam-front-sub", "/sub", "CAM_SECRET")),
+    );
+    let back = camera_with_source(Some(plain_stream("cam-back", "/back")), None);
+    config.cameras = vec![front.clone(), back];
+    let plan = CameraPlan::new(&config, &front).expect("the plan");
+    let lookup = env_lookup(&[("CAM_SECRET", CANARY)]);
+    let expected = [
+        "rtsp://u:p%40ss%3Awor%2Fd%201@cam-front-sub:554/sub",
+        "rtsp://cam-back:554/back",
+    ];
+    for (camera, expected) in config.cameras.iter().zip(expected) {
+        assert_eq!(dialed_url(&plan, camera, "", &lookup), expected);
+    }
+    fs::remove_dir_all(&dir).expect("remove temp dir");
+}
+
+#[test]
+fn an_unset_or_empty_secret_variable_refuses_the_dial_naming_camera_and_key() {
+    let rows: [SecretRow; 2] = [
+        ("unset", &[("OTHER_SECRET", CANARY)], "variable is not set"),
+        (
+            "empty",
+            &[("OTHER_SECRET", CANARY), ("CAM_SECRET", "")],
+            "variable is empty",
+        ),
+    ];
+    for (what, pairs, rule) in rows {
+        let lookup = env_lookup(pairs);
+        let camera =
+            camera_with_source(Some(secret_stream("cam-main", "/live", "CAM_SECRET")), None);
+        let error = stream_address(&camera, "", &lookup).expect_err("the refusal");
+        assert_eq!(
+            error.to_string(),
+            format!("camera front: source main: secret_env: {rule}"),
+            "{what}"
+        );
+        assert!(!error.to_string().contains(CANARY), "{what}");
+    }
 }

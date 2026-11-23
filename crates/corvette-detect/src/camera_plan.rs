@@ -22,6 +22,7 @@ use crate::object_stage::ObjectStage;
 use crate::region_stage::{RegionStage, RegionStageSettings};
 use crate::replay_segment::Area;
 use crate::shared_link::SharedInfer;
+use crate::source_url::{StreamAddressError, StreamKind, resolve_stream_url};
 
 #[derive(Debug)]
 pub enum PlanError {
@@ -49,6 +50,37 @@ impl std::error::Error for PlanError {
             Self::Labels(_) | Self::Area(_) | Self::Stage(_) => None,
         }
     }
+}
+
+pub struct StreamAddress(String);
+
+impl fmt::Debug for StreamAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("StreamAddress(<redacted: carries the camera password>)")
+    }
+}
+
+/// Picks one camera's stream and assembles its address: the source `sub` when present, else the source `main`, else the `rtsp://{restream_address}/{name}_sub` restream form.
+///
+/// # Errors
+/// An unset or empty `secret_env` variable is refused with text naming camera and key and never a secret value.
+pub fn stream_address(
+    camera: &CameraConfig,
+    restream_address: &str,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<StreamAddress, StreamAddressError> {
+    let address = match &camera.source {
+        None => format!("rtsp://{restream_address}/{}_sub", camera.name),
+        Some(source) => {
+            let (kind, stream) = match (source.sub.as_ref(), source.main.as_ref()) {
+                (Some(sub), _) => (StreamKind::Sub, sub),
+                (None, Some(main)) => (StreamKind::Main, main),
+                (None, None) => unreachable!("the loader refuses a source with neither stream"),
+            };
+            resolve_stream_url(&camera.name, kind, stream, lookup)?
+        }
+    };
+    Ok(StreamAddress(address))
 }
 
 #[derive(Debug)]
@@ -142,13 +174,17 @@ impl CameraPlan {
     pub fn command_factory(
         &self,
         ffmpeg: PathBuf,
-        restream_address: String,
+        address: StreamAddress,
     ) -> impl FnMut() -> Command + Send + 'static {
-        let name = self.name.clone();
         let spec = self.spec;
         move || {
-            let url = format!("rtsp://{restream_address}/{name}_sub");
-            decode_command(&ffmpeg, &Input::Live { url }, spec)
+            decode_command(
+                &ffmpeg,
+                &Input::Live {
+                    url: address.0.clone(),
+                },
+                spec,
+            )
         }
     }
 

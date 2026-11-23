@@ -13,19 +13,21 @@ use std::time::{Duration, Instant};
 
 use corvette_detect::{
     CameraEntry, CameraPlan, CameraThreadSettings, CameraThreads, Config, DEFAULT_POLICY,
-    JoinReport, ServiceState, SharedLink, Supervised, ThreadEnd, WorkerLink, revision, serve,
+    JoinReport, ServiceState, SharedLink, StreamAddress, Supervised, ThreadEnd, WorkerLink,
+    revision, serve, stream_address,
 };
 use tokio::process::Command;
 use tokio::signal::unix::{Signal, SignalKind};
 
 const USAGE: &str = "\
-usage: corvette-detect-service --config PATH --ffmpeg PROGRAM --restream-address HOST:PORT
+usage: corvette-detect-service --config PATH --ffmpeg PROGRAM
            --worker PROGRAM --worker-param PATH --worker-bin PATH
            --worker-max-deadline-ms N --worker-health-socket PATH
-           [--socket PATH] [--worker-device VALUE] [--frame-timeout-ms N]
-           [--stop-timeout-ms N]
+           [--socket PATH] [--restream-address HOST:PORT] [--worker-device VALUE]
+           [--frame-timeout-ms N] [--stop-timeout-ms N]
        corvette-detect-service --probe [--socket PATH]
        corvette-detect-service --help
+       --restream-address is required when any camera has no source table
 exit codes:
      0  help, or serve ended by SIGTERM or SIGINT
      1  probe failed or serve loop ended with an error
@@ -59,7 +61,7 @@ pub struct Options {
     pub config: PathBuf,
     pub socket: PathBuf,
     pub ffmpeg: PathBuf,
-    pub restream_address: String,
+    pub restream_address: Option<String>,
     pub worker: WorkerLaunch,
     pub frame_timeout: Duration,
     pub stop_timeout: Duration,
@@ -205,9 +207,7 @@ fn serve_options(slots: FlagSlots, env_socket: Option<&OsStr>) -> Result<Options
         config: take_path(slots.config, "config")?,
         socket: take_socket(slots.socket, env_socket)?,
         ffmpeg: take_path(slots.ffmpeg, "ffmpeg")?,
-        restream_address: slots
-            .restream_address
-            .ok_or("missing required flag --restream-address")?,
+        restream_address: slots.restream_address,
         worker: WorkerLaunch {
             program: take_path(slots.worker, "worker")?,
             param: take_path(slots.worker_param, "worker-param")?,
@@ -327,8 +327,14 @@ fn text(value: &OsStr) -> String {
 /// Runs one startup sequence in order: parse, config read, camera plans, signal handlers, worker child, camera threads, socket claim, then serve.
 ///
 /// A first `SIGTERM` or `SIGINT`, and a camera-start failure after earlier cameras started, stops and joins the started cameras within `--stop-timeout-ms`; the worker guard and the runtime then drop so every child process is killed.
+///
+/// Camera secrets reach the plan build only through `secret_lookup`, read once per camera that names a `secret_env`.
 #[must_use]
-pub fn run(args: &[OsString], env_socket: Option<&OsStr>) -> ExitCode {
+pub fn run(
+    args: &[OsString],
+    env_socket: Option<&OsStr>,
+    secret_lookup: impl Fn(&str) -> Option<String>,
+) -> ExitCode {
     let options = match parse(args, env_socket) {
         Err(message) => return usage_error(&message),
         Ok(Invocation::Help) => {
@@ -351,7 +357,7 @@ pub fn run(args: &[OsString], env_socket: Option<&OsStr>) -> ExitCode {
         "config-loaded",
         format!("path={} revision={revision}", options.config.display()),
     );
-    let plans = match plan_all(&config) {
+    let plans = match plan_all(&config, options.restream_address.as_deref(), &secret_lookup) {
         Ok(plans) => plans,
         Err(reason) => {
             log_event("service", "camera-plan-failed", reason);
@@ -571,12 +577,28 @@ fn read_status_line(stream: &mut UnixStream) -> Result<String, String> {
     Ok(first_line)
 }
 
-fn plan_all(config: &Config) -> Result<Vec<CameraPlan>, String> {
+/// Builds one plan per camera together with the address that camera dials, refusing at the first refused camera.
+fn plan_all(
+    config: &Config,
+    restream_address: Option<&str>,
+    secret_lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<Vec<(CameraPlan, StreamAddress)>, String> {
     let mut plans = Vec::with_capacity(config.cameras.len());
     for camera in &config.cameras {
+        if camera.source.is_none() && restream_address.is_none() {
+            return Err(format!(
+                "camera={}: --restream-address is required for a camera without a source table",
+                camera.name
+            ));
+        }
+        let address =
+            match stream_address(camera, restream_address.unwrap_or_default(), secret_lookup) {
+                Err(error) => return Err(error.to_string()),
+                Ok(address) => address,
+            };
         match CameraPlan::new(config, camera) {
             Err(error) => return Err(format!("camera={} {error}", camera.name)),
-            Ok(plan) => plans.push(plan),
+            Ok(plan) => plans.push((plan, address)),
         }
     }
     Ok(plans)
@@ -586,7 +608,7 @@ fn start_cameras(
     started: &mut Vec<(String, CameraThreads)>,
     options: &Options,
     config: &Config,
-    plans: Vec<CameraPlan>,
+    plans: Vec<(CameraPlan, StreamAddress)>,
 ) -> Result<(), String> {
     let link = SharedLink::new(WorkerLink::new(
         config.worker_socket.clone(),
@@ -598,10 +620,9 @@ fn start_cameras(
         backoff: DEFAULT_POLICY,
     };
     started.reserve(plans.len());
-    for plan in plans {
+    for (plan, address) in plans {
         let name = plan.name().to_owned();
-        let make_command =
-            plan.command_factory(options.ffmpeg.clone(), options.restream_address.clone());
+        let make_command = plan.command_factory(options.ffmpeg.clone(), address);
         let (spec, clock) = (plan.spec(), plan.clock());
         match CameraThreads::start(
             &name,

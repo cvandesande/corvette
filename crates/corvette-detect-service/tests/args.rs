@@ -55,7 +55,7 @@ fn full_command_line_parses_with_defaults() {
     assert_eq!(opts.config.to_str(), Some("/c.toml"));
     assert_eq!(opts.socket.to_str(), Some("/s.sock"));
     assert_eq!(opts.ffmpeg.to_str(), Some("/bin/ffmpeg"));
-    assert_eq!(opts.restream_address, "cam:8554");
+    assert_eq!(opts.restream_address.as_deref(), Some("cam:8554"));
     assert_eq!(opts.worker.program.to_str(), Some("/bin/worker"));
     assert_eq!(opts.worker.param.to_str(), Some("/w.param"));
     assert_eq!(opts.worker.bin.to_str(), Some("/w.bin"));
@@ -109,7 +109,6 @@ fn each_required_flag_is_demanded_when_absent() {
         "--config",
         "--socket",
         "--ffmpeg",
-        "--restream-address",
         "--worker",
         "--worker-param",
         "--worker-bin",
@@ -322,10 +321,26 @@ fn with_replaced(
 }
 
 #[test]
+fn restream_address_may_be_absent_at_parse() {
+    let all = with(&base(), &["--socket", "/s.sock"]);
+    let index = all
+        .iter()
+        .position(|arg| *arg == "--restream-address")
+        .unwrap();
+    let stripped: Vec<&str> = all
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| *at != index && *at != index + 1)
+        .map(|(_, arg)| *arg)
+        .collect();
+    assert_eq!(options(&stripped, None).restream_address, None);
+}
+
+#[test]
 fn restream_address_accepts_one_host_and_a_live_port() {
     for shown in ["h:1", "h:65535", "127.0.0.1:8554"] {
         let opts = options(&with_replaced(&base(), "--restream-address", shown), None);
-        assert_eq!(opts.restream_address, shown);
+        assert_eq!(opts.restream_address.as_deref(), Some(shown));
     }
     for shown in ["h:0", "h:65536", "h:", ":80", "noport", "a:b:1", ":0"] {
         assert!(

@@ -6,5 +6,7 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let env_socket = std::env::var_os("CORVETTE_DETECTION_SOCKET");
-    corvette_detect_service::run(&args, env_socket.as_deref())
+    let secret_lookup =
+        |name: &str| std::env::var_os(name).map(|value| value.to_string_lossy().into_owned());
+    corvette_detect_service::run(&args, env_socket.as_deref(), secret_lookup)
 }
