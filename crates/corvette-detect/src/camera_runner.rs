@@ -2,9 +2,11 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
+use crate::camera_events::transition_event;
 use crate::candidate_stage::Infer;
 use crate::frame_slot::{SlotEvent, SlotReceiver};
 use crate::live_pipeline::{FrameOutcome, LiveError, LivePipeline, PipelineCounters};
+use crate::log_event;
 use crate::object_stage::FrameObjects;
 use crate::rate_window::RateWindow;
 use crate::shared_link::LinkTimings;
@@ -82,6 +84,9 @@ pub struct CameraRunner<'a, E: Infer> {
     objects: watch::Sender<Option<FrameObjects>>,
     window: RateWindow,
     timings: Option<LinkTimings>,
+    log_unit: Option<String>,
+    last_state: Option<CameraState>,
+    left_running: Option<Instant>,
 }
 
 impl<'a, E: Infer> CameraRunner<'a, E> {
@@ -117,6 +122,9 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
                 objects,
                 window: RateWindow::new(Instant::now(), 0, arrived_at_start),
                 timings: None,
+                log_unit: None,
+                last_state: None,
+                left_running: None,
             },
             CameraHandle {
                 status: status_rx,
@@ -144,6 +152,13 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
         self.objects = objects;
         self.runner_restarts = restarts;
         self.publish(CameraState::WaitingForFrames);
+        self
+    }
+
+    /// Emits a lifecycle log line for each state transition this runner publishes, under `unit`; without it no line is emitted.
+    #[must_use]
+    pub fn logged_as(mut self, unit: &str) -> Self {
+        self.log_unit = Some(unit.to_string());
         self
     }
 
@@ -218,5 +233,132 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
             roundtrip_ms,
             lock_wait_ms,
         });
+        let down_ms = self
+            .left_running
+            .map(|left| u64::try_from(left.elapsed().as_millis()).unwrap_or(u64::MAX));
+        let timeout_ms = u64::try_from(self.frame_timeout.as_millis()).unwrap_or(u64::MAX);
+        let transition = transition_event(self.last_state, state, down_ms, timeout_ms);
+        if let Some((unit, (event, detail))) = self.log_unit.as_deref().zip(transition) {
+            log_event(unit, event, detail);
+        }
+        if state == CameraState::Running {
+            self.left_running = None;
+        } else if self.last_state == Some(CameraState::Running) {
+            self.left_running = Some(Instant::now());
+        }
+        self.last_state = Some(state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffmpeg::{Decode, FrameSpec};
+    use crate::frame_slot::{SlotSender, frame_slot};
+    use crate::reader::Frame;
+    use crate::{
+        CandidateStage, EngineError, Labels, LivePipeline, ObjectStage, RegionStage,
+        RegionStageSettings,
+    };
+    use corvette_detect_proto::{Row, TENSOR_BYTES};
+    use corvette_motion::{MotionSettings, Shape, SizeGrid};
+    use corvette_track::{IdSource, ObjectFilter, ObjectFilters, TrackerSettings, ZoneSet};
+
+    fn black_frame(index: u64) -> Frame {
+        let d = FrameSpec::new(160, 120, 10, Decode::Cpu)
+            .unwrap()
+            .frame_bytes();
+        Frame {
+            index,
+            time: Duration::from_millis(100 * (index + 1)),
+            data: vec![0; d],
+        }
+    }
+
+    struct QuietEngine;
+
+    impl Infer for QuietEngine {
+        fn infer(&mut self, _tensor: &[u8; TENSOR_BYTES]) -> Result<Vec<Row>, EngineError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn pipeline() -> LivePipeline<'static, QuietEngine> {
+        let stage = RegionStage::new(
+            RegionStageSettings {
+                motion: MotionSettings::default(),
+                floor: 32,
+                grid: SizeGrid::empty(),
+                model: Shape::new(640, 640).expect("model shape"),
+                motion_enabled: true,
+            },
+            Shape::new(160, 120).expect("frame shape"),
+            None,
+        )
+        .expect("region stage");
+        let mut filters = std::collections::BTreeMap::new();
+        filters.insert("person".to_owned(), ObjectFilter::default());
+        let candidates = CandidateStage::new(
+            Labels::parse("0 person").expect("labels"),
+            ObjectFilters::new(vec!["person".to_owned()], filters),
+            160,
+            120,
+        )
+        .expect("candidate stage");
+        let ids: &'static mut IdSource = Box::leak(Box::new(IdSource::default()));
+        let tracker = TrackerSettings {
+            width: 160,
+            height: 120,
+            min_initialized: 0,
+            max_disappeared: 5,
+            stationary_threshold: 100,
+            max_frames_default: None,
+            max_frames_overrides: Vec::new(),
+            own_labels: Vec::new(),
+        };
+        let objects = ObjectStage::new(tracker, ids, ZoneSet::new(Vec::new()), 0.5).unwrap();
+        LivePipeline::new(stage, candidates, objects, QuietEngine)
+    }
+
+    fn drive(runner: &mut CameraRunner<'_, QuietEngine>, sender: &SlotSender) {
+        sender.put(black_frame(0));
+        assert!(matches!(runner.step_once(), Ok(StepEnd::Frame)));
+        sender.gap();
+        assert!(matches!(runner.step_once(), Ok(StepEnd::Gap)));
+        sender.put(black_frame(1));
+        assert!(matches!(runner.step_once(), Ok(StepEnd::Frame)));
+    }
+
+    fn lines_for(unit: &str) -> Vec<String> {
+        let log = crate::TEST_LOG
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        log.iter()
+            .filter(|l| l.contains(&format!("unit=\"{unit}\"")))
+            .cloned()
+            .collect()
+    }
+
+    fn assert_line(lines: &[String], i: usize, needle: &str) {
+        assert!(lines[i].contains(needle), "{lines:?}");
+    }
+
+    #[test]
+    fn camera_runner_logs_its_transitions_through_publish() {
+        let (sender, receiver) = frame_slot();
+        let (runner, _handle) = CameraRunner::new(receiver, pipeline(), Duration::from_millis(250));
+        let mut runner = runner.logged_as("wiring-cam");
+        drive(&mut runner, &sender);
+        let lines = lines_for("wiring-cam");
+        assert_eq!(lines.len(), 3, "one line per transition: {lines:?}");
+        assert_line(&lines, 0, "event=connected detail=\"first_frame\"");
+        assert_line(
+            &lines,
+            1,
+            "event=source-gap detail=\"no_frames_for_ms=250\"",
+        );
+        assert_line(&lines, 2, "event=connected detail=\"down_ms=");
+        let n = lines[2].rsplit('=').next().unwrap().trim_end_matches('"');
+        assert!(n.parse::<u64>().is_ok(), "{n} is not an integer");
     }
 }

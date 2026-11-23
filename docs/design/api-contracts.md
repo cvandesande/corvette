@@ -1230,6 +1230,35 @@ in any response, and the reason is logged.
 The route accepts `GET` only, with the identity rules "Corvette's own API lives under
 `/corvette/api/v1/`" states for every route.
 
+### The detection service logs each camera's lifecycle
+
+The service writes one log line per camera state change, so `kubectl logs` shows when a
+camera connected, stopped delivering frames or recovered without polling the status route.
+Each line reads `unit="<camera>" event=<event> detail="<detail>"`, and a line holds the
+camera name, fixed words and integers:
+
+- `connected`: the first frame arrived (`first_frame`), or frames returned after a gap
+  (`down_ms=<N>`);
+- `source-gap`: frames stopped for `no_frames_for_ms=<frame timeout>`, logged once at the
+  start of the gap;
+- `inference-unavailable` and `inference-restored`: the worker stopped and resumed
+  answering;
+- `runner-failed` (`reason=pipeline-error`) and `runner-restart`
+  (`restarts=<n> delay_ms=<ms> reason=build-failed|pipeline-error`): the camera's pipeline
+  failed and the service restarts it after the back-off delay.
+
+No line carries a stream address, a user name, a password or the text of an error; the
+camera's decoder error text never reaches the log. A camera pipeline restart builds a fresh
+runner, so the first frame after a restart logs `connected` with `first_frame` and no
+downtime figure; `runner-failed` and `runner-restart` precede it.
+
+Finding: the configuration check accepts any camera name that is non-empty and unique, so a
+name holding a quote or a newline can forge a log line, because the line writer does not
+escape the name. The intended contract rejects a camera name outside letters, digits,
+`_` and `-` when the configuration is validated. The finding predates the lifecycle lines
+and applies to every line the service writes under a camera name; the validation rule is
+pending.
+
 ## The detection configuration is read, validated and applied through the API
 
 Three routes read, dry-run and change the saved detection configuration. The API server

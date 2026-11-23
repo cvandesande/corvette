@@ -14,6 +14,7 @@ use crate::clock::FrameClock;
 use crate::ffmpeg::FrameSpec;
 use crate::frame_slot::{SlotCloser, SlotReceiver, SlotSender, frame_slot};
 use crate::live_pipeline::{LivePipeline, PipelineCounters};
+use crate::log_event;
 use crate::object_stage::FrameObjects;
 use crate::shared_link::{SharedInfer, SharedLink};
 use crate::source::{FrameSource, SourceError, SourceStopper};
@@ -149,13 +150,14 @@ impl CameraThreads {
         let thread_link = link.clone();
         let thread_status_tx = status_tx.clone();
         let thread_objects_tx = objects_tx.clone();
+        let runner_unit = unit.to_string();
         let runner = Builder::new().spawn(move || {
             run_runner(
+                &runner_unit,
                 &slot_receiver,
                 &thread_link,
                 settings,
-                &thread_status_tx,
-                &thread_objects_tx,
+                (&thread_status_tx, &thread_objects_tx),
                 &stop_rx,
                 build,
             );
@@ -292,17 +294,21 @@ async fn produce<M>(
 }
 
 fn run_runner<B, E>(
+    unit: &str,
     slot: &SlotReceiver,
     link: &SharedLink,
     settings: CameraThreadSettings,
-    status_tx: &watch::Sender<CameraStatus>,
-    objects_tx: &watch::Sender<Option<FrameObjects>>,
+    channels: (
+        &watch::Sender<CameraStatus>,
+        &watch::Sender<Option<FrameObjects>>,
+    ),
     stop_rx: &Receiver<()>,
     build: B,
 ) where
     B: for<'a> Fn(&'a mut IdSource, SharedInfer) -> Result<LivePipeline<'a, SharedInfer>, E>,
     E: std::fmt::Display,
 {
+    let (status_tx, objects_tx) = channels;
     let mut restarts: u32 = 0;
     let mut backoff = Backoff::new(settings.backoff);
     loop {
@@ -314,6 +320,12 @@ fn run_runner<B, E>(
                 status_tx.send_modify(|status| status.state = CameraState::Failed);
                 restarts = restarts.saturating_add(1);
                 let delay = backoff.after_run(Duration::ZERO);
+                let delay_ms = delay.as_millis();
+                log_event(
+                    unit,
+                    "runner-restart",
+                    format!("restarts={restarts} delay_ms={delay_ms} reason=build-failed"),
+                );
                 match stop_rx.recv_timeout(delay) {
                     Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
                     Err(RecvTimeoutError::Timeout) => {}
@@ -322,7 +334,9 @@ fn run_runner<B, E>(
             }
         };
         let (runner, _handle) = CameraRunner::new(slot.clone(), pipeline, settings.frame_timeout);
-        let runner = runner.publishing_to(status_tx.clone(), objects_tx.clone(), restarts);
+        let runner = runner
+            .publishing_to(status_tx.clone(), objects_tx.clone(), restarts)
+            .logged_as(unit);
         let started = Instant::now();
         if matches!(runner.run(), Ok(())) {
             break;
@@ -330,6 +344,12 @@ fn run_runner<B, E>(
         // The runner already published the failed state; the restart below is the recovery, so the error value is spent.
         restarts = restarts.saturating_add(1);
         let delay = backoff.after_run(started.elapsed());
+        let delay_ms = delay.as_millis();
+        log_event(
+            unit,
+            "runner-restart",
+            format!("restarts={restarts} delay_ms={delay_ms} reason=pipeline-error"),
+        );
         match stop_rx.recv_timeout(delay) {
             Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}

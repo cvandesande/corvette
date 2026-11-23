@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod backoff;
+pub mod camera_events;
 mod camera_plan;
 mod camera_runner;
 mod camera_thread;
