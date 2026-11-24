@@ -313,7 +313,9 @@ fn run_runner<B, E>(
     let mut backoff = Backoff::new(settings.backoff);
     loop {
         let mut ids = IdSource::default();
-        let pipeline = match build(&mut ids, link.infer_handle()) {
+        let infer = link.infer_handle();
+        let timings = infer.timings();
+        let pipeline = match build(&mut ids, infer) {
             Ok(pipeline) => pipeline,
             Err(_error) => {
                 // A failed build is a runner failure with no runner: the same failed status and back-off restart, published in place because no runner exists to publish it; as with a runner error the status carries the failure and the error value is spent.
@@ -336,7 +338,8 @@ fn run_runner<B, E>(
         let (runner, _handle) = CameraRunner::new(slot.clone(), pipeline, settings.frame_timeout);
         let runner = runner
             .publishing_to(status_tx.clone(), objects_tx.clone(), restarts)
-            .logged_as(unit);
+            .logged_as(unit)
+            .with_timings(timings);
         let started = Instant::now();
         if matches!(runner.run(), Ok(())) {
             break;
@@ -354,5 +357,166 @@ fn run_runner<B, E>(
             Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backoff::DEFAULT_POLICY;
+    use crate::candidate_stage::CandidateStage;
+    use crate::engine::{LabelError, Labels};
+    use crate::ffmpeg::Decode;
+    use crate::live_pipeline::LivePipeline;
+    use crate::object_stage::ObjectStage;
+    use crate::reader::Frame;
+    use crate::region_stage::{RegionStage, RegionStageSettings};
+    use crate::worker_link::WorkerLink;
+    use corvette_detect_proto::{HEADER_LEN, Reply, Request, parse_header};
+    use corvette_motion::{MotionSettings, Shape, SizeGrid};
+    use corvette_track::{ObjectFilter, ObjectFilters, TrackerSettings, ZoneSet};
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    fn flat_frame(index: u64) -> Frame {
+        let spec = FrameSpec::new(160, 120, 10, Decode::Cpu).expect("valid frame spec");
+        Frame {
+            index,
+            time: Duration::from_millis(100 * (index + 1)),
+            data: vec![0x80; spec.frame_bytes()],
+        }
+    }
+
+    fn build_pipeline(
+        ids: &mut IdSource,
+        infer: SharedInfer,
+    ) -> Result<LivePipeline<'_, SharedInfer>, LabelError> {
+        let settings = RegionStageSettings {
+            motion: MotionSettings::default(),
+            floor: 32,
+            grid: SizeGrid::empty(),
+            model: Shape::new(640, 640).expect("model shape"),
+            motion_enabled: true,
+        };
+        let regions = RegionStage::new(settings, Shape::new(160, 120).expect("frame shape"), None)
+            .expect("region stage");
+        let mut filters = BTreeMap::new();
+        filters.insert("person".to_owned(), ObjectFilter::default());
+        let candidates = CandidateStage::new(
+            Labels::parse("0 person")?,
+            ObjectFilters::new(vec!["person".to_owned()], filters),
+            160,
+            120,
+        )
+        .expect("candidate stage");
+        let objects =
+            ObjectStage::new(tracker(), ids, ZoneSet::new(Vec::new()), 0.5).expect("object stage");
+        Ok(LivePipeline::new(regions, candidates, objects, infer))
+    }
+
+    fn tracker() -> TrackerSettings {
+        TrackerSettings {
+            width: 160,
+            height: 120,
+            min_initialized: 0,
+            max_disappeared: 5,
+            stationary_threshold: 100,
+            max_frames_default: None,
+            max_frames_overrides: Vec::new(),
+            own_labels: Vec::new(),
+        }
+    }
+
+    // Answers every infer request on every connection with the given worker time, until the socket dies.
+    fn answer_infer_requests(listener: UnixListener, worker_ms: u32) {
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                loop {
+                    let mut header = [0u8; HEADER_LEN];
+                    if stream.read_exact(&mut header).is_err() {
+                        break;
+                    }
+                    let parsed = parse_header(&header).expect("header decodes");
+                    let mut body = vec![0u8; parsed.body_len];
+                    if stream.read_exact(&mut body).is_err() {
+                        break;
+                    }
+                    let mut request = header.to_vec();
+                    request.extend_from_slice(&body);
+                    let id = match Request::decode(&request) {
+                        Ok(Request::InferRequest { id, .. }) => id,
+                        other => panic!("expected an infer request, got {other:?}"),
+                    };
+                    let reply = Reply::Rows {
+                        id,
+                        worker_ms,
+                        rows: Vec::new(),
+                    };
+                    if stream
+                        .write_all(&reply.encode().expect("reply encodes"))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn run_runner_publishes_the_worker_time_recorded_on_its_link() {
+        let dir = std::env::temp_dir().join(format!("camthread-timings-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let socket = dir.join("worker.sock");
+        let _ = fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).expect("bind worker socket");
+        answer_infer_requests(listener, 41);
+        let link = SharedLink::new(WorkerLink::new(
+            socket,
+            Duration::from_secs(5),
+            DEFAULT_POLICY,
+        ));
+        let (sender, receiver) = frame_slot();
+        let closer = receiver.closer();
+        let (status_tx, mut status_rx) = watch::channel(initial_status());
+        let (objects_tx, _objects_rx) = watch::channel(None);
+        let (_stop_tx, stop_rx) = mpsc::channel();
+        let runner_thread = std::thread::spawn(move || {
+            let settings = CameraThreadSettings {
+                frame_timeout: Duration::from_millis(200),
+                backoff: DEFAULT_POLICY,
+            };
+            run_runner(
+                "timings-test",
+                &receiver,
+                &link,
+                settings,
+                (&status_tx, &objects_tx),
+                &stop_rx,
+                build_pipeline,
+            );
+        });
+        sender.put(flat_frame(0));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while status_rx.borrow_and_update().worker_ms != 41 {
+            assert!(
+                Instant::now() < deadline,
+                "worker_ms never reached 41 in the published status"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        closer.close();
+        assert!(
+            runner_thread.join().is_ok(),
+            "the runner thread ends on the closed slot"
+        );
+        assert_eq!(
+            status_rx.borrow().worker_ms,
+            41,
+            "the published status carries the worker's own time"
+        );
+        fs::remove_dir_all(&dir).expect("remove temp dir");
     }
 }
