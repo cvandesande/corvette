@@ -1,8 +1,9 @@
 //! The recording index: the sole `SQLite` writer, the per-camera sequence counter, and the range queries playback asks.
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 
 pub const PIECE_CHANNEL_CAPACITY: usize = 64;
 
@@ -237,9 +238,33 @@ fn row_to_piece(
     })
 }
 
+/// Hands out piece sequence numbers from the counter the [`Index`] writer keeps, so other threads share one source of truth.
+#[derive(Clone, Debug)]
+pub struct SeqAllocator {
+    last_seq: Arc<Mutex<HashMap<String, u64>>>,
+}
+
+impl SeqAllocator {
+    /// Returns the next sequence number for `camera`, one higher than the last.
+    ///
+    /// # Errors
+    pub fn next(&self, camera: &str) -> Result<u64, IndexError> {
+        let mut last_seq = self.last_seq.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(last) = last_seq.get_mut(camera) else {
+            return Err(IndexError::UnknownCamera {
+                camera: camera.to_owned(),
+            });
+        };
+        *last += 1;
+        let seq = *last;
+        drop(last_seq);
+        Ok(seq)
+    }
+}
+
 pub struct Index {
     conn: Connection,
-    last_seq: BTreeMap<String, u64>,
+    last_seq: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl std::fmt::Debug for Index {
@@ -292,31 +317,33 @@ impl Index {
             )?;
         }
 
-        let mut last_seq = BTreeMap::new();
+        let mut last_seq = HashMap::new();
         for (camera, _) in cameras {
             let key = last_seq_key(camera);
             let stored = read_meta(&conn, &key, "last seq")?;
             let value = parse_meta_u64(stored, &key)?;
             last_seq.insert(camera.clone(), value);
         }
-        Ok(Self { conn, last_seq })
+        Ok(Self {
+            conn,
+            last_seq: Arc::new(Mutex::new(last_seq)),
+        })
     }
 
     /// # Errors
-    /// Returns an error when the camera is not known to this index.
     pub fn next_seq(&mut self, camera: &str) -> Result<u64, IndexError> {
-        let last = self
-            .last_seq
-            .get_mut(camera)
-            .ok_or_else(|| IndexError::UnknownCamera {
-                camera: camera.to_owned(),
-            })?;
-        *last += 1;
-        Ok(*last)
+        self.allocator().next(camera)
+    }
+
+    /// Returns a handle that allocates the same per-camera sequence numbers as [`Self::next_seq`].
+    #[must_use]
+    pub fn allocator(&self) -> SeqAllocator {
+        SeqAllocator {
+            last_seq: Arc::clone(&self.last_seq),
+        }
     }
 
     /// # Errors
-    /// Returns an error when the row cannot be written or repeats a `(camera, seq)` already inserted.
     pub fn insert(&mut self, row: &PieceRow) -> Result<(), IndexError> {
         let seq_sql = sql_int("insert", &row.camera, row.seq)?;
         let size_sql = sql_int("insert", &row.camera, row.size_bytes)?;
@@ -360,8 +387,10 @@ impl Index {
         tx.commit()
             .map_err(|source| query("insert", &row.camera, source))?;
 
-        let memory = self.last_seq.entry(row.camera.clone()).or_insert(0);
-        *memory = (*memory).max(row.seq);
+        let mut memory = self.last_seq.lock().unwrap_or_else(PoisonError::into_inner);
+        let entry = memory.entry(row.camera.clone()).or_insert(0);
+        *entry = (*entry).max(row.seq);
+        drop(memory);
         Ok(())
     }
 
@@ -391,7 +420,6 @@ impl Index {
     }
 
     /// # Errors
-    /// Returns an error when the stored rows cannot be read.
     pub fn all_pieces(&self) -> Result<Vec<PieceRow>, IndexError> {
         let mut statement = self
             .conn

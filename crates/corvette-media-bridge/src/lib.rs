@@ -9,10 +9,12 @@ pub mod moq_publish;
 pub mod parameter_sets;
 pub mod piece_walk;
 pub mod record_config;
+pub mod recorder;
 pub mod recovery;
 pub mod restream_provider;
 pub mod rtp_clock;
 pub mod supervise;
+pub mod utc;
 pub mod ws_repackager;
 
 use config::Config;
