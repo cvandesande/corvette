@@ -1254,6 +1254,13 @@ camera name, fixed words and integers:
   (`restarts=<n> delay_ms=<ms> reason=build-failed|pipeline-error`): the camera's pipeline
   failed and the service restarts it after the back-off delay.
 
+Alongside the state changes the service logs one line per confirmed object:
+`object-confirmed` (`id=<n> label=<word> score_pct=<0-100> zones=<count>`) on the frame
+where an object first reaches confirmation, and `object-ended` (`id=<n> label=<word>
+seconds=<lifetime>`) when an object that had confirmed retires. These lines carry the
+tracker's numeric id and the label in written form — letters, digits, `_` and `-`, or the
+word `other` — so they add only fixed words and integers to a line.
+
 No line carries a stream address, a user name, a password or the text of an error; the
 camera's decoder error text never reaches the log. A camera pipeline restart builds a fresh
 runner, so the first frame after a restart logs `connected` with `first_frame` and no

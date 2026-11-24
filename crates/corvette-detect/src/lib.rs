@@ -17,6 +17,7 @@ mod engine;
 mod ffmpeg;
 mod frame_slot;
 mod live_pipeline;
+pub mod object_events;
 mod object_stage;
 mod rate_window;
 mod reader;

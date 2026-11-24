@@ -7,6 +7,7 @@ use crate::candidate_stage::Infer;
 use crate::frame_slot::{SlotEvent, SlotReceiver};
 use crate::live_pipeline::{FrameOutcome, LiveError, LivePipeline, PipelineCounters};
 use crate::log_event;
+use crate::object_events::ObjectLog;
 use crate::object_stage::FrameObjects;
 use crate::rate_window::RateWindow;
 use crate::shared_link::LinkTimings;
@@ -85,6 +86,7 @@ pub struct CameraRunner<'a, E: Infer> {
     window: RateWindow,
     timings: Option<LinkTimings>,
     log_unit: Option<String>,
+    object_log: ObjectLog,
     last_state: Option<CameraState>,
     left_running: Option<Instant>,
 }
@@ -123,6 +125,7 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
                 window: RateWindow::new(Instant::now(), 0, arrived_at_start),
                 timings: None,
                 log_unit: None,
+                object_log: ObjectLog::new(),
                 last_state: None,
                 left_running: None,
             },
@@ -171,6 +174,12 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
             SlotEvent::Frame(frame) => {
                 match self.pipeline.step(frame.time.as_secs_f64(), &frame.data) {
                     Ok(FrameOutcome::Objects(objects)) => {
+                        let object_lines = self.object_log.observe(&objects);
+                        if let Some(unit) = self.log_unit.as_deref() {
+                            for (event, detail) in object_lines {
+                                log_event(unit, event, detail);
+                            }
+                        }
                         let _ = self.objects.send_replace(Some(objects));
                         self.publish(CameraState::Running);
                         Ok(StepEnd::Frame)
@@ -263,6 +272,8 @@ mod tests {
     use corvette_detect_proto::{Row, TENSOR_BYTES};
     use corvette_motion::{MotionSettings, Shape, SizeGrid};
     use corvette_track::{IdSource, ObjectFilter, ObjectFilters, TrackerSettings, ZoneSet};
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     fn black_frame(index: u64) -> Frame {
         let d = FrameSpec::new(160, 120, 10, Decode::Cpu)
@@ -284,6 +295,10 @@ mod tests {
     }
 
     fn pipeline() -> LivePipeline<'static, QuietEngine> {
+        pipeline_with_engine(QuietEngine)
+    }
+
+    fn pipeline_with_engine<E: Infer>(engine: E) -> LivePipeline<'static, E> {
         let stage = RegionStage::new(
             RegionStageSettings {
                 motion: MotionSettings::default(),
@@ -317,7 +332,7 @@ mod tests {
             own_labels: Vec::new(),
         };
         let objects = ObjectStage::new(tracker, ids, ZoneSet::new(Vec::new()), 0.5).unwrap();
-        LivePipeline::new(stage, candidates, objects, QuietEngine)
+        LivePipeline::new(stage, candidates, objects, engine)
     }
 
     fn drive(runner: &mut CameraRunner<'_, QuietEngine>, sender: &SlotSender) {
@@ -360,5 +375,74 @@ mod tests {
         assert_line(&lines, 2, "event=connected detail=\"down_ms=");
         let n = lines[2].rsplit('=').next().unwrap().trim_end_matches('"');
         assert!(n.parse::<u64>().is_ok(), "{n} is not an integer");
+    }
+
+    const fn person_row() -> Row {
+        Row {
+            class_id: 0,
+            score: 0.9,
+            y_min: 0.25,
+            x_min: 0.5,
+            y_max: 0.75,
+            x_max: 0.875,
+        }
+    }
+
+    struct PersonEngine {
+        person: Rc<Cell<bool>>,
+    }
+
+    impl Infer for PersonEngine {
+        fn infer(&mut self, _tensor: &[u8; TENSOR_BYTES]) -> Result<Vec<Row>, EngineError> {
+            if self.person.get() {
+                Ok(vec![person_row()])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    fn flat_frame(index: u64) -> Frame {
+        let d = FrameSpec::new(160, 120, 10, Decode::Cpu)
+            .unwrap()
+            .frame_bytes();
+        Frame {
+            index,
+            time: Duration::from_millis(100 * (index + 1)),
+            data: vec![0x80; d],
+        }
+    }
+
+    #[test]
+    fn object_lines_reach_the_log_through_step_once() {
+        let (sender, receiver) = frame_slot();
+        let person = Rc::new(Cell::new(true));
+        let engine = PersonEngine {
+            person: Rc::clone(&person),
+        };
+        let (runner, _handle) = CameraRunner::new(
+            receiver,
+            pipeline_with_engine(engine),
+            Duration::from_millis(250),
+        );
+        let mut runner = runner.logged_as("objects-cam");
+        sender.put(flat_frame(0));
+        assert!(matches!(runner.step_once(), Ok(StepEnd::Frame)));
+        person.set(false);
+        for index in 1..5 {
+            sender.put(flat_frame(index));
+            assert!(matches!(runner.step_once(), Ok(StepEnd::Frame)));
+        }
+        let lines = lines_for("objects-cam");
+        assert_eq!(
+            lines,
+            [
+                "corvette-detect unit=\"objects-cam\" event=object-confirmed \
+                 detail=\"id=1 label=person score_pct=90 zones=0\"",
+                "corvette-detect unit=\"objects-cam\" event=connected detail=\"first_frame\"",
+                "corvette-detect unit=\"objects-cam\" event=object-ended \
+                 detail=\"id=1 label=person seconds=0\"",
+            ]
+        );
     }
 }
