@@ -6,6 +6,7 @@ pub mod fmp4;
 pub mod hls;
 pub mod moq_publish;
 pub mod parameter_sets;
+pub mod record_config;
 pub mod restream_provider;
 pub mod rtp_clock;
 pub mod supervise;

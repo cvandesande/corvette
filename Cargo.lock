@@ -509,6 +509,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "toml_edit",
  "url",
  "web-transport-quinn",
 ]
