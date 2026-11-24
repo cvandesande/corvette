@@ -14,6 +14,9 @@ use crate::engine::{Engine, EngineError};
 use crate::fatal::{FatalReason, Terminator, fatal};
 
 const ACCEPT_POLL: Duration = Duration::from_millis(20);
+// A stalled body would park the accept loop, so only the body wait is bounded;
+// the header wait stays unbounded because a healthy idle link sends nothing.
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServeEnd {
@@ -101,7 +104,12 @@ fn serve_connection<E: Engine>(
             return ConnectionEnd::Closed;
         };
         header_slot.copy_from_slice(&header_bytes);
-        if stream.read_exact(body).is_err() {
+        if stream.set_read_timeout(Some(BODY_READ_TIMEOUT)).is_err() {
+            return ConnectionEnd::Closed;
+        }
+        let body_read = stream.read_exact(body);
+        let timeout_reset = stream.set_read_timeout(None);
+        if body_read.is_err() || timeout_reset.is_err() {
             return ConnectionEnd::Closed;
         }
         let Ok(request) = Request::decode(&frame) else {

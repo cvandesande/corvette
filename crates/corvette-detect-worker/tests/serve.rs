@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use corvette_detect_proto::{
     ErrorCode, HEADER_LEN, MAX_BODY, RAW_VALUES, Reply, Request, Row, TENSOR_BYTES,
@@ -474,6 +474,76 @@ fn a_stop_request_ends_an_idle_server() {
     assert_eq!(end.unwrap(), ServeEnd::Stopped);
     assert_eq!(recorder.codes(), Vec::<i32>::new());
     assert_eq!(engine.calls(), 0);
+}
+
+#[test]
+fn a_client_that_sends_no_body_does_not_block_the_next_client() {
+    let path = socket_path("stalledbody");
+    let listener = UnixListener::bind(&path).unwrap();
+    let stop = AtomicBool::new(false);
+    let recorder = Recorder::new();
+    let mut engine = Scripted::new(Vec::new());
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            let _guard = StopGuard(&stop);
+            let mut stalled = connect(&path);
+            let frame = request_frame(&Request::HealthRequest {
+                id: 31,
+                deadline_ms: 0,
+            });
+            assert!(frame.len() > HEADER_LEN);
+            stalled.write_all(&frame[..HEADER_LEN]).unwrap();
+            let started = Instant::now();
+            let mut stream = connect(&path);
+            let health = request_frame(&Request::HealthRequest {
+                id: 32,
+                deadline_ms: 0,
+            });
+            stream.write_all(&health).unwrap();
+            assert_eq!(read_reply(&mut stream), Some(Reply::Health { id: 32 }));
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the stalled client held the worker past its guard: {:?}",
+                started.elapsed()
+            );
+        });
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
+        assert_eq!(end.unwrap(), ServeEnd::Stopped);
+    });
+    assert_eq!(engine.calls(), 0);
+    assert_eq!(recorder.codes(), Vec::<i32>::new());
+}
+
+#[test]
+fn a_request_after_a_long_idle_gap_is_answered_on_the_same_connection() {
+    let path = socket_path("idlegap");
+    let listener = UnixListener::bind(&path).unwrap();
+    let stop = AtomicBool::new(false);
+    let recorder = Recorder::new();
+    let mut engine = Scripted::new(Vec::new());
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            let _guard = StopGuard(&stop);
+            let mut stream = connect(&path);
+            let first = request_frame(&Request::HealthRequest {
+                id: 33,
+                deadline_ms: 0,
+            });
+            stream.write_all(&first).unwrap();
+            assert_eq!(read_reply(&mut stream), Some(Reply::Health { id: 33 }));
+            thread::sleep(Duration::from_secs(7));
+            let second = request_frame(&Request::HealthRequest {
+                id: 34,
+                deadline_ms: 0,
+            });
+            stream.write_all(&second).unwrap();
+            assert_eq!(read_reply(&mut stream), Some(Reply::Health { id: 34 }));
+        });
+        let end = serve(&listener, &mut engine, &recorder, &stop, MAX_DEADLINE);
+        assert_eq!(end.unwrap(), ServeEnd::Stopped);
+    });
+    assert_eq!(engine.calls(), 0);
+    assert_eq!(recorder.codes(), Vec::<i32>::new());
 }
 
 #[test]
