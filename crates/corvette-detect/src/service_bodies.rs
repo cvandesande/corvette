@@ -65,12 +65,14 @@ pub fn status_entry(camera: &str, status: &CameraStatus, worker: Option<WorkerRe
         )
     });
     format!(
-        "{{\"camera\":{camera},\"state\":{state},\"frames_in\":{frames_in},\"frames_tracked\":{frames_tracked},\"frames_inference_failed\":{frames_inference_failed},\"source_gaps\":{source_gaps},\"frames_dropped\":{frames_dropped},\"runner_restarts\":{runner_restarts},\"fps_in\":{fps_in},\"fps_processed\":{fps_processed},\"worker_ms\":{worker_ms},\"roundtrip_ms\":{roundtrip_ms},\"lock_wait_ms\":{lock_wait_ms}{worker_text}}}",
+        "{{\"camera\":{camera},\"state\":{state},\"frames_in\":{frames_in},\"frames_tracked\":{frames_tracked},\"frames_inference_failed\":{frames_inference_failed},\"inferences_run\":{inferences_run},\"frames_without_region\":{frames_without_region},\"source_gaps\":{source_gaps},\"frames_dropped\":{frames_dropped},\"runner_restarts\":{runner_restarts},\"fps_in\":{fps_in},\"fps_processed\":{fps_processed},\"worker_ms\":{worker_ms},\"roundtrip_ms\":{roundtrip_ms},\"lock_wait_ms\":{lock_wait_ms}{worker_text}}}",
         camera = json_string(camera),
         state = json_string(state_name(status.state)),
         frames_in = status.counters.frames_in,
         frames_tracked = status.counters.frames_tracked,
         frames_inference_failed = status.counters.frames_inference_failed,
+        inferences_run = status.counters.inferences_run,
+        frames_without_region = status.counters.frames_without_region,
         source_gaps = status.source_gaps,
         frames_dropped = status.frames_dropped,
         runner_restarts = status.runner_restarts,

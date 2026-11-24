@@ -156,6 +156,8 @@ fn a_valid_plan_builds_two_fresh_pipelines_and_steps_one_frame() {
             frames_in: 2,
             frames_tracked: 1,
             frames_inference_failed: 1,
+            inferences_run: 1,
+            frames_without_region: 1,
         }
     );
     fs::remove_dir_all(&dir).expect("remove temp dir");

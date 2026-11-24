@@ -64,6 +64,8 @@ pub struct PipelineCounters {
     pub frames_in: u64,
     pub frames_tracked: u64,
     pub frames_inference_failed: u64,
+    pub inferences_run: u64,
+    pub frames_without_region: u64,
 }
 
 pub struct LivePipeline<'a, E: Infer> {
@@ -106,6 +108,8 @@ impl<'a, E: Infer> LivePipeline<'a, E> {
                 frames_in: 0,
                 frames_tracked: 0,
                 frames_inference_failed: 0,
+                inferences_run: 0,
+                frames_without_region: 0,
             },
         }
     }
@@ -117,6 +121,15 @@ impl<'a, E: Infer> LivePipeline<'a, E> {
     pub fn step(&mut self, frame_time: f64, frame: &[u8]) -> Result<FrameOutcome, LiveError> {
         self.counters.frames_in = self.counters.frames_in.saturating_add(1);
         let tensors = self.regions.step(frame, &self.previous_boxes)?;
+        if tensors.is_empty() {
+            self.counters.frames_without_region =
+                self.counters.frames_without_region.saturating_add(1);
+        } else {
+            self.counters.inferences_run = self
+                .counters
+                .inferences_run
+                .saturating_add(u64::try_from(tensors.len()).unwrap_or(u64::MAX));
+        }
         let detections = match self.candidates.detect(&mut self.engine, &tensors) {
             Ok(detections) => detections,
             Err(CandidateError::Engine(_)) => {

@@ -1205,6 +1205,11 @@ Per camera the entry carries:
 - `frames_dropped`: frames a newer one replaced before the pipeline took them;
 - `runner_restarts`: the service's count of restarts of this camera's pipeline, kept in
   the service across those restarts;
+- `inferences_run` and `frames_without_region`: the region tensors the pipeline handed to
+  inference, one request each (a frame whose inference fails counts all its tensors), and the
+  frames that built no region to infer on, both counted since
+  the camera's pipeline last started, so a quiet scene (frames arriving, no region, no
+  inference) reads differently from a stalled worker (inferences sent, failures rising);
 - `worker_state` and `worker_restarts`: the worker's state and its restart count;
 - `worker_ms` and `roundtrip_ms`: the worker's own inference time beside the request's
   round-trip time, both in milliseconds, so slow inference and slow transport read
@@ -1215,7 +1220,7 @@ Per camera the entry carries:
   whether a saved change still waits on a restart.
 
 The numbers `fps_in`, `fps_processed`, `frames_dropped`, `runner_restarts`,
-`worker_restarts`, `worker_ms`, `roundtrip_ms` and `lock_wait_ms` are each subject to the
+`inferences_run`, `frames_without_region`, `worker_restarts`, `worker_ms`, `roundtrip_ms` and `lock_wait_ms` are each subject to the
 corpus replay run.
 
 The detection service serves both routes on a local socket and the API server relays them,

@@ -138,6 +138,8 @@ const fn status(state: CameraState) -> CameraStatus {
             frames_in: 11,
             frames_tracked: 10,
             frames_inference_failed: 2,
+            inferences_run: 7,
+            frames_without_region: 3,
         },
         source_gaps: 3,
         frames_dropped: 0,
@@ -159,8 +161,8 @@ fn status_entries_parse_with_exact_names_and_counters() {
         (CameraState::Failed, "failed"),
     ] {
         assert_eq!(state_name(state), name);
-        let parsed: Value = serde_json::from_str(&status_entry("yard", &status(state), None))
-            .expect("status parses");
+        let text = status_entry("yard", &status(state), None);
+        let parsed: Value = serde_json::from_str(&text).expect("status parses");
         assert_eq!(parsed["camera"].as_str().expect("camera string"), "yard");
         assert_eq!(parsed["state"].as_str().expect("state string"), name);
         assert_eq!(parsed["frames_in"].as_u64().expect("frames_in number"), 11);
@@ -175,6 +177,22 @@ fn status_entries_parse_with_exact_names_and_counters() {
                 .as_u64()
                 .expect("frames_inference_failed number"),
             2
+        );
+        assert_eq!(
+            parsed["inferences_run"]
+                .as_u64()
+                .expect("inferences_run number"),
+            7
+        );
+        assert_eq!(
+            parsed["frames_without_region"]
+                .as_u64()
+                .expect("frames_without_region number"),
+            3
+        );
+        assert!(
+            text.contains("\"frames_inference_failed\":2,\"inferences_run\":7,\"frames_without_region\":3,\"source_gaps\":3"),
+            "{text}"
         );
         assert_eq!(
             parsed["source_gaps"].as_u64().expect("source_gaps number"),
@@ -217,6 +235,8 @@ const fn rates_status(fps_in_tenths: u32, fps_processed_tenths: u32) -> CameraSt
             frames_in: 30,
             frames_tracked: 29,
             frames_inference_failed: 1,
+            inferences_run: 7,
+            frames_without_region: 3,
         },
         source_gaps: 3,
         frames_dropped: 9,
@@ -238,6 +258,22 @@ fn status_entry_carries_every_new_member_with_its_own_value() {
             .as_u64()
             .expect("frames_dropped number"),
         9
+    );
+    assert_eq!(
+        parsed["inferences_run"]
+            .as_u64()
+            .expect("inferences_run number"),
+        7
+    );
+    assert_eq!(
+        parsed["frames_without_region"]
+            .as_u64()
+            .expect("frames_without_region number"),
+        3
+    );
+    assert!(
+        text.contains("\"frames_inference_failed\":1,\"inferences_run\":7,\"frames_without_region\":3,\"source_gaps\":3"),
+        "{text}"
     );
     assert_eq!(parsed["fps_in"].to_string(), "30.0");
     assert_eq!(parsed["fps_processed"].to_string(), "0.7");

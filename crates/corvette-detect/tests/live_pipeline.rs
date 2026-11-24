@@ -156,6 +156,29 @@ fn good_frames_all_report_objects_and_none_count_as_inference_failure() {
 }
 
 #[test]
+fn a_still_black_frame_builds_no_region_and_counts_no_inference() {
+    let mut harness = Harness::build();
+    let black = vec![0u8; FRAME_BYTES];
+    let (outcome, calls) = harness.step(0, &black).unwrap();
+    assert!(matches!(outcome, FrameOutcome::Objects(_)));
+    assert_eq!(calls, 0, "no region means no inference request");
+    let counters = harness.pipeline.counters();
+    assert_eq!(counters.frames_without_region, 1);
+    assert_eq!(counters.inferences_run, 0);
+}
+
+#[test]
+fn a_frame_yielding_one_region_counts_one_inference() {
+    let mut harness = Harness::build();
+    let (outcome, calls) = harness.step(0, &flat()).unwrap();
+    assert!(matches!(outcome, FrameOutcome::Objects(_)));
+    assert_eq!(calls, 1, "the motion frame asks for its one region");
+    let counters = harness.pipeline.counters();
+    assert_eq!(counters.inferences_run, 1);
+    assert_eq!(counters.frames_without_region, 0);
+}
+
+#[test]
 fn inference_failure_between_good_frames_reports_unavailable_and_keeps_the_object_id() {
     let mut harness = Harness::build();
     harness.person.set(true);
