@@ -71,6 +71,16 @@ impl InitSegmentTracker {
             ClientCodec::Aac => None,
         }
     }
+
+    /// Returns the init segment for the parameter sets `observe` last emitted, or `None` before any.
+    pub fn current_init(&self) -> Option<Bytes> {
+        match self.last_emitted.as_ref()? {
+            EmittedParameterSets::H264 { sps, pps } => Some(boxes::init_segment_h264(sps, pps)),
+            EmittedParameterSets::H265 { vps, sps, pps } => {
+                Some(boxes::init_segment_h265(vps, sps, pps))
+            }
+        }
+    }
 }
 
 /// Groups the frame stream into one `moof`/`mdat` fragment per access unit.
@@ -78,6 +88,15 @@ impl InitSegmentTracker {
 pub struct Fragmenter {
     sequence_number: u32,
     previous_timestamp: Option<u32>,
+    time_mode: FragmentTimeMode,
+    piece_decode_time: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+enum FragmentTimeMode {
+    #[default]
+    RawRtp,
+    PieceRebased,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +107,15 @@ pub struct Fragment {
 }
 
 impl Fragmenter {
+    /// Returns a fragmenter for stored pieces, stamping `tfdt` from a decode clock starting at 0.
+    #[must_use]
+    pub fn stored() -> Self {
+        Self {
+            time_mode: FragmentTimeMode::PieceRebased,
+            ..Self::default()
+        }
+    }
+
     /// Returns a fragment only when the frame carries a video access unit.
     pub fn next(&mut self, frame: &ClientFrame) -> Option<Fragment> {
         let (_nal_type, is_keyframe) = classify(frame)?;
@@ -100,9 +128,17 @@ impl Fragmenter {
         self.previous_timestamp = Some(frame.timestamp);
 
         self.sequence_number += 1;
+        let base_time = match self.time_mode {
+            FragmentTimeMode::RawRtp => u64::from(frame.timestamp),
+            FragmentTimeMode::PieceRebased => {
+                let base_time = self.piece_decode_time;
+                self.piece_decode_time += u64::from(duration_ticks);
+                base_time
+            }
+        };
         let bytes = boxes::fragment(
             self.sequence_number,
-            u64::from(frame.timestamp),
+            base_time,
             duration_ticks,
             &frame.payload[super::parameter_sets::START_CODE_LEN..],
             is_keyframe,
@@ -652,5 +688,160 @@ mod tests {
         // sample_duration sits at byte 88: trun's data_offset field ends at 84.
         let sample_duration = u32::from_be_bytes(second.bytes[88..92].try_into().unwrap());
         assert_eq!(sample_duration, 3000);
+    }
+
+    fn child_box(bytes: &[u8], parent: (usize, usize), wanted: [u8; 4]) -> (usize, usize) {
+        let mut at = parent.0 + 8;
+        while at < parent.1 {
+            let (kind, size) = read_box_header(bytes, at);
+            if kind == wanted {
+                return (at, at + size);
+            }
+            at += size;
+        }
+        panic!(
+            "fixture box has no {} child",
+            String::from_utf8_lossy(&wanted)
+        );
+    }
+
+    fn tfdt_base_time(fragment: &[u8]) -> u64 {
+        let (moof_kind, moof_size) = read_box_header(fragment, 0);
+        assert_eq!(&moof_kind, b"moof");
+        let traf = child_box(fragment, (0, moof_size), *b"traf");
+        let tfdt = child_box(fragment, traf, *b"tfdt");
+        u64::from_be_bytes(fragment[tfdt.0 + 12..tfdt.0 + 20].try_into().unwrap())
+    }
+
+    #[test]
+    fn stored_first_tfdt_is_zero_and_later_tfdt_values_run_the_duration_sum() {
+        let mut fragmenter = Fragmenter::stored();
+        let mut running_sum = 0u64;
+        for (index, timestamp) in [3_600_000u32, 3_603_000, 3_606_000, 3_609_000]
+            .iter()
+            .enumerate()
+        {
+            let nal = if index == 0 { IDR } else { NON_IDR };
+            let fragment = fragmenter
+                .next(&frame(ClientCodec::H264, *timestamp, nal))
+                .expect("each VCL slice yields one fragment");
+            assert_eq!(tfdt_base_time(&fragment.bytes), running_sum);
+            running_sum += u64::from(fragment.duration_ticks);
+        }
+        assert_eq!(running_sum, 3_000 * 4);
+    }
+
+    #[test]
+    fn stored_tfdt_stays_monotonic_from_zero_across_the_clock_wrap() {
+        let start = u32::MAX - 9_000;
+        let timestamps = [
+            start,
+            start.wrapping_add(4_000),
+            start.wrapping_add(10_000),
+            start.wrapping_add(13_000),
+        ];
+        let expected_durations = [3_000u32, 4_000, 6_000, 3_000];
+
+        let mut fragmenter = Fragmenter::stored();
+        let mut running_sum = 0u64;
+        for (index, timestamp) in timestamps.iter().enumerate() {
+            let nal = if index == 0 { IDR } else { NON_IDR };
+            let fragment = fragmenter
+                .next(&frame(ClientCodec::H264, *timestamp, nal))
+                .expect("each VCL slice yields one fragment");
+            assert_eq!(tfdt_base_time(&fragment.bytes), running_sum);
+            assert_eq!(fragment.duration_ticks, expected_durations[index]);
+            running_sum += u64::from(fragment.duration_ticks);
+        }
+    }
+
+    #[test]
+    fn default_fragmenter_still_stamps_the_raw_timestamp_in_tfdt() {
+        let mut fragmenter = Fragmenter::default();
+        let first = fragmenter
+            .next(&frame(ClientCodec::H264, 3_600_000, IDR))
+            .expect("a VCL slice yields one fragment");
+        assert_eq!(tfdt_base_time(&first.bytes), 3_600_000);
+        let second = fragmenter
+            .next(&frame(ClientCodec::H264, 3_603_000, NON_IDR))
+            .expect("a VCL slice yields one fragment");
+        assert_eq!(tfdt_base_time(&second.bytes), 3_603_000);
+    }
+
+    // The default mode's bytes for the three frames below, captured as-is.
+    const DEFAULT_MODE_GOLDEN_HEX: &str = concat!(
+        "000000646d6f6f66000000106d66686400000000000000010000004c7472616600000010746668640002000000000001",
+        "0000001474666474010000000000000000000000000000207472756e00000701000000010000006c00000bb800000008",
+        "02000000000000106d6461740000000465888421000000646d6f6f66000000106d66686400000000000000020000004c",
+        "74726166000000107466686400020000000000010000001474666474010000000000000000000bb8000000207472756e",
+        "00000701000000010000006c00000bb80000000801010000000000106d64617400000004419a246c000000646d6f6f66",
+        "000000106d66686400000000000000030000004c74726166000000107466686400020000000000010000001474666474",
+        "010000000000000000001770000000207472756e00000701000000010000006c00000bb8000000080101000000000010",
+        "6d64617400000004419a246c",
+    );
+
+    #[test]
+    fn default_mode_fragment_bytes_equal_the_pre_rebase_capture() {
+        let mut fragmenter = Fragmenter::default();
+        let mut actual: Vec<u8> = Vec::new();
+        for (timestamp, nal) in [(0u32, IDR), (3_000, NON_IDR), (6_000, NON_IDR)] {
+            let fragment = fragmenter
+                .next(&frame(ClientCodec::H264, timestamp, nal))
+                .expect("each VCL slice yields one fragment");
+            actual.extend_from_slice(&fragment.bytes);
+        }
+        let captured: Vec<u8> = DEFAULT_MODE_GOLDEN_HEX
+            .as_bytes()
+            .chunks(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect();
+        assert_eq!(actual, captured);
+    }
+
+    #[test]
+    fn current_init_is_none_then_equals_what_observe_emitted_for_both_codecs() {
+        let mut tracker = InitSegmentTracker::default();
+        assert!(tracker.current_init().is_none(), "nothing emitted yet");
+
+        tracker.observe(&frame(ClientCodec::H264, 0, SPS));
+        let h264 = tracker
+            .observe(&frame(ClientCodec::H264, 0, PPS))
+            .expect("SPS+PPS complete the set");
+        assert_eq!(tracker.current_init().expect("a set was emitted"), h264);
+
+        tracker.observe(&frame(ClientCodec::H265, 0, &[0x40, 0x01]));
+        tracker.observe(&frame(ClientCodec::H265, 0, &[0x42, 0x01]));
+        let h265 = tracker
+            .observe(&frame(ClientCodec::H265, 0, &[0x44, 0x01]))
+            .expect("VPS+SPS+PPS complete the set");
+        assert_eq!(tracker.current_init().expect("a set was emitted"), h265);
+    }
+
+    #[test]
+    fn a_stored_piece_walks_with_its_summed_durations_in_milliseconds() {
+        let mut tracker = InitSegmentTracker::default();
+        tracker.observe(&frame(ClientCodec::H264, 0, SPS));
+        tracker.observe(&frame(ClientCodec::H264, 0, PPS));
+        let mut piece = tracker
+            .current_init()
+            .expect("the seeded set yields an init segment")
+            .to_vec();
+
+        let mut fragmenter = Fragmenter::stored();
+        let mut expected_ticks = 0u64;
+        for (index, timestamp) in [3_600_000u32, 3_604_500, 3_609_000].iter().enumerate() {
+            let nal = if index == 0 { IDR } else { NON_IDR };
+            let fragment = fragmenter
+                .next(&frame(ClientCodec::H264, *timestamp, nal))
+                .expect("each VCL slice yields one fragment");
+            expected_ticks += u64::from(fragment.duration_ticks);
+            piece.extend_from_slice(&fragment.bytes);
+        }
+
+        let facts = crate::piece_walk::walk(&piece).expect("a stored piece walks");
+        let expected_ms =
+            i64::try_from(expected_ticks * 1_000 / u64::from(VIDEO_CLOCK_RATE_HZ)).unwrap();
+        assert_eq!(facts.duration_ms, expected_ms);
+        assert_eq!(facts.codec, "h264");
     }
 }
