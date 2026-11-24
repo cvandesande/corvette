@@ -766,13 +766,15 @@ where `code` is a stable machine value to branch on and `message` describes the 
   returned.
 - `unhealthy` (`503`): the health route found failing parts; `message` names each one.
 
-The detection configuration routes answer five more codes, in their problem-details
+The detection configuration routes answer six more codes, in their problem-details
 bodies:
 
 - `forbidden` (`403`): a `PUT` from a role that may not write.
 - `stale_revision` (`412`): `If-Match` does not match the current revision.
 - `revision_required` (`428`): a `PUT` arrived without `If-Match`.
 - `invalid_config` (`422`): the submitted value failed validation.
+- `source_not_allowed` (`422`): a camera in the submitted body carries a `source` table; stream
+  details arrive only by editing the file, and the refusal never echoes a value.
 - `apply_incomplete` (`500`): the file write failed and nothing changed.
 
 `GET /corvette/api/v1/health` answers `200` `{"database":"ok","config":"ok"}` when both
@@ -1341,6 +1343,8 @@ right closure while the schema is one plain object.
   written and nothing was applied; the body carries the current configuration value in
   `config` and the current revision in `revision`.
 - `422` `invalid_config` — the value failed validation; the error body below.
+- `422` `source_not_allowed` — a camera in the body carries a `source` table; answered before
+  validation, nothing was written, and the body echoes no submitted value.
 - `428` `revision_required` — `PUT` arrived without `If-Match`, answered after
   validation in the apply order below.
 - `503` `detection_unavailable` — the detection service could not be reached over its
