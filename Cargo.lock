@@ -504,6 +504,7 @@ dependencies = [
  "moq-net",
  "rtsp-restream",
  "rtsp-types",
+ "rusqlite",
  "sdp-types",
  "serde",
  "serde_json",

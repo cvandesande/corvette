@@ -4,6 +4,7 @@
 pub mod config;
 pub mod fmp4;
 pub mod hls;
+pub mod index;
 pub mod moq_publish;
 pub mod parameter_sets;
 pub mod record_config;
