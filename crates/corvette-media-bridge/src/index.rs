@@ -67,6 +67,10 @@ pub enum IndexError {
         operation: &'static str,
         camera: String,
     },
+    MissingRow {
+        camera: String,
+        seq: u64,
+    },
 }
 
 impl std::fmt::Display for IndexError {
@@ -98,6 +102,10 @@ impl std::fmt::Display for IndexError {
                 f,
                 "{operation} camera {camera} carries a value outside the SQLite integer range"
             ),
+            Self::MissingRow { camera, seq } => write!(
+                f,
+                "remove: the recording index holds no piece row for camera {camera} seq {seq}"
+            ),
         }
     }
 }
@@ -112,7 +120,8 @@ impl std::error::Error for IndexError {
             | Self::UnknownCamera { .. }
             | Self::MetaValue { .. }
             | Self::Pragma { .. }
-            | Self::OutOfRange { .. } => None,
+            | Self::OutOfRange { .. }
+            | Self::MissingRow { .. } => None,
         }
     }
 }
@@ -357,7 +366,55 @@ impl Index {
     }
 
     /// # Errors
+    /// Returns an error when the row is not present or cannot be deleted; the `last_seq` meta is not lowered.
+    pub fn remove(&mut self, camera: &str, seq: u64) -> Result<(), IndexError> {
+        let seq_sql = sql_int("remove", camera, seq)?;
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|source| query("remove", camera, source))?;
+        let deleted = tx
+            .execute(
+                "DELETE FROM pieces WHERE camera = ?1 AND seq = ?2",
+                params![camera, seq_sql],
+            )
+            .map_err(|source| query("remove", camera, source))?;
+        if deleted == 0 {
+            return Err(IndexError::MissingRow {
+                camera: camera.to_owned(),
+                seq,
+            });
+        }
+        tx.commit()
+            .map_err(|source| query("remove", camera, source))?;
+        Ok(())
+    }
+
+    /// # Errors
     /// Returns an error when the stored rows cannot be read.
+    pub fn all_pieces(&self) -> Result<Vec<PieceRow>, IndexError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT camera, seq, start_ts, end_ts, duration_s, path, size_bytes, codec
+                 FROM pieces
+                 ORDER BY camera, seq",
+            )
+            .map_err(|source| query("all pieces", "", source))?;
+        let mut rows = statement
+            .query([])
+            .map_err(|source| query("all pieces", "", source))?;
+        let mut pieces = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|source| query("all pieces", "", source))?
+        {
+            pieces.push(row_to_piece(row, "all pieces", "")?);
+        }
+        Ok(pieces)
+    }
+
+    /// # Errors
     pub fn overlapping(
         &self,
         camera: &str,
@@ -387,7 +444,6 @@ impl Index {
     }
 
     /// # Errors
-    /// Returns an error when the stored rows cannot be read.
     pub fn coverage(
         &self,
         camera: &str,
