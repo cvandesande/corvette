@@ -34,16 +34,9 @@ const LIVING_CAMERA = {
   enabled: false,
 };
 
-// A relay address that refuses at once, so the live screen falls back at once
-// or stays on connecting; no case here depends on which.
-const DEAD_RELAY_URL = "https://127.0.0.1:9/anon";
-
 const setup = async (page, cameras) => {
   const requests = [];
   page.on("request", (request) => requests.push(request.url()));
-  await page.addInitScript((url) => {
-    window.__corvetteMoqRelayUrl = url;
-  }, DEAD_RELAY_URL);
   await Promise.all([
     page.route("**/corvette/api/v1/cameras", (route) => route.fulfill({ json: { cameras } })),
     page.route("**/api/review?*", (route) => route.fulfill({ json: [] })),
@@ -103,9 +96,6 @@ test("an off camera says it is off", async ({ page }) => {
 });
 
 test("a camera list that cannot be fetched says so", async ({ page }) => {
-  await page.addInitScript((url) => {
-    window.__corvetteMoqRelayUrl = url;
-  }, DEAD_RELAY_URL);
   await page.route("**/corvette/api/v1/cameras", (route) => route.fulfill({ status: 500 }));
   await page.goto("/camera/front");
 

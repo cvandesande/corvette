@@ -1,7 +1,9 @@
 const { expect, test } = require(process.env.PLAYWRIGHT_TEST_PATH);
 
-// An unreachable MoQ relay must land the live screen on the HLS path, and a picture that
-// never starts there must offer a play button whose single tap rebuilds the player in the tap.
+// The live screen's tap-bound start: a picture that never starts must offer a
+// play button whose single tap rebuilds the player inside the tap, and a
+// picture that does start must never show it. The playlist route is held
+// unanswered so no picture ever starts on its own.
 
 const JPEG = Buffer.from(
   "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q==",
@@ -16,15 +18,9 @@ const FRONT_CAMERA = {
   detect_height: 1080,
 };
 
-// A relay address that refuses at once, so any MoQ attempt fails fast.
-const DEAD_RELAY_URL = "https://127.0.0.1:9/anon";
-
 const setup = async (page) => {
   const requests = [];
   page.on("request", (request) => requests.push(request.url()));
-  await page.addInitScript((url) => {
-    window.__corvetteMoqRelayUrl = url;
-  }, DEAD_RELAY_URL);
   await Promise.all([
     page.route("**/corvette/api/v1/cameras", (route) =>
       route.fulfill({ json: { cameras: [FRONT_CAMERA] } }),
@@ -44,17 +40,6 @@ const openExpandedView = async (page) => {
   await page.goto("/");
   await page.getByRole("link", { name: /open front live view/i }).click();
 };
-
-test("an unreachable relay ends on the HLS path within the bound", async ({ page }) => {
-  test.setTimeout(30_000);
-  await setup(page);
-  await openExpandedView(page);
-
-  await expect(page.locator(".live-path-indicator")).toHaveAttribute("data-live-path", "hls", {
-    timeout: 6_000,
-  });
-  await expect(page.locator(".expanded-player moq-watch")).toHaveCount(0);
-});
 
 test("a picture that does not start brings up the play button after the bound", async ({
   page,
@@ -127,9 +112,7 @@ test("a picture that starts keeps the play button away", async ({ page }) => {
   await expect(page.locator(".live-play-button")).toBeHidden();
 });
 
-test("a picture that starts after the bound hides the play button again", async ({
-  page,
-}) => {
+test("a picture that starts after the bound hides the play button again", async ({ page }) => {
   test.setTimeout(30_000);
   await setup(page);
   await page.addInitScript(() => {

@@ -311,7 +311,6 @@ main {
   background: #050808;
 }
 
-.expanded-player moq-watch,
 .expanded-player canvas,
 .expanded-player video {
   display: block;
@@ -351,10 +350,6 @@ main {
   margin: 0.35rem 0 0;
   color: #8fa09e;
   font-size: 0.85rem;
-}
-
-.live-path-indicator[data-live-path="moq"] {
-  color: #69d1ba;
 }
 
 .live-path-indicator[data-live-path="none"] {
@@ -1397,7 +1392,6 @@ main {
   height: 100%;
 }
 
-.monitor-tile-player moq-watch,
 .monitor-tile-player canvas,
 .monitor-tile-player video {
   display: block;

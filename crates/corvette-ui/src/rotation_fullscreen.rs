@@ -210,10 +210,7 @@ fn is_playing(element: &web_sys::Element) -> bool {
     {
         return true;
     }
-    // The live player draws into a canvas and has no paused state.
-    element
-        .query_selector("moq-watch")
-        .is_ok_and(|watch| watch.is_some())
+    false
 }
 
 fn is_visible(element: &web_sys::Element) -> bool {

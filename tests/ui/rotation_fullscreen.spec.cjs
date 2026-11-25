@@ -13,8 +13,6 @@ const JPEG = Buffer.from(
 
 const FRONT_CAMERA = { name: "front", display_name: "Front", order: 0, detect_width: 1920, detect_height: 1080 };
 
-// A relay address that refuses at once, so any MoQ attempt fails fast.
-const DEAD_RELAY_URL = "https://127.0.0.1:9/anon";
 
 const installHarness = (page) =>
   page.addInitScript(() => {
@@ -61,9 +59,6 @@ const installHarness = (page) =>
 
 const setupLiveView = (page) =>
   Promise.all([
-    page.addInitScript((url) => {
-      window.__corvetteMoqRelayUrl = url;
-    }, DEAD_RELAY_URL),
     page.route("**/corvette/api/v1/cameras", (route) => route.fulfill({ json: { cameras: [FRONT_CAMERA] } })),
     page.route("**/api/review?*", (route) => route.fulfill({ json: [] })),
     page.route("**/api/review/activity/motion?*", (route) => route.fulfill({ json: [] })),
@@ -449,98 +444,6 @@ test("without any fullscreen route the turn fills the viewport instead", async (
   await expect(page.locator(".rotation-fullscreen-button")).toHaveCount(0);
   expect(pageErrors).toHaveLength(0);
 });
-
-// The live player over MoQ draws into a canvas under a moq-watch element and holds no
-// video; the dead relay in this harness never lets the page mount that shape by itself.
-const mountCanvasPlayer = (page) =>
-  page.evaluate(() => {
-    const player = document.querySelector(".expanded-player");
-    player.querySelector("video").remove();
-    if (!customElements.get("moq-watch")) {
-      customElements.define("moq-watch", class extends HTMLElement {});
-    }
-    const watch = document.createElement("moq-watch");
-    const canvas = document.createElement("canvas");
-    canvas.width = 640;
-    canvas.height = 360;
-    const paint = canvas.getContext("2d");
-    paint.fillStyle = "teal";
-    paint.fillRect(0, 0, canvas.width, canvas.height);
-    watch.append(canvas);
-    player.append(watch);
-  });
-
-const playerGeometry = (page) =>
-  page.evaluate(() => {
-    const box = document.querySelector(".expanded-player").getBoundingClientRect();
-    return { width: box.width, height: box.height, innerWidth: window.innerWidth, innerHeight: window.innerHeight };
-  });
-
-const fillsViewport = (geometry) =>
-  Math.abs(geometry.width - geometry.innerWidth) <= 1 && Math.abs(geometry.height - geometry.innerHeight) <= 1;
-
-test("a sideways turn on a canvas player with no fullscreen call fills the viewport", async ({ page }) => {
-  test.setTimeout(30_000);
-  await openLiveView(page, () => page.addInitScript(() => {
-    delete Element.prototype.requestFullscreen;
-  }));
-  await mountCanvasPlayer(page);
-  await turn(page, "landscape-primary");
-  await expect(page.locator(".expanded-player")).toHaveClass(/rotation-fullscreen-layout/);
-  expect(fillsViewport(await playerGeometry(page))).toBe(true);
-  expect(await recordedRequests(page)).toHaveLength(0);
-  await expect(page.locator(".rotation-fullscreen-button")).toHaveCount(0);
-});
-
-test("an upright turn takes the canvas player back to its portrait size", async ({ page }) => {
-  test.setTimeout(30_000);
-  await openLiveView(page, () => page.addInitScript(() => {
-    delete Element.prototype.requestFullscreen;
-  }));
-  await mountCanvasPlayer(page);
-  await turn(page, "landscape-primary");
-  await expect(page.locator(".expanded-player")).toHaveClass(/rotation-fullscreen-layout/);
-  await turn(page, "portrait-primary");
-  await expect(page.locator(".expanded-player")).not.toHaveClass(/rotation-fullscreen-layout/);
-  const geometry = await playerGeometry(page);
-  expect(geometry.height).toBeLessThan(geometry.innerHeight - 1);
-});
-
-test("a player mounted afresh while still sideways gets the viewport class again", async ({ page }) => {
-  test.setTimeout(30_000);
-  await openLiveView(page, () => page.addInitScript(() => {
-    delete Element.prototype.requestFullscreen;
-  }));
-  await mountCanvasPlayer(page);
-  await turn(page, "landscape-primary");
-  await expect(page.locator(".expanded-player")).toHaveClass(/rotation-fullscreen-layout/);
-  await page.evaluate(() => {
-    const stale = document.querySelector(".expanded-player");
-    const fresh = document.createElement("div");
-    fresh.className = "expanded-player";
-    fresh.setAttribute("data-rotate-fullscreen", "");
-    const watch = document.createElement("moq-watch");
-    watch.append(document.createElement("canvas"));
-    fresh.append(watch);
-    stale.replaceWith(fresh);
-  });
-  await turn(page, "landscape-primary");
-  await expect(page.locator(".expanded-player")).toHaveClass(/rotation-fullscreen-layout/);
-});
-
-test("a canvas player on a page with the standard call uses it and never takes the class", async ({ page }) => {
-  test.setTimeout(30_000);
-  await openLiveView(page);
-  await mountCanvasPlayer(page);
-  await turn(page, "landscape-primary");
-  const requests = await recordedRequests(page);
-  expect(requests).toHaveLength(1);
-  expect(requests[0].className).toContain("expanded-player");
-  await turn(page, "landscape-primary");
-  expect(await recordedRequests(page)).toHaveLength(1);
-  await expect(page.locator(".expanded-player")).not.toHaveClass(/rotation-fullscreen-layout/);
-});
-
 test("a video player with only the video's own call never takes the viewport class", async ({ page }) => {
   test.setTimeout(30_000);
   await openLiveView(page, () => installNativeOnlyFullscreen(page));

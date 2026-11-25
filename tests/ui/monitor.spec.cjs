@@ -65,9 +65,8 @@ const nMixedAspectCameras = (count) => {
 // `data-live-path` attribute is ever written. Records, once per tile, the
 // moment (`performance.now()`) its `.monitor-tile-player` first reaches the
 // "hls" state -- the exact instant `expanded_view.rs`'s own
-// `ExpandedSession::start` runs on that tile (with
-// `window.__corvetteMoqRelayUrl` unset, `mount_moq` falls straight through to
-// `mount_hls_fallback` synchronously, before any script load or network I/O),
+// `ExpandedSession::start` runs on that tile (the session enters
+// `mount_hls` synchronously, before any script load or network I/O),
 // so this is a direct, jitter-free measurement of M3's own per-tile stagger
 // -- not a proxy inferred from network or script-load timing.
 const installLivePathLog = (page) => {
@@ -107,7 +106,7 @@ const useDesktopScreen = (page) =>
     Object.defineProperty(window.screen, "height", { configurable: true, get: () => 1080 });
   });
 
-// The video element's two failed-HLS-fallback messages are this harness's
+// The video element's two failed-HLS messages are this harness's
 // documented rest state, not a page defect; any other page error is one.
 const unexpectedPageErrors = (page) => {
   const errors = [];
@@ -208,14 +207,11 @@ test("visiting /monitor when the camera fetch errors shows the error state, not 
   await expect(page.locator(".monitor-tile")).toHaveCount(0);
 });
 
-// Issue #20 item M3's own Verify step. `window.__corvetteMoqRelayUrl` is left
-// unset throughout this file, forcing every tile's `mount_moq` straight into
-// the HLS fallback per `expanded_view.rs`'s own documented behavior --
-// matching `expanded_view.spec.cjs`'s identical precedent for exercising this
-// path deterministically, without a real relay.
+// Every tile's live session enters its HLS mount directly, so every tile
+// reaches the live path deterministically without a real relay.
 const CAMERA_COUNT = 3;
 
-test("every tile independently reaches the HLS fallback with no cross-tile interference", async ({ page }) => {
+test("every tile independently reaches the HLS live path with no cross-tile interference", async ({ page }) => {
   await installLivePathLog(page);
   await mockCameraList(page, nCameras(CAMERA_COUNT));
 
@@ -228,7 +224,7 @@ test("every tile independently reaches the HLS fallback with no cross-tile inter
 
   const log = await page.evaluate(() => window.__monitorHlsLog);
   const loggedCameras = log.map((entry) => entry.camera).sort();
-  expect(loggedCameras, "every tile reached the HLS fallback exactly once, none skipped or duplicated").toEqual(
+  expect(loggedCameras, "every tile reached the HLS live path exactly once, none skipped or duplicated").toEqual(
     ["camera-0", "camera-1", "camera-2"],
   );
 
@@ -241,7 +237,7 @@ test("every tile independently reaches the HLS fallback with no cross-tile inter
   // (`try_native_hls_or_give_up`'s native-HLS probe also fails in
   // Chromium) -- both "hls" and "none" are this scenario's legitimate rest
   // states, per this item's own Verify step; the mutation log above is what
-  // actually confirms every tile reached the HLS fallback itself.
+  // actually confirms every tile reached the HLS live path itself.
   const players = page.locator(".monitor-tile-player");
   await expect(players).toHaveCount(CAMERA_COUNT);
   for (let index = 0; index < CAMERA_COUNT; index += 1) {
@@ -262,7 +258,7 @@ test("tiles' initial dial is staggered rather than simultaneous", async ({ page 
 
   const log = await page.evaluate(() => window.__monitorHlsLog);
   const arrivalTimesMs = log.map((entry) => entry.at).sort((left, right) => left - right);
-  expect(arrivalTimesMs, "one HLS-fallback arrival per tile").toHaveLength(CAMERA_COUNT);
+  expect(arrivalTimesMs, "one HLS arrival per tile").toHaveLength(CAMERA_COUNT);
 
   // `monitor.rs`'s own `STAGGER_MS` is 200; this asserts each consecutive
   // tile's dial trails the previous one by at least half that -- comfortably
@@ -294,9 +290,8 @@ for (const cameraCount of [2, 4, 5]) {
     const tiles = page.locator(".monitor-tile");
     await expect(tiles).toHaveCount(cameraCount);
 
-    // `MonitorGrid`'s layout effect sets every tile's placement the moment
-    // its container mounts, independent of any tile's own MoQ/HLS session
-    // (D-6) -- wait for that placement rather than for any player state.
+    // `MonitorGrid`'s layout effect sets every tile's placement as soon as
+    // its container mounts, independent of any tile's own live session.
     await page.waitForFunction(
       (expectedCount) =>
         document.querySelectorAll(".monitor-tile").length === expectedCount &&

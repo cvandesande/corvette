@@ -26,7 +26,7 @@ if [[ ! -s "$TREE/index.html" ]]; then
 fi
 
 for required in pkg/corvette.js pkg/corvette.wasm pkg/corvette.css \
-  vendor/moq-watch.bundle.js vendor/hls.min.js \
+  vendor/hls.min.js \
   manifest.json icons/icon-192.png icons/icon-512.png icons/icon-512-maskable.png; do
   if [[ ! -f "$TREE/$required" ]]; then
     echo "check_site_shape: missing required file: $required" >&2
