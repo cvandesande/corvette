@@ -200,6 +200,8 @@ pub fn prepare(record: &RecordConfig) -> Result<Option<RecordingRuntime>, Record
             retention_days,
             enforce,
             clock: Box::new(PieceRecorder::wall_clock_ms),
+            recording_cameras: cameras.len(),
+            free_space: Box::new(crate::disk_free::free_bytes),
         },
     );
     Ok(Some(RecordingRuntime {

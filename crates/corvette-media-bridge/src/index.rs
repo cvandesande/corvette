@@ -1,5 +1,6 @@
 //! The recording index: the sole `SQLite` writer, the per-camera sequence counter, and the range queries playback asks.
 
+use crate::supervise::log_event;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -516,14 +517,19 @@ pub fn spawn_writer(
 }
 
 pub const EXPIRY_PASS_INTERVAL_MS: i64 = 3_600_000;
+const PRESSURE_PASS_INTERVAL_MS: i64 = 60_000;
 const EXPIRY_TICK: Duration = Duration::from_mins(1);
 
-/// Storage root, per-camera `retention_days`, dry-run switch and injected clock for the hourly pass.
+pub type FreeSpaceReader = Box<dyn Fn(&Path) -> std::io::Result<u64> + Send>;
+
+/// Storage root, per-camera `retention_days`, dry-run switch, injected clock and injected free-space reader for the hourly expiry pass and the pressure pass.
 pub struct ExpiryWiring {
     pub root: PathBuf,
     pub retention_days: HashMap<String, u32>,
     pub enforce: bool,
     pub clock: Box<dyn Fn() -> i64 + Send>,
+    pub recording_cameras: usize,
+    pub free_space: FreeSpaceReader,
 }
 
 impl std::fmt::Debug for ExpiryWiring {
@@ -533,11 +539,13 @@ impl std::fmt::Debug for ExpiryWiring {
             .field("retention_days", &self.retention_days)
             .field("enforce", &self.enforce)
             .field("clock", &"injected")
+            .field("recording_cameras", &self.recording_cameras)
+            .field("free_space", &"injected")
             .finish()
     }
 }
 
-/// Runs [`spawn_writer`]'s loop on one thread and additionally runs [`crate::expiry::run_pass`] hourly there, so inserts and passes never overlap; `wiring.clock` is the pass's only clock read.
+/// Runs [`spawn_writer`]'s loop on one thread and additionally runs [`crate::expiry::run_pass`] hourly and [`crate::pressure::run_pressure_pass`] at the pressure cadence there, so inserts and passes never overlap; `wiring.clock` is the passes' only clock read.
 pub fn spawn_writer_with_expiry(
     index: Index,
     capacity: usize,
@@ -550,6 +558,8 @@ pub fn spawn_writer_with_expiry(
     let handle = std::thread::spawn(move || {
         let mut index = index;
         let mut next_pass_ms = (wiring.clock)().saturating_add(EXPIRY_PASS_INTERVAL_MS);
+        let mut next_pressure_ms = (wiring.clock)();
+        let mut free_unreadable = false;
         loop {
             match receiver.recv_timeout(EXPIRY_TICK) {
                 Ok(row) => {
@@ -574,6 +584,34 @@ pub fn spawn_writer_with_expiry(
                     wiring.enforce,
                 ) {
                     eprintln!("corvette-media-bridge: expiry pass failed: {error}");
+                }
+            }
+            if now_ms >= next_pressure_ms {
+                next_pressure_ms = now_ms.saturating_add(PRESSURE_PASS_INTERVAL_MS);
+                match (wiring.free_space)(&wiring.root) {
+                    Err(source) => {
+                        if !free_unreadable {
+                            log_event("storage", "pressure-free-unreadable", source.kind());
+                            free_unreadable = true;
+                        }
+                    }
+                    Ok(free_bytes) => {
+                        if free_unreadable {
+                            log_event("storage", "pressure-free-readable", "");
+                            free_unreadable = false;
+                        }
+                        if let Err(error) = crate::pressure::run_pressure_pass(
+                            &wiring.root,
+                            &mut index,
+                            now_ms,
+                            &wiring.retention_days,
+                            wiring.recording_cameras,
+                            free_bytes,
+                            wiring.enforce,
+                        ) {
+                            eprintln!("corvette-media-bridge: pressure pass failed: {error}");
+                        }
+                    }
                 }
             }
         }

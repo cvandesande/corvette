@@ -500,6 +500,7 @@ dependencies = [
  "futures-util",
  "hang",
  "httparse",
+ "libc",
  "moq-mux",
  "moq-net",
  "rtsp-restream",

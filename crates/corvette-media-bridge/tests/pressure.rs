@@ -858,3 +858,24 @@ fn a_never_expiring_camera_is_never_an_expired_pressure_victim_and_its_newest_ho
     );
     std::fs::remove_dir_all(&root).expect("temp root removed");
 }
+
+#[test]
+fn a_within_retention_piece_ending_exactly_at_the_newest_hour_cut_is_planned_and_one_millisecond_past_is_not()
+ {
+    let rows = vec![
+        plan_row("front", 5, NOW - 10 * DAY - 1000, NOW - 10 * DAY, 100),
+        plan_row("front", 8, NOW - HOUR - 1000, NOW - HOUR, 100),
+        plan_row("front", 7, NOW - HOUR + 1 - 1000, NOW - HOUR + 1, 100),
+        plan_row("front", 9, NOW - 1000, NOW, 4000),
+        plan_row("front", 6, NOW - 500, NOW - 1, 4000),
+    ];
+    let plan = pressure::plan_pressure(&rows, NOW, &retention(&[("front", 30)]), 1, 0);
+    assert_eq!(
+        seq_reasons(&plan),
+        vec![
+            ("front".to_owned(), 5, PressureReason::WithinRetention),
+            ("front".to_owned(), 8, PressureReason::WithinRetention),
+        ],
+        "the piece ending exactly at newest-end minus one hour is eligible and the one a millisecond past it is not"
+    );
+}

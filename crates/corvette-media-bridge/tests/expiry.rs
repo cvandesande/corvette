@@ -506,6 +506,8 @@ fn the_writer_thread_runs_the_expiry_pass_when_the_clock_passes_the_hour() {
         retention_days: retention(&[("front", 7)]),
         enforce: true,
         clock: Box::new(move || clock_for_wiring.load(Ordering::SeqCst)),
+        recording_cameras: 1,
+        free_space: Box::new(|_root| Ok(u64::MAX)),
     };
     // capacity 0: the first send returns only once the writer thread has
     // started, so the clock advance below always follows the thread's own
