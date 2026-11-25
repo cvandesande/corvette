@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1.7
 ARG NCNN_TAG=20260526
-ARG MOQ_REV=7b73c43381a7f9c309e3045a8f0f858aa32ef48c
 ARG DEBIAN_IMAGE=debian:trixie
 ARG RUST_IMAGE=rust:1.97.1-trixie
 
@@ -24,20 +23,8 @@ RUN cmake -G Ninja -B build \
     && cmake --build build -j"$(nproc)" \
     && cmake --install build
 
-FROM ${RUST_IMAGE} AS moq-builder
-ARG MOQ_REV
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates cmake git pkg-config \
-    && rm -rf /var/lib/apt/lists/*
-# Full clone then checkout by sha, as docker/Dockerfile.media-bridge does: GitHub's smart HTTP does not reliably serve an arbitrary sha as a shallow fetch. rust-builder's apt list below unions docker/Dockerfile.api-server's and docker/Dockerfile.media-bridge's builder lists, plus docker/Dockerfile.detect's libvulkan-dev.
-RUN git clone https://github.com/moq-dev/moq.git /src/moq \
-    && cd /src/moq \
-    && git checkout "${MOQ_REV}"
-WORKDIR /src/moq
-RUN cargo build --release --bin moq-relay
-
 FROM ${RUST_IMAGE} AS rust-builder
+# This apt list unions docker/Dockerfile.api-server's and docker/Dockerfile.media-bridge's builder lists, plus docker/Dockerfile.detect's libvulkan-dev.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential ca-certificates cmake git libvulkan-dev pkg-config \
@@ -72,7 +59,6 @@ COPY --from=ncnn-builder /src/ncnn/glslang/LICENSE.txt /usr/share/licenses/glsla
 COPY LICENSE /usr/share/licenses/corvette/LICENSE
 COPY --from=rust-builder /src/target/release/corvette-api-server /usr/local/bin/corvette-api-server
 COPY --from=rust-builder /src/target/release/corvette-media-bridge /usr/local/bin/corvette-media-bridge
-COPY --from=moq-builder /src/moq/target/release/moq-relay /usr/local/bin/moq-relay
 COPY --from=rust-builder /src/target/release/corvette-detect-service /usr/local/bin/corvette-detect-service
 COPY --from=rust-builder /src/target/release/corvette-detect-worker /usr/local/bin/corvette-detect-worker
 # No run path to libncnn.so.1 is baked in, so LD_LIBRARY_PATH is how the loader finds it (docker/Dockerfile.detect); CMD [] drops the base image's bash default so a container without a command: fails in the runtime instead of opening a shell (docker/Dockerfile.detect-worker layout check).

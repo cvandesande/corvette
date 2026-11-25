@@ -156,7 +156,6 @@ libpath="$merged/opt/ncnn/lib:$merged/lib/x86_64-linux-gnu:$merged/usr/lib/x86_6
 binaries=(
   /usr/local/bin/corvette-api-server
   /usr/local/bin/corvette-media-bridge
-  /usr/local/bin/moq-relay
   /usr/local/bin/corvette-detect-service
   /usr/local/bin/corvette-detect-worker
 )
@@ -199,14 +198,6 @@ else
   run_through_loader "$merged/usr/local/bin/corvette-detect-worker" --help >/dev/null 2>&1 || worker_status=$?
   if [[ "$worker_status" -ne 0 ]]; then
     fail_line help "corvette-detect-worker --help exit $worker_status, want 0"
-  fi
-
-  moq_status=0
-  moq_out="$(run_through_loader "$merged/usr/local/bin/moq-relay" --version 2>&1)" || moq_status=$?
-  if [[ "$moq_status" -ne 0 ]]; then
-    fail_line help "moq-relay --version exit $moq_status, want 0; first line: ${moq_out%%$'\n'*}"
-  elif [[ "$moq_out" != moq-relay\ * ]]; then
-    fail_line help "moq-relay --version produced unexpected output: ${moq_out%%$'\n'*}"
   fi
 
   # corvette-media-bridge takes no CLI arguments and reads configuration only from
@@ -325,4 +316,4 @@ if [[ "$fail" -ne 0 ]]; then
   exit 1
 fi
 
-echo "check_corvette_oci_layout: ok ($OCI_TAR: all five binaries start through the image's own loader; ffmpeg present with every NEEDED library resolvable; ncnn, libgomp and the Vulkan loader present; radeon and lvp drivers present with resolvable libraries; licences present; no baked-in model; config carries user 65532 and no baked entrypoint or command; no denied literals)"
+echo "check_corvette_oci_layout: ok ($OCI_TAR: all four binaries start through the image's own loader; ffmpeg present with every NEEDED library resolvable; ncnn, libgomp and the Vulkan loader present; radeon and lvp drivers present with resolvable libraries; licences present; no baked-in model; config carries user 65532 and no baked entrypoint or command; no denied literals)"

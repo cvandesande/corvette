@@ -68,7 +68,6 @@ check_nonzero_and_output() {
 
 check_exit_and_output api-server-usage-documented 1 "CORVETTE_API_SOCKET is not set" corvette-api-server
 check_nonzero_and_output media-bridge-usage-documented "CORVETTE_MEDIA_BRIDGE_CONFIG is not set" corvette-media-bridge
-check_exit_and_output moq-relay-version-ok 0 "moq-relay" moq-relay --version
 check_exit_and_output detect-service-help-ok 0 "exit codes:" corvette-detect-service --help
 check_exit detect-worker-help-ok 0 corvette-detect-worker --help
 check_exit detect-service-probe-missing-socket-fails-clean 1 \
