@@ -824,3 +824,41 @@ fn the_camera_secret_never_reaches_service_output_or_status_across_restarts() {
         "the stub was never handed the dialled address: {dialed}"
     );
 }
+
+#[test]
+fn track_events_socket_listens_alongside_the_status_socket_and_answers_nothing_unprompted() {
+    let dir = temp_dir("track-events");
+    write_labels(&dir);
+    write_config(&dir);
+    let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
+    let mut command = service_command(&dir, &worker, "127.0.0.1:8554");
+    command
+        .arg("--track-events-socket")
+        .arg(dir.join("track.sock"));
+    let child = command.spawn().unwrap();
+    let socket = dir.join("service.sock");
+    let track = dir.join("track.sock");
+    let service = Running { child, socket };
+    wait_until("both socket files", || {
+        track.exists() && service.socket.exists()
+    });
+    let mut answer: Option<(u16, String)> = None;
+    wait_until("a status of 200", || {
+        answer = try_get(&service.socket, STATUS).filter(|found| found.0 == 200);
+        answer.is_some()
+    });
+    let mut subscriber =
+        UnixStream::connect(&track).expect("the track socket accepts a connection");
+    subscriber
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let mut buffer = [0_u8; 64];
+    match subscriber.read(&mut buffer) {
+        Ok(0) => {}
+        Ok(read) => panic!("the track socket sent {read} bytes unprompted"),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::WouldBlock
+                || error.kind() == std::io::ErrorKind::TimedOut => {}
+        Err(error) => panic!("the track subscriber read failed: {error}"),
+    }
+}

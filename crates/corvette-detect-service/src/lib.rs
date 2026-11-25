@@ -13,17 +13,20 @@ use std::time::{Duration, Instant};
 
 use corvette_detect::{
     CameraEntry, CameraPlan, CameraThreadSettings, CameraThreads, Config, DEFAULT_POLICY,
-    JoinReport, ServiceState, SharedLink, StreamAddress, Supervised, ThreadEnd, WorkerLink,
-    revision, serve, stream_address,
+    FrameObjects, JoinReport, ServiceState, SharedLink, StreamAddress, Supervised, ThreadEnd,
+    WorkerLink, revision, serve, serve_track_events, stream_address,
 };
 use tokio::process::Command;
+use tokio::runtime::Runtime;
 use tokio::signal::unix::{Signal, SignalKind};
+use tokio::sync::watch;
 
 const USAGE: &str = "\
 usage: corvette-detect-service --config PATH --ffmpeg PROGRAM
            --worker PROGRAM --worker-param PATH --worker-bin PATH
            --worker-max-deadline-ms N --worker-health-socket PATH
-           [--socket PATH] [--restream-address HOST:PORT] [--worker-device VALUE]
+           [--socket PATH] [--track-events-socket PATH]
+           [--restream-address HOST:PORT] [--worker-device VALUE]
            [--frame-timeout-ms N] [--stop-timeout-ms N]
        corvette-detect-service --probe [--socket PATH]
        corvette-detect-service --help
@@ -60,6 +63,7 @@ pub enum Invocation {
 pub struct Options {
     pub config: PathBuf,
     pub socket: PathBuf,
+    pub track_events_socket: Option<PathBuf>,
     pub ffmpeg: PathBuf,
     pub restream_address: Option<String>,
     pub worker: WorkerLaunch,
@@ -81,6 +85,7 @@ pub struct WorkerLaunch {
 struct FlagSlots {
     config: Option<PathBuf>,
     socket: Option<PathBuf>,
+    track_events_socket: Option<PathBuf>,
     ffmpeg: Option<PathBuf>,
     restream_address: Option<String>,
     worker: Option<PathBuf>,
@@ -98,6 +103,9 @@ impl FlagSlots {
     fn extra_with_probe(&self) -> Option<&'static str> {
         [
             self.config.as_ref().map(|_| "config"),
+            self.track_events_socket
+                .as_ref()
+                .map(|_| "track-events-socket"),
             self.ffmpeg.as_ref().map(|_| "ffmpeg"),
             self.restream_address.as_ref().map(|_| "restream-address"),
             self.worker.as_ref().map(|_| "worker"),
@@ -177,6 +185,7 @@ pub fn parse(args: &[OsString], env_socket: Option<&OsStr>) -> Result<Invocation
                 let slot = match name {
                     "--config" => &mut slots.config,
                     "--socket" => &mut slots.socket,
+                    "--track-events-socket" => &mut slots.track_events_socket,
                     "--ffmpeg" => &mut slots.ffmpeg,
                     "--worker" => &mut slots.worker,
                     "--worker-param" => &mut slots.worker_param,
@@ -206,6 +215,7 @@ fn serve_options(slots: FlagSlots, env_socket: Option<&OsStr>) -> Result<Options
     Ok(Options {
         config: take_path(slots.config, "config")?,
         socket: take_socket(slots.socket, env_socket)?,
+        track_events_socket: slots.track_events_socket,
         ffmpeg: take_path(slots.ffmpeg, "ffmpeg")?,
         restream_address: slots.restream_address,
         worker: WorkerLaunch {
@@ -398,7 +408,9 @@ pub fn run(
         .iter()
         .map(|(name, threads)| (name.clone(), CameraEntry::Live(threads.handle())))
         .collect();
-    let listener = match bind_status_socket(&options.socket) {
+    let bound = bind_socket(&options.socket)
+        .and_then(|listener| start_track_events(&runtime, &options, &started).map(|()| listener));
+    let listener = match bound {
         Ok(listener) => listener,
         Err((event, reason)) => {
             log_event("service", event, reason);
@@ -423,7 +435,7 @@ pub fn run(
         }
         Ended::Signaled(name) => {
             log_event("service", "shutdown-signal", format!("signal={name}"));
-            remove_socket(&options.socket);
+            remove_all_sockets(&options);
             stop_and_join(started, options.stop_timeout);
             // The worker guard's drop kills its child, so the runtime must outlive the guard.
             drop(entered);
@@ -474,6 +486,13 @@ fn remove_socket(path: &Path) {
             "socket-unlink-failed",
             format!("{}: {error}", path.display()),
         );
+    }
+}
+
+fn remove_all_sockets(options: &Options) {
+    remove_socket(&options.socket);
+    if let Some(path) = &options.track_events_socket {
+        remove_socket(path);
     }
 }
 
@@ -675,8 +694,26 @@ fn worker_command(
     }
 }
 
+// Binds and serves the track-event socket when the flag named a path; the error names the event the caller logs.
+fn start_track_events(
+    runtime: &Runtime,
+    options: &Options,
+    started: &[(String, CameraThreads)],
+) -> Result<(), (&'static str, String)> {
+    let Some(path) = &options.track_events_socket else {
+        return Ok(());
+    };
+    let listener = bind_socket(path)?;
+    let streams: Vec<(String, watch::Receiver<Option<FrameObjects>>)> = started
+        .iter()
+        .map(|(name, threads)| (name.clone(), threads.handle().objects))
+        .collect();
+    runtime.spawn(serve_track_events(listener, streams));
+    Ok(())
+}
+
 // The error names the event the caller logs, so one failure emits one line.
-fn bind_status_socket(path: &Path) -> Result<tokio::net::UnixListener, (&'static str, String)> {
+fn bind_socket(path: &Path) -> Result<tokio::net::UnixListener, (&'static str, String)> {
     let std_listener = claim_socket(path).map_err(|reason| ("socket-refused", reason))?;
     let listener = std_listener
         .set_nonblocking(true)

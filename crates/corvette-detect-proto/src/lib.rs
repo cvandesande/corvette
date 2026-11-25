@@ -15,7 +15,11 @@ pub const MAX_BODY: usize = ID_LEN + RAW_VALUES * 4;
 mod header;
 mod reply;
 mod request;
+mod track_events;
 
 pub use header::{DecodeError, Header, HeaderError, Kind, parse_header};
 pub use reply::{EncodeError, ErrorCode, Reply, Row};
 pub use request::Request;
+pub use track_events::{
+    LINE_VERSION, LineError, TrackFrame, TrackInfo, decode_track_line, encode_track_line,
+};

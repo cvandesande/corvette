@@ -350,3 +350,49 @@ fn restream_address_accepts_one_host_and_a_live_port() {
         );
     }
 }
+
+#[test]
+fn track_events_socket_flag_is_optional_and_kept() {
+    let without = options(&with(&base(), &["--socket", "/s.sock"]), None);
+    assert_eq!(without.track_events_socket, None);
+    let with = options(
+        &with(
+            &base(),
+            &["--socket", "/s.sock", "--track-events-socket", "/t.sock"],
+        ),
+        None,
+    );
+    assert_eq!(with.track_events_socket, Some(PathBuf::from("/t.sock")));
+}
+
+#[test]
+fn track_events_socket_given_twice_is_a_usage_error() {
+    assert_eq!(
+        refused(&with(
+            &base(),
+            &[
+                "--socket",
+                "/s.sock",
+                "--track-events-socket",
+                "/t.sock",
+                "--track-events-socket",
+                "/t2.sock",
+            ],
+        )),
+        "flag --track-events-socket given twice"
+    );
+}
+
+#[test]
+fn track_events_socket_is_refused_with_probe() {
+    assert_eq!(
+        refused(&[
+            "--probe",
+            "--socket",
+            "/p.sock",
+            "--track-events-socket",
+            "/t.sock",
+        ]),
+        "flag --track-events-socket is not allowed with --probe"
+    );
+}

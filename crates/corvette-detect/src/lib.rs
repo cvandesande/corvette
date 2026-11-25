@@ -33,6 +33,7 @@ mod shared_link;
 mod source;
 mod source_url;
 mod supervised;
+mod track_events;
 mod worker_link;
 
 pub use backoff::{BACKOFF_INITIAL, BACKOFF_MAX, Backoff, DEFAULT_POLICY, HEALTHY_RUN, Policy};
@@ -76,6 +77,10 @@ pub use shared_link::{LinkTimings, SharedInfer, SharedLink};
 pub use source::{FrameSource, STREAM_QUEUE_CAPACITY, SourceError};
 pub use source_url::{StreamAddressError, StreamKind, resolve_stream_url};
 pub use supervised::{Status, Supervised};
+pub use track_events::{
+    TRACK_EVENTS_ACCEPT_BACKOFF, TRACK_EVENTS_MAX_SUBSCRIBERS, TRACK_EVENTS_QUEUE_LINES,
+    TrackAccept, serve_track_events,
+};
 pub use worker_link::{LinkState, WorkerLink};
 
 /// Lines `log_event` printed this process; in-process stderr cannot be captured otherwise, and the apply audit test reads it here.
