@@ -20,34 +20,47 @@ async fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    if let Some(record) = record {
-        for warning in &record.warnings {
-            eprintln!("corvette-media-bridge: {warning}");
-        }
-        let recording = record
-            .cameras
-            .iter()
-            .filter(|camera| camera.records())
-            .count();
-        let retention = if record.storage.retention_enforce {
-            "ENFORCE"
-        } else {
-            "DRY-RUN"
-        };
-        eprintln!(
-            "corvette-media-bridge: record config loaded cameras={} recording={} retention={retention}",
-            record.cameras.len(),
-            recording
-        );
-    }
-
-    let (_cameras, listener) = match corvette_media_bridge::start(config).await {
-        Ok(started) => started,
-        Err(err) => {
-            eprintln!("corvette-media-bridge: failed to start: {err}");
-            return std::process::ExitCode::FAILURE;
+    let runtime = match record {
+        None => None,
+        Some(record) => {
+            for warning in &record.warnings {
+                eprintln!("corvette-media-bridge: {warning}");
+            }
+            let recording = record
+                .cameras
+                .iter()
+                .filter(|camera| camera.records())
+                .count();
+            let retention = if record.storage.retention_enforce {
+                "ENFORCE"
+            } else {
+                "DRY-RUN"
+            };
+            eprintln!(
+                "corvette-media-bridge: record config loaded cameras={} recording={} retention={retention}",
+                record.cameras.len(),
+                recording
+            );
+            match corvette_media_bridge::record_role::prepare(&record) {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    eprintln!("corvette-media-bridge: {err}");
+                    return std::process::ExitCode::FAILURE;
+                }
+            }
         }
     };
+
+    let (_cameras, listener) =
+        match corvette_media_bridge::start_with_recording(config, runtime.map(std::sync::Arc::new))
+            .await
+        {
+            Ok(started) => started,
+            Err(err) => {
+                eprintln!("corvette-media-bridge: failed to start: {err}");
+                return std::process::ExitCode::FAILURE;
+            }
+        };
 
     listener.await;
     std::process::ExitCode::SUCCESS

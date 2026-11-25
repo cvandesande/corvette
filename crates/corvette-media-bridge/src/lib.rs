@@ -9,6 +9,7 @@ pub mod moq_publish;
 pub mod parameter_sets;
 pub mod piece_walk;
 pub mod record_config;
+pub mod record_role;
 pub mod recorder;
 pub mod recovery;
 pub mod restream_provider;
@@ -32,6 +33,7 @@ pub struct RunningCamera {
     pub moq_publish: Supervised,
     pub fmp4_repackage: Supervised,
     pub hls_segment: Supervised,
+    pub record: Option<Supervised>,
 }
 
 /// # Errors
@@ -40,6 +42,17 @@ pub struct RunningCamera {
 pub async fn start(
     config: Config,
 ) -> std::io::Result<(Vec<RunningCamera>, impl std::future::Future<Output = ()>)> {
+    start_with_recording(config, None).await
+}
+
+/// # Errors
+pub async fn start_with_recording(
+    config: Config,
+    recording: Option<Arc<record_role::RecordingRuntime>>,
+) -> std::io::Result<(Vec<RunningCamera>, impl std::future::Future<Output = ()>)> {
+    if let Some(runtime) = &recording {
+        runtime.warn_unknown_cameras(config.cameras.iter().map(|camera| camera.name.as_str()));
+    }
     let mut provider = MultiCameraProvider::default();
     let mut fmp4_store = MultiCameraFmp4Store::default();
     let mut hls_store = MultiCameraHlsStore::default();
@@ -100,6 +113,10 @@ pub async fn start(
             })
         };
 
+        let record = recording
+            .as_ref()
+            .and_then(|runtime| runtime.maybe_spawn_record(&camera.name, &client));
+
         log_event(
             &camera.name,
             "camera-started",
@@ -111,6 +128,7 @@ pub async fn start(
             moq_publish,
             fmp4_repackage,
             hls_segment,
+            record,
         });
     }
 
