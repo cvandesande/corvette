@@ -18,6 +18,7 @@ pub mod config;
 pub mod database;
 pub mod detection;
 pub mod detection_config;
+pub mod playlist;
 pub mod rebase;
 pub mod recordings;
 pub mod status;
@@ -58,6 +59,7 @@ struct Request {
     body_len: Option<usize>,
     if_match: Option<String>,
     content_type: Option<String>,
+    range: Option<String>,
     remote_user: Option<String>,
     remote_role: String,
 }
@@ -427,6 +429,7 @@ fn parse_request(block: &[u8]) -> Result<Request, String> {
     let mut body_len: Option<usize> = None;
     let mut if_match: Option<String> = None;
     let mut content_type: Option<String> = None;
+    let mut range: Option<String> = None;
 
     for line in lines {
         // A leading space or tab is an obs-fold continuation; never accepted.
@@ -458,6 +461,7 @@ fn parse_request(block: &[u8]) -> Result<Request, String> {
             }
             b"if-match" => capture_once(&mut if_match, value, "If-Match")?,
             b"content-type" => capture_once(&mut content_type, value, "Content-Type")?,
+            b"range" => capture_once(&mut range, value, "Range")?,
             b"remote-user" => {
                 user_count += 1;
                 if remote_user.is_none() {
@@ -492,6 +496,7 @@ fn parse_request(block: &[u8]) -> Result<Request, String> {
         body_len,
         if_match,
         content_type,
+        range,
         remote_user,
         remote_role: remote_role.unwrap_or_default(),
     })
@@ -616,6 +621,9 @@ async fn route(request: &Request, context: &ConnectionContext) -> Response {
     }
     if let Some(segment) = detection::objects_segment(&request.path) {
         return detection::objects(request, config, segment, detection).await;
+    }
+    if let Some(media) = playlist::media_parts(&request.path) {
+        return playlist::handle(request, config, index_path, media).await;
     }
     let Some(route) = Route::ALL
         .into_iter()

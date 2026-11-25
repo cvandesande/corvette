@@ -761,6 +761,8 @@ where `code` is a stable machine value to branch on and `message` describes the 
   served between recorder runs, after the recorder closes it cleanly, until the recorder
   reopens it; that case answers this code. The status route answers the same failure
   inside its `recording` field instead.
+- `range_unsatisfiable` (`416`): the playlist route could not satisfy the request's
+  `Range` header on a segment; the answer names the total length and nothing else.
 - `no_picture` (`404`): the still route found a camera the caller may see that is switched
   off.
 - `picture_unavailable` (`503`): the still route could not get a usable picture from the
@@ -925,7 +927,10 @@ above, where the code is the stable value. This `404` is the one answer
 nginx itself generates in this JSON shape. An empty range (`start == end`)
 is served like any other range: it answers `200` with a playlist when a
 recording holds that instant, and answers like a range with no recording
-(the `404` above) when none does.
+(the `404` above) when none does. A range longer than 31 days
+(2678400 s), the bound the activity route places on its own window, answers
+the same `404`, and so does a range whose index rows number more than
+25000; that answer arrives before any stored piece file is read.
 
 A clip starts at or before the requested second. **Current backing**: the
 backing pulls the start back to the previous keyframe of the first
@@ -941,6 +946,87 @@ recording's duration trimmed to the requested range and pulled back to the
 previous keyframe; a range for which every recording is skipped answers
 like a range with no recording. Whether the deployed recordings ever reach
 600 s is unverified.
+
+## The playlist route answers four files under the range's directory
+
+The playlist address names a directory, and four file names resolve under it
+with relative URIs and no leading slash: `master.m3u8`, `index.m3u8`,
+`init-<run>.mp4` and `seg-<n>.m4s`. `<run>` numbers a run of stored pieces
+that share one set of stream parameters, and `<n>` numbers a piece of the
+requested range; both count from 0 and are written as plain decimal
+integers. A `<run>` or `<n>` in any other spelling, and any range with no
+overlapping piece, answer `404` `not_found`; a file name that is not one of
+these four is no route at all.
+
+The playlists carry media type `application/vnd.apple.mpegurl`; init and
+segment files carry `video/mp4`. Every answer under the directory carries
+`Cache-Control: no-store`, because retention can delete pieces at any
+moment.
+
+Pieces are ordered by their start and numbered `seg-0`, `seg-1`, … over the
+half-open range, so one request answers the same names for as long as the
+index holds the same pieces. A piece begins a discontinuity when it starts
+more than one second after the previous piece ends, or when its stream
+parameters differ from the previous piece's; the parameters are read from
+the piece's own stored init prefix.
+
+`master.m3u8` names the single variant `index.m3u8` and carries an
+`#EXT-X-STREAM-INF` line whose `BANDWIDTH` is the range's stored byte total
+multiplied by eight and divided by its stored duration total, zero when the
+stored duration total is zero. `index.m3u8` is the media playlist:
+`#EXTM3U`, `#EXT-X-VERSION:7`, `#EXT-X-PLAYLIST-TYPE:VOD`,
+`#EXT-X-INDEPENDENT-SEGMENTS`, and an `#EXT-X-TARGETDURATION` set to the
+ceiling of the longest `#EXTINF` it carries; `#EXT-X-ENDLIST` ends it, and
+no other tags appear. Each piece contributes one `#EXTINF:<seconds>,` line
+carrying its stored duration to three decimals, followed by its
+`seg-<n>.m4s` line.
+
+The first segment of the playlist, and the first segment of every
+discontinuity, is preceded by an `#EXT-X-MAP:URI="init-<run>.mp4"` line
+naming that run's init prefix and by an `#EXT-X-PROGRAM-DATE-TIME` in UTC
+ISO-8601 with milliseconds carrying the wall-clock start of that piece. A
+discontinuity carries one `#EXT-X-DISCONTINUITY` line before that map line.
+
+After each discontinuity the media timeline restarts at zero: a piece's
+fragments are shifted onto a time base that begins at its sequence's start,
+so stored pieces stay standalone files while one playlist carries one
+continuous local time through every run and gap. The stored duration of a
+piece truncates its media ticks to a whole millisecond, so two consecutive
+pieces placed end to end by their rounded durations overlap by less than a
+millisecond at their junction; that overlap keeps every served decode time
+monotonic.
+
+`seg-<n>.m4s` answers the piece's fragments with their decode times shifted
+by the piece's place on the timeline; the init prefix is not part of the
+answer, the playlist points to it separately. A `Range` request naming one
+single byte range answers `206` with `Content-Range`; a single range that
+starts at or past the end of the answer answers `416` with code
+`range_unsatisfiable`; a multi-range request answers `200` with the whole
+body; a single range whose first position lies past the last position it
+asks for, a `bytes=-0` suffix, and a malformed or overflowing range
+specification likewise answer `200` with the whole body; a zero-length
+answer has no satisfiable suffix range and answers `416`; without `Range`
+the answer is `200` with `Accept-Ranges: bytes`.
+**Current backing**: the backing's vod routes answer these same four roles
+from files it builds per request.
+
+A piece row whose file is absent or unreadable, or whose stored path is not
+exactly `recordings/<camera>/<date>/<hour>/<name>.mp4` naming the row's own
+camera, answers `503` `recording_unavailable` for that request and logs one
+fixed-word line naming the camera and the piece's `seq`; the answer and the
+log line carry no path and no system error text. Stored bytes that cannot be
+read as a piece answer `503` `recording_unavailable` with a different
+fixed-word log line, and an init prefix claiming more than one mebibyte of
+file answers the same way without being read whole. A piece file longer
+than 64 MiB is refused the same way before it is read.
+
+Because the recorder is the only writer under the storage root, the path
+check treats the tree as the recorder writes it, and a symbolic link placed
+under the root is followed like any other piece file. Segment numbers are
+positions in the current plan: when retention deletes a piece between a
+playlist request and a later segment request, the numbers after it shift
+onto the following pieces; a clip is requested promptly after its playlist,
+and a short plan keeps that window small.
 
 ## The server issues a link for any recorded range
 
