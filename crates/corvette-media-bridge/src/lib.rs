@@ -2,6 +2,7 @@
 #![allow(clippy::multiple_crate_versions)]
 
 pub mod config;
+pub mod expiry;
 pub mod fmp4;
 pub mod hls;
 pub mod index;

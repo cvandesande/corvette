@@ -2,8 +2,9 @@
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 pub const PIECE_CHANNEL_CAPACITY: usize = 64;
 
@@ -507,6 +508,73 @@ pub fn spawn_writer(
                     "corvette-media-bridge: index insert failed camera={} seq={}",
                     row.camera, row.seq
                 );
+            }
+        }
+        index
+    });
+    (sender, handle)
+}
+
+pub const EXPIRY_PASS_INTERVAL_MS: i64 = 3_600_000;
+const EXPIRY_TICK: Duration = Duration::from_mins(1);
+
+/// Storage root, per-camera `retention_days`, dry-run switch and injected clock for the hourly pass.
+pub struct ExpiryWiring {
+    pub root: PathBuf,
+    pub retention_days: HashMap<String, u32>,
+    pub enforce: bool,
+    pub clock: Box<dyn Fn() -> i64 + Send>,
+}
+
+impl std::fmt::Debug for ExpiryWiring {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExpiryWiring")
+            .field("root", &self.root)
+            .field("retention_days", &self.retention_days)
+            .field("enforce", &self.enforce)
+            .field("clock", &"injected")
+            .finish()
+    }
+}
+
+/// Runs [`spawn_writer`]'s loop on one thread and additionally runs [`crate::expiry::run_pass`] hourly there, so inserts and passes never overlap; `wiring.clock` is the pass's only clock read.
+pub fn spawn_writer_with_expiry(
+    index: Index,
+    capacity: usize,
+    wiring: ExpiryWiring,
+) -> (
+    std::sync::mpsc::SyncSender<PieceRow>,
+    std::thread::JoinHandle<Index>,
+) {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(capacity);
+    let handle = std::thread::spawn(move || {
+        let mut index = index;
+        let mut next_pass_ms = (wiring.clock)().saturating_add(EXPIRY_PASS_INTERVAL_MS);
+        loop {
+            match receiver.recv_timeout(EXPIRY_TICK) {
+                Ok(row) => {
+                    if index.insert(&row).is_err() {
+                        eprintln!(
+                            "corvette-media-bridge: index insert failed camera={} seq={}",
+                            row.camera, row.seq
+                        );
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            let now_ms = (wiring.clock)();
+            if now_ms >= next_pass_ms {
+                next_pass_ms = now_ms.saturating_add(EXPIRY_PASS_INTERVAL_MS);
+                if let Err(error) = crate::expiry::run_pass(
+                    &wiring.root,
+                    &mut index,
+                    now_ms,
+                    &wiring.retention_days,
+                    wiring.enforce,
+                ) {
+                    eprintln!("corvette-media-bridge: expiry pass failed: {error}");
+                }
             }
         }
         index

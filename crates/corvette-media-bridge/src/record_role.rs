@@ -1,5 +1,6 @@
 //! Turns the camera TOML's recording intent into a running recorder.
 
+use crate::expiry::{self, ExpiryError};
 use crate::index::{self, Index, IndexError, PIECE_CHANNEL_CAPACITY, PieceRow, SeqAllocator};
 use crate::record_config::RecordConfig;
 use crate::recorder::{PieceRecorder, RecorderSettings};
@@ -24,6 +25,7 @@ pub enum RecordSetupError {
     CreateRoot { source: std::io::Error },
     Index { source: IndexError },
     Scan { source: RecoveryError },
+    Expiry { source: ExpiryError },
 }
 
 impl std::fmt::Display for RecordSetupError {
@@ -46,6 +48,7 @@ impl std::fmt::Display for RecordSetupError {
                 }
                 RecoveryError::Index { .. } => write!(f, "recording recovery scan failed"),
             },
+            Self::Expiry { .. } => write!(f, "recording startup expiry pass failed"),
         }
     }
 }
@@ -57,6 +60,7 @@ impl std::error::Error for RecordSetupError {
             Self::CreateRoot { source } => Some(source),
             Self::Index { source } => Some(source),
             Self::Scan { source } => Some(source),
+            Self::Expiry { source } => Some(source),
         }
     }
 }
@@ -165,8 +169,39 @@ pub fn prepare(record: &RecordConfig) -> Result<Option<RecordingRuntime>, Record
         report.skipped_dirs,
         report.rows_refused
     );
+    let retention_days: HashMap<String, u32> = record
+        .cameras
+        .iter()
+        .filter(|camera| camera.records())
+        .map(|camera| (camera.name.clone(), camera.retention_days))
+        .collect();
+    let enforce = record.storage.retention_enforce;
+    let expiry_report = expiry::run_pass(
+        &root,
+        &mut index,
+        PieceRecorder::wall_clock_ms(),
+        &retention_days,
+        enforce,
+    )
+    .map_err(|source| RecordSetupError::Expiry { source })?;
+    eprintln!(
+        "corvette-media-bridge: expiry startup pass would-delete={} deleted={} refused-cameras={} step-failures={}",
+        expiry_report.would_delete,
+        expiry_report.deleted,
+        expiry_report.refused_cameras,
+        expiry_report.step_failures.iter().sum::<usize>()
+    );
     let seqs = index.allocator();
-    let (rows, writer) = index::spawn_writer(index, PIECE_CHANNEL_CAPACITY);
+    let (rows, writer) = index::spawn_writer_with_expiry(
+        index,
+        PIECE_CHANNEL_CAPACITY,
+        index::ExpiryWiring {
+            root: root.clone(),
+            retention_days,
+            enforce,
+            clock: Box::new(PieceRecorder::wall_clock_ms),
+        },
+    );
     Ok(Some(RecordingRuntime {
         seqs,
         rows,
