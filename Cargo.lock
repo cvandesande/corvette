@@ -541,6 +541,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "corvette-s3"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "httparse",
+ "percent-encoding",
+]
+
+[[package]]
 name = "corvette-track"
 version = "0.1.0"
 dependencies = [

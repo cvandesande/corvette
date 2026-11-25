@@ -12,6 +12,7 @@ members = [
     "crates/corvette-motion",
     "crates/corvette-ncnn",
     "crates/corvette-rtsp-client",
+    "crates/corvette-s3",
     "crates/corvette-track",
     "crates/corvette-ui",
     "crates/corvette-ui-server",

@@ -1,0 +1,16 @@
+[package]
+name = "corvette-s3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SigV4 request signing and request/response codecs for putting objects to an s3-compatible store (issue #7)"
+
+[dependencies]
+# Minimal feature set: the ring-* default features would add `untrusted` to Cargo.lock.
+aws-lc-rs = { version = "1.18.0", default-features = false, features = ["aws-lc-sys"] }
+httparse = "1.10.1"
+percent-encoding = "2.3.2"
+
+[lints]
+workspace = true
