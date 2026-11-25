@@ -252,16 +252,6 @@ just because it arrived early.
 
 ## RTSP camera frames carry Annex-B video, not a container format
 
-A container was on the table for the RTP-to-MoQ path: `moq_mux::container::
-ts::Import` already demuxes the same MPEG-TS byte stream go2rtc's HTTP
-endpoint used to serve, so routing this crate's output through MPEG-TS first
-would have reused an existing demuxer. That demuxer turned out to be a thin
-wrapper over `moq_mux::codec::h264`/`h265`/`aac`'s own `Split`/`Import`
-functions — the same codec-level entry points a caller can reach directly
-once RTP is depacketized. Re-packaging depacketized RTP into MPEG-TS only to
-immediately demux it back out would cost a container write and a container
-parse on every frame for no benefit.
-
 `crates/corvette-rtsp-client`'s RTP depacketizer (`src/depacketize`)
 reassembles H.264/H.265 into Annex-B: every emitted NAL unit is prefixed with
 the start code `00 00 00 01`, with parameter sets carried in-band from the
@@ -272,8 +262,7 @@ NAL-unit-oriented, so nothing about the source data has to change shape. The
 crate's AAC depacketizer (`src/depacketize`'s `aac` module) extracts each
 access unit at the length its RTP payload's own AU-header declares and emits
 it unmodified, with no ADTS header added, since RTP's AAC payload format
-(RFC 3640, `mpeg4-generic`) already matches the raw shape `moq_mux::codec::
-aac::Import` expects.
+(RFC 3640, `mpeg4-generic`) already is that raw access-unit shape.
 
 Today the crate publishes video only. Its SDP resolution
 (`session::sdp::resolve_video_track`) locates only the SDP's `m=video`
@@ -284,8 +273,8 @@ payloads. A camera's audio, if it has any, is not read today.
 
 Corvette's contract: every frame `crates/corvette-rtsp-client` publishes is
 either Annex-B-framed H.264/H.265 or a raw, non-ADTS AAC access unit — never
-MPEG-TS, fMP4, or any other container — so a downstream consumer calls
-`moq_mux::codec::*::Import` directly with no demuxing step in between. The
+MPEG-TS, fMP4, or any other container — so a downstream consumer can consume
+each frame directly, with no demuxing step in between. The
 contract governs the shape of any frame this crate publishes; it does not by
 itself mean audio is currently published, since no audio track is resolved
 yet.
@@ -308,27 +297,6 @@ one packet, then keeps reading — as long as the underlying connection
 (`PlayingSession::next_packet`) keeps delivering data, an isolated malformed
 fragment is not treated as a reason to tear down the session and force a full
 DESCRIBE/SETUP/PLAY reconnect.
-
-## Dialing the MoQ relay by hostname needs address racing, not the first DNS answer
-
-`crates/corvette-media-bridge`'s own MoQ-publish role (issue #12 G1, D-5) dials the relay
-directly against `web_transport_quinn::Client::connect`, not through `moq-native` (kept out per
-D-5's "small in-repo binary" framing — `moq-native` wraps multiple QUIC backends and a
-Happy-Eyeballs dialer this crate doesn't need). Reading `web-transport-quinn` 0.11.12's own
-`Client::connect` (`src/client.rs`) directly: for a domain host it calls `tokio::net::lookup_host`
-once and dials only the *first* resolved address — no IPv4/IPv6 racing, unlike `moq-native`'s own
-dial (`rs/moq-native/src/quinn.rs`, which races every candidate address it resolves). Dialing
-`https://localhost:<port>/...` against a relay bound only to `127.0.0.1` timed out outright in
-this item's own integration test until this was diagnosed: the test's own resolver returned an
-IPv6 `::1` candidate first, and nothing was listening there.
-
-Corvette's contract: `corvette-media-bridge` dials the relay by a literal IP address (from
-`MoqConfig::relay_url`), never a hostname requiring DNS resolution, so this single-candidate
-behavior can't pick the wrong address family. A future item (K1) that dials a relay by a real
-DNS name (rather than a literal cluster-internal IP) needs to either race candidates itself or
-confirm the deployed resolver's answer order matches the relay's actual bound address family —
-this crate's own direct `web-transport-quinn` dependency does not do that automatically the way
-`moq-native`'s own dial would.
 
 ## The fMP4-over-WebSocket transport carries no per-viewer timestamp epoch
 
@@ -422,44 +390,42 @@ per-camera task uses. Each feed task runs under the bridge's supervisor until it
 camera's client is dropped -- which happens only during process shutdown, so the
 supervisor's restart loop spinning on a closed channel from then on is acceptable.
 
-## The end-to-end bridge test supplies its own relay, camera feeds and clients
+## The bridge's integration tests feed a synthetic camera alongside a real RTSP dial
 
-The `corvette-media-bridge` end-to-end test drives the restream feed and MoQ
-publish workers against a local relay and reads the result back over both the
-RTSP and MoQ paths, so each fixture choice below keeps one of those reads
-honest.
+The `corvette-media-bridge` integration tests (`tests/g2_integration.rs`,
+`tests/g3_integration.rs`) each drive one live packager from two cameras: a
+mock RTSP camera server (`corvette_rtsp_client::mock_camera`) dialed through
+a real `corvette-rtsp-client`, and a synthetic camera whose feed publishes
+onto the same broadcast-channel shape a real camera client's subscription
+exposes, so the packagers consume it exactly as they consume a dialed camera.
 
-Stopping a camera's supervised tasks only requests cancellation; the test
-pauses after the stop until the runtime has released the aborted tasks' state
--- including their client clones -- before reading on the still-open
-subscription to assert that the other camera's outputs continue.
+The mock camera fabricates RTP payloads with no real SPS/PPS: it was built
+for the depacketizer's NAL/FU-A framing, not for a decodable stream, so that
+camera's initialization segment never resolves. The leg earns its place for
+the real-RTSP path it exercises -- handshake, reconnect and task wiring --
+and for the graceful degradation of its frame-error handling: a keyframe
+without a matching SPS degrades without a panic. The synthetic camera
+supplies a real, valid H.264 SPS/PPS/IDR triple, so the served outputs
+resolve end to end.
 
-The RTSP client that reads the restream server back is hand-rolled against
-`rtsp-types` instead of reusing `corvette-rtsp-client`: the project's own
-camera client driving the project's own restream server would be a
-self-referential oracle. The mock-camera leg exists for the real-RTSP path it
-exercises -- handshake, reconnect and task wiring -- and for the graceful
-degradation of its frame-error handling: a keyframe without a matching SPS
-must degrade without a panic.
-
-The synthetic camera's feed publishes onto the same broadcast channel shape
-that a real camera client's subscription exposes, so the workers consume it
-exactly as they consume a dialed camera.
+Stopping a camera's supervised tasks only requests cancellation; the tests
+pause after the stop until the runtime has released the aborted tasks' state
+before asserting that the other camera's outputs continue.
 
 ## The HLS packager is tested over real HTTP and through a real external parser
 
 `tests/g3_integration.rs` fetches the packager's playlist and segments over real HTTP;
 `tests/g3_ffprobe.rs` hands the same bytes to `ffprobe`, a real, independently authored
 CMAF/HLS parser, so acceptance rests on a parser this repository does not author. The
-packager path needs no relay and no `MoQ` binary, so both tests run under `cargo test`.
+packager path needs no external binary, so both tests run under `cargo test`.
 
 Both tests issue raw `TcpStream` GET requests and read each response to its end: the
 workspace has no HTTP client crate, and the packager answers every response with
 `Connection: close`, so the end of input is the end of it.
 
-Both feed one synthetic camera through the broadcast-channel shape the bridge end-to-end
-test establishes ("The end-to-end bridge test supplies its own relay, camera feeds and
-clients"). The HTTP test pairs it with a mock RTSP camera dialed by a real client; the
+Both feed one synthetic camera through the broadcast-channel shape described in "The
+bridge's integration tests feed a synthetic camera alongside a real RTSP dial". The HTTP
+test pairs it with a mock RTSP camera dialed by a real client; the
 mock camera's frames carry no real parameter sets, so its initialization segment never
 resolves, yet its playlist is still served: a registered camera's playlist always exists,
 so before resolution it reads as a valid empty live document (200, no map line, no
@@ -495,54 +461,26 @@ one camera across all of them:
 
 - **RTSP-restream** (`restream_provider::MultiCameraProvider::register`): the stream name in
   `DESCRIBE`/`SETUP`'s request URI (`rtsp://<host>:8554/<name>`).
-- **MoQ** (`moq_publish::run_publish_once`): `origin.create_broadcast(name, ...)` publishes the
-  camera under a broadcast named `<name>`, relative to the relay connect URL's own root path
-  (e.g. `https://<relay>:<port>/anon/<name>`, confirmed in both `crates/corvette-media-bridge`'s
-  own integration test and `crates/corvette-ui/src/expanded_view.rs`'s `hang` Web Component
-  attributes: `url` is the relay connect URL, `name` is the bare camera name). Each broadcast
-  carries a `catalog.json` track (from `moq_mux::catalog::Producer`) and a `video` track
-  (`moq_broadcast.create_track("video", ...)`) — no `audio` track is created today (see the
-  audio-gap section below).
 - **fMP4-over-WebSocket** (`ws_repackager`): one WebSocket connection per viewer, at path
   `/<name>` on the repackager's own listener.
 - **HLS/LL-HLS** (`hls`): `GET /<name>/playlist.m3u8`, `GET /<name>/init.mp4`, `GET
   /<name>/segment-<sequence>.m4s` on the packager's own listener.
 
-None of these four listeners hard-codes its own bind address or port — each takes one as a
-constructor parameter, matching D-3's "configuration point" convention (below) — so the actual
-deployed ports are a provisioning concern (K1), not a fact fixed by this crate.
+None of these three listeners hard-codes its own bind address or port — each takes one as a
+constructor parameter — so the actual deployed ports are a provisioning concern, not a fact
+fixed by this crate.
 
 ## The media bridge's serve future never returns, and a listener panic reaches its caller
 
 `crates/corvette-media-bridge` hosts three whole-process listeners, and all three of their `serve` methods return `-> !` (`rtsp_restream::RtspServer`, `ws_repackager::Fmp4WsServer`, `hls::HlsServer`), so the listener future `start` hands its caller never returns on success. A listener panic reaches that caller as an unwinding panic: the RTSP listener is awaited directly, while the fMP4-WebSocket and HLS listeners' join arms `resume_unwind` whatever their spawned tasks return, since a `-> !` task can only ever end by panic; the other spawned listener task keeps running until that unwind ends the process.
 
-## The MoQ relay is exposed through a NodePort Service, one of three supported mechanisms
+## A Kubernetes Service resolves a named target port across the pod's containers
 
-Decision of record (D-3, `.agents/issue-12/DESIGN-live-view.md`, human-approved 2026-08-26),
-quoted verbatim:
-
-> All three exposure mechanisms (hostPort, NodePort, LoadBalancer) are supported as
-> implementation options; NodePort is chosen for this deployment (human judgment: "more secure
-> than hostPort"). The exposure mechanism is a configuration point, not hard-coded.
-
-K1's drafted manifest change (`.agents/issue-12/evidence/K1-manifest-draft.yaml`, reviewed, not
-yet applied to the live deployment) adds a dedicated `frigate-moq` Service, `type: NodePort`, one
-UDP port (`nodePort: 30443`, chosen inside the apiserver's default `30000-32767` range and
-colliding with no other port the manifest declares), targeting the new `moq-relay` container's own
-`moq` containerPort directly — not proxied through nginx, since nginx does not speak
-QUIC/WebTransport. The same container spec works unchanged under `hostPort` or `LoadBalancer`;
-only the container's own `ports` entry and whether/how a Service exists would differ (K1's own
-evidence spells out both alternatives in full).
-
-The same drafted change moves the `rtsp`-named `containerPort: 8554` off the `frigate` container
-onto the new `corvette-media-bridge` container, with no edit to the `frigate` Service's own `rtsp`
-port entry: a Kubernetes Service's named `targetPort` resolves against the pod's aggregate named
-container ports across every container it has, not only the container the name was originally
-declared on (`k8s.io/endpointslice`'s own `FindPort`, read directly and cited in K1's evidence).
-
-Corvette's contract: whichever exposure mechanism a deployment picks, the relay's own connect URL
-(the `url` attribute `hang`'s Web Component receives) is the one piece of configuration a client
-needs to change — nothing about the naming convention above depends on which mechanism exposes it.
+A Kubernetes Service's named `targetPort` resolves against the pod's aggregate named container
+ports across every container in the pod, not only the container the name was originally
+declared on (Kubernetes' own `k8s.io/endpointslice` `FindPort`, read directly). This is what
+lets the `rtsp`-named `containerPort: 8554` be served by the `corvette-media-bridge` container
+while the `frigate` Service's own `rtsp` port entry keeps its name unchanged.
 
 ## `/live/hls/` and `/live/mse/ws/` are the two Rust-native live-view routes; five go2rtc routes are retired
 
@@ -1302,19 +1240,10 @@ records the root cause: `corvette-rtsp-client`'s SDP resolution locates only a c
 section, so no audio `Frame` is ever produced. That gap propagates through every consumer built on
 top of it, each confirmed directly rather than assumed:
 
-- `crates/corvette-media-bridge`'s MoQ-publish role (`moq_publish::new_track`) is written
-  generically over `corvette_rtsp_client::depacketize::Codec`, but its `Codec::Aac` arm can only
-  return `FrameError::AacUnavailable` — `aac::Import::new` needs a resolved sample rate, channel
-  count, and `AudioSpecificConfig` this crate has no source for without the upstream fix. No AAC
-  frame has ever been exercised end to end, including in this crate's own integration test.
-- The expanded view's UI (`crates/corvette-ui/src/expanded_view.rs`) is written to degrade to
-  video-only cleanly when a broadcast announces no audio track, by design, rather than assuming
-  one is always present — but has nothing to degrade from today, since no broadcast ever announces
-  one.
 - The media bridge's fMP4-over-WebSocket repackager (G2) and the HLS/LL-HLS packager (G3) both
   inherit the same video-only scope from the same upstream cause.
 
-Corvette's contract: every live-view transport this document describes — RTSP-restream, MoQ, the
+Corvette's contract: every live-view transport this document describes — RTSP-restream, the
 fMP4/WebSocket transport, and HLS/LL-HLS — carries a configured camera's video unconditionally, and
 its audio only once `corvette-rtsp-client` resolves an SDP audio section, a separate, unscoped
 future item. No component in this list needs to change shape when that fix lands: each already

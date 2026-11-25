@@ -52,9 +52,9 @@ implementation crates, each pulling in its own SDK (`libedgetpu`, HailoRT) on it
 
 ## Containers and the merged image
 
-One image, `docker/Dockerfile.corvette`, carries the five runtime binaries: `corvette-api-server`,
-`corvette-media-bridge`, `corvette-detect-service`, `corvette-detect-worker`, and `moq-relay` (built
-from `moq-dev/moq` at a pinned revision). The image sets no entrypoint and an empty default command;
+One image, `docker/Dockerfile.corvette`, carries the four runtime binaries: `corvette-api-server`,
+`corvette-media-bridge`, `corvette-detect-service` and `corvette-detect-worker`. The image sets no
+entrypoint and an empty default command;
 each container selects its process through the runtime's own `command:` field, so one digest covers
 every container and one rollback value reverts them together. `corvette-detect-tools` ships only
 through its own scratch export stage, `tools`; the UI bundle stays the separate static overlay of
@@ -66,8 +66,7 @@ The pod runs the containers as three concerns:
   listens on a Unix socket only nginx can reach. The API server is the single
   public door: it also relays the detection service's per-camera objects, status
   and detection-config routes under the same prefix.
-- **Media** — `moq-relay`, the MoQ relay browsers subscribe through, and `corvette-media-bridge`,
-  which dials each camera and serves frames to every consumer.
+- **Media** — `corvette-media-bridge`, which dials each camera and serves frames to every consumer.
 - **Detection** — `corvette-detect-service`, supervising `corvette-detect-worker` as its
   child process and one `ffmpeg` decode child per camera.
 
@@ -85,8 +84,7 @@ flowchart LR
     subgraph serving["Serving container"]
         api["corvette-api-server"]
     end
-    subgraph media["Media containers"]
-        relay["moq-relay"]
+    subgraph media["Media container"]
         bridge["corvette-media-bridge"]
     end
     subgraph detection["Detection container"]
@@ -94,11 +92,9 @@ flowchart LR
         dworker["corvette-detect-worker"]
     end
     cams -->|"one RTSP dial per camera"| bridge
-    bridge -->|"publish each camera's frames"| relay
-    browser -->|"WebTransport subscribe"| relay
     browser -->|"/corvette/api/v1/"| nginx
     nginx --> api
-    nginx -->|"HLS and fMP4 live fallback"| bridge
+    nginx -->|"HLS and fMP4 live"| bridge
     bridge -->|"RTSP restream per camera"| dsvc
     dsvc <-->|"crops and rows"| dworker
     api -->|"relayed detection routes, config apply included"| dsvc
@@ -121,11 +117,10 @@ flowchart LR
     subgraph servingc["Serving container"]
         apiserver["corvette-api-server"]
     end
-    subgraph mediac["Media containers"]
+    subgraph mediac["Media container"]
         bridge["corvette-media-bridge"]
         rtspc["corvette-rtsp-client"]
         restream["rtsp-restream"]
-        relay["moq-relay<br/>(built from moq-dev/moq at a pinned revision)"]
     end
     apiserver --> apilib
     ui --> apilib
@@ -167,7 +162,7 @@ flowchart LR
 | corvette-detect-service | Detection container's main process: arguments, startup order, status-socket serve loop | corvette-detect-service | detection | shipped |
 | corvette-detect-tools | Input generators and output comparers for inference parity runs | corvette-detect-tools | none, own scratch image stage | built, not shipped |
 | corvette-detect-worker | The inference process holding the GPU: engine, fatal-exit path, socket serve loop | corvette-detect-worker | detection (service's supervised child) | shipped |
-| corvette-media-bridge | Dials each camera once and fans its frames to RTSP restream, MoQ publish, fMP4/WebSocket and HLS | corvette-media-bridge | media | shipped |
+| corvette-media-bridge | Dials each camera once and fans its frames to RTSP restream, fMP4/WebSocket and HLS | corvette-media-bridge | media | shipped |
 | corvette-motion | Pure image primitives for the motion detector | — | detection (inside corvette-detect) | shipped |
 | corvette-ncnn | Safe layer over ncnn's C API: handle guards, device choice, inference as values | — | detection (inside worker) | shipped |
 | corvette-rtsp-client | RTSP client for physical cameras: digest auth, keep-alives, RTP depacketize to Annex-B access units | — | media (inside corvette-media-bridge) | shipped |
@@ -224,41 +219,35 @@ camera never stops another role for that camera or any role for another camera:
 
 - an RTSP-restream feed, so Frigate's own `detect`/`record` ffmpeg (and any other RTSP
   client) can play that camera back by name;
-- a direct MoQ-publish loop, dialing the relay and publishing the camera's frames as a
-  broadcast named after the camera, with no container format anywhere in the path;
 - an fMP4-over-WebSocket repackager behind nginx's `/live/mse/ws/<camera>` location, one
   WebSocket connection per viewer;
-- an HLS/LL-HLS packager behind nginx's `/live/hls/` location, the expanded view's
-  fallback when the MoQ relay is unreachable or times out, or when the viewer's
-  browser has no video decoder for the MoQ player.
+- an HLS packager behind nginx's `/live/hls/` location, the live path of the expanded
+  view, which plays the playlist with `hls.js`.
 
 ```mermaid
 sequenceDiagram
     participant cam as Camera
     participant bridge as corvette-media-bridge
-    participant relay as moq-relay
+    participant nginx as nginx
     participant browser as Browser
     bridge->>cam: DESCRIBE, SETUP, PLAY (corvette-rtsp-client)
-    bridge->>relay: publish the camera's video track
-    browser->>relay: WebTransport subscribe (hang player)
-    relay-->>browser: H.264/H.265 frames, no container
-    browser->>bridge: HLS request through nginx (fallback)
-    bridge-->>browser: LL-HLS segments
+    browser->>nginx: HLS request or /live/mse/ws/ WebSocket upgrade
+    nginx->>bridge: proxy to the matching packager
+    bridge-->>browser: CMAF playlist, init and media segments
 ```
 
 Kubernetes pods share one network namespace, so Frigate's own `detect`/`record` ffmpeg dials
 `rtsp://127.0.0.1:8554/<camera>[_sub]` and is answered by the sibling container's restream;
-Frigate's `ffmpeg.inputs` needs no edit, since only which container answers the port changed. The
-MoQ relay's external listener is reached directly through a dedicated NodePort UDP Service; nginx
-has no QUIC/WebTransport support. See [API and media contracts](api-contracts.md) for the restream
-contract, the bridge's broadcast/track naming, the NodePort choice, and the replaced live-view
-routes; `.agents/issue-12/DESIGN-live-view.md` and `.agents/issue-12/PLAN-live-view.md` hold the decisions and plan.
+Frigate's `ffmpeg.inputs` needs no edit, since only which container answers the port changed. See
+[API and media contracts](api-contracts.md) for the restream contract, the camera naming shared
+across the live-view transports, and the live routes;
+`.agents/issue-12/DESIGN-live-view.md` and `.agents/issue-12/PLAN-live-view.md` hold the decisions and plan.
 
 The dashboard grid shows each camera's latest still picture, refreshed in place, fetched from the
 current backing by Corvette's `/corvette/api/v1/cameras/<name>/still.jpg` route. Browser-native
-`MediaSource` performs decode and render for the expanded view's HLS fallback, into which `hls.js`
-appends segments. The relay's `hang` Web Component and the HLS/LL-HLS packager carry a configured
-camera's H.264/H.265 video track today. Audio follows the same paths once `corvette-rtsp-client`
+`MediaSource` performs decode and render for the expanded view, into which `hls.js` appends the
+bridge's HLS segments. The bridge's HLS packager carries a configured camera's H.264/H.265 video
+track today. Audio follows the same paths once `corvette-rtsp-client`
 resolves a camera's SDP audio section — see API contracts for the current state of that gap.
 
 Recent-events detection boxes are a separate, simpler mechanism: no video decode is involved at all.
