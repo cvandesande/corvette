@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Wires corvette-rtsp-client to rtsp-restream and to a direct MoQ-publish loop, one process, one task per camera per role (issue #12 G1)"
+description = "Per-camera restream, fmp4, HLS and record roles, one process"
 
 [[bin]]
 name = "corvette-media-bridge"
@@ -13,23 +13,16 @@ path = "src/main.rs"
 [dependencies]
 corvette-rtsp-client = { path = "../corvette-rtsp-client" }
 rtsp-restream = { path = "../rtsp-restream" }
-# Pinned per issue #12 item R1; see the workspace Cargo.toml's own comment and
-# `.agents/issue-12/evidence/R1-dependency-pin.md` for why this exact commit.
-moq-net = { workspace = true }
-moq-mux = { workspace = true }
-hang = { workspace = true }
 tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "sync", "time", "io-util", "macros", "signal"] }
 bytes = "1.12.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-url = { version = "2.5.2", features = ["serde"] }
-web-transport-quinn = "0.11.12"
 # Only the "handshake" feature (server-side accept) is enabled;
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink", "async-await"] }
 httparse = "1.10.1"
 toml_edit = "0.25.13"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 libc = "0.2.189"
 
 [dev-dependencies]

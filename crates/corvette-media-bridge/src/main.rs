@@ -1,8 +1,3 @@
-// See corvette_media_bridge::lib's own doc comment for why: every split is
-// internal to the git-pinned moq-dev/moq dependency tree, not this crate's
-// own choice.
-#![allow(clippy::multiple_crate_versions)]
-
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let config = match corvette_media_bridge::config::load_from_env() {

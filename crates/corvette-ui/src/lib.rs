@@ -1,6 +1,5 @@
 //! Browser entry point and the client-side routes it mounts.
 
-#![allow(clippy::multiple_crate_versions)]
 // `redundant_pub_crate` and `unreachable_pub` demand opposite visibility here:
 // shared items need `pub(crate)`, and `#[component]` emits `pub` shims.
 #![allow(clippy::redundant_pub_crate)]

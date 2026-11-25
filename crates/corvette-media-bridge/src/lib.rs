@@ -1,13 +1,9 @@
-// Duplicate dependency versions all resolve inside the git-pinned third-party moq-dev/moq tree; nothing in this crate can resolve them.
-#![allow(clippy::multiple_crate_versions)]
-
 pub mod config;
 pub mod disk_free;
 pub mod expiry;
 pub mod fmp4;
 pub mod hls;
 pub mod index;
-pub mod moq_publish;
 pub mod parameter_sets;
 pub mod piece_walk;
 pub mod pressure;
@@ -33,7 +29,6 @@ use ws_repackager::MultiCameraFmp4Store;
 pub struct RunningCamera {
     pub client: Arc<Client>,
     pub restream_feed: Supervised,
-    pub moq_publish: Supervised,
     pub fmp4_repackage: Supervised,
     pub hls_segment: Supervised,
     pub record: Option<Supervised>,
@@ -85,15 +80,6 @@ pub async fn start_with_recording(
             })
         };
 
-        let moq_publish = {
-            let name = camera.name.clone();
-            let client = Arc::clone(&client);
-            let moq_config = config.moq.clone();
-            supervise::spawn_supervised_with(format!("{name}/moq-publish"), move || {
-                moq_publish::run_publish_loop(name.clone(), moq_config.clone(), client.subscribe())
-            })
-        };
-
         let fmp4_repackage = {
             let name = camera.name.clone();
             let client = Arc::clone(&client);
@@ -128,7 +114,6 @@ pub async fn start_with_recording(
         running.push(RunningCamera {
             client,
             restream_feed,
-            moq_publish,
             fmp4_repackage,
             hls_segment,
             record,
