@@ -437,3 +437,262 @@ fn two_cameras_sharing_an_allocator_never_repeat_a_pair() {
     assert_eq!(seqs.next("beta").expect("beta allocates on"), 2);
     cleanup(&root);
 }
+
+#[test]
+fn a_forward_timestamp_jump_closes_at_the_previous_frame_and_the_next_keyframe_starts_a_fresh_piece()
+ {
+    let (root, mut recorder, rows) = rig("jumpfwd", "cam-jumpfwd", 4, 8);
+    recorder.push(&frame(SPS, 0));
+    recorder.push(&frame(PPS, 0));
+    recorder.push(&frame(IDR, 0));
+    recorder.push(&frame(NON_IDR, 3_000));
+    recorder.push(&frame(NON_IDR, 6_000));
+    // +10 s beyond the expected 3000-tick step: closes the piece at 6000.
+    recorder.push(&frame(NON_IDR, 909_000));
+    recorder.push(&frame(NON_IDR, 912_000));
+    recorder.push(&frame(IDR, 915_000));
+    recorder.push(&frame(NON_IDR, 918_000));
+    recorder.finish();
+
+    let rows = drain(&rows);
+    assert_eq!(rows.len(), 2, "the jump closed the first piece");
+    let first = std::fs::read(root.join(&rows[0].path)).expect("first piece on disk");
+    assert_eq!(
+        rows[0].end_ms - rows[0].start_ms,
+        100,
+        "ends at the frame before the jump"
+    );
+    assert_eq!(first_sample_flags(&first), 0x0200_0000);
+    let first_facts = piece_walk::walk(&first).expect("first piece parses");
+    assert_eq!(first_facts.duration_ms, rows[0].end_ms - rows[0].start_ms);
+    assert_eq!(first_tfdt(&first), 0);
+
+    let second = std::fs::read(root.join(&rows[1].path)).expect("second piece on disk");
+    assert_eq!(
+        rows[1].end_ms - rows[1].start_ms,
+        66,
+        "the next piece holds only frames from its keyframe on"
+    );
+    assert_eq!(
+        first_sample_flags(&second),
+        0x0200_0000,
+        "the next piece starts at the keyframe"
+    );
+    let second_facts = piece_walk::walk(&second).expect("second piece parses");
+    assert_eq!(second_facts.duration_ms, rows[1].end_ms - rows[1].start_ms);
+    assert_eq!(first_tfdt(&second), 0);
+    assert!(part_files(&root).is_empty());
+    cleanup(&root);
+}
+
+#[test]
+fn a_backward_timestamp_jump_closes_at_the_previous_frame_like_a_forward_one() {
+    let (root, mut recorder, rows) = rig("jumpback", "cam-jumpback", 4, 8);
+    recorder.push(&frame(SPS, 0));
+    recorder.push(&frame(PPS, 0));
+    recorder.push(&frame(IDR, 600_000));
+    recorder.push(&frame(NON_IDR, 603_000));
+    recorder.push(&frame(NON_IDR, 606_000));
+    let jumped = 606_000u32.wrapping_sub(903_000);
+    recorder.push(&frame(NON_IDR, jumped));
+    recorder.push(&frame(NON_IDR, jumped.wrapping_add(3_000)));
+    recorder.push(&frame(IDR, 700_000));
+    recorder.push(&frame(NON_IDR, 703_000));
+    recorder.finish();
+
+    let rows = drain(&rows);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0].end_ms - rows[0].start_ms,
+        100,
+        "ends at the frame before the jump"
+    );
+    assert_eq!(
+        rows[1].end_ms - rows[1].start_ms,
+        66,
+        "starts at the later keyframe"
+    );
+    for row in &rows {
+        let bytes = std::fs::read(root.join(&row.path)).expect("piece on disk");
+        let facts = piece_walk::walk(&bytes).expect("piece parses");
+        assert_eq!(facts.duration_ms, row.end_ms - row.start_ms);
+        assert_eq!(first_tfdt(&bytes), 0);
+    }
+    assert!(part_files(&root).is_empty());
+    cleanup(&root);
+}
+
+#[test]
+fn timestamps_across_the_u32_wrap_record_one_continuous_piece() {
+    let (root, mut recorder, rows) = rig("wrap", "cam-wrap", 4, 8);
+    let start = u32::MAX - 200;
+    recorder.push(&frame(SPS, start));
+    recorder.push(&frame(PPS, start));
+    let mut timestamp = start;
+    for index in 0..60 {
+        let nal = if index % 15 == 0 { IDR } else { NON_IDR };
+        recorder.push(&frame(nal, timestamp));
+        timestamp = timestamp.wrapping_add(3_000);
+    }
+    recorder.finish();
+
+    let rows = drain(&rows);
+    assert_eq!(rows.len(), 1, "the wrap closed nothing");
+    assert_eq!(rows[0].end_ms - rows[0].start_ms, 2_000);
+    let bytes = std::fs::read(root.join(&rows[0].path)).expect("piece on disk");
+    let facts = piece_walk::walk(&bytes).expect("piece parses");
+    assert_eq!(facts.duration_ms, rows[0].end_ms - rows[0].start_ms);
+    assert_eq!(first_tfdt(&bytes), 0);
+    cleanup(&root);
+}
+
+#[test]
+fn a_step_of_exactly_the_two_second_threshold_keeps_the_piece_and_one_tick_over_closes_it() {
+    let (root, mut recorder, rows) = rig("threshold", "cam-threshold", 4, 8);
+    recorder.push(&frame(SPS, 0));
+    recorder.push(&frame(PPS, 0));
+    recorder.push(&frame(IDR, 0));
+    recorder.push(&frame(NON_IDR, 3_000));
+    recorder.push(&frame(NON_IDR, 6_000));
+    recorder.push(&frame(NON_IDR, 189_000));
+    recorder.push(&frame(NON_IDR, 192_000));
+    recorder.finish();
+    let rows = drain(&rows);
+    assert_eq!(
+        rows.len(),
+        1,
+        "a step of exactly the threshold keeps the piece open"
+    );
+    assert_eq!(rows[0].end_ms - rows[0].start_ms, 2_166);
+    cleanup(&root);
+
+    let (over_root, mut over, over_rows) = rig("over", "cam-over", 4, 8);
+    over.push(&frame(SPS, 0));
+    over.push(&frame(PPS, 0));
+    over.push(&frame(IDR, 0));
+    over.push(&frame(NON_IDR, 3_000));
+    over.push(&frame(NON_IDR, 6_000));
+    over.push(&frame(NON_IDR, 189_001));
+    over.push(&frame(NON_IDR, 192_001));
+    over.finish();
+    let over_rows = drain(&over_rows);
+    assert_eq!(
+        over_rows.len(),
+        1,
+        "one tick over closed at the previous frame"
+    );
+    assert_eq!(over_rows[0].end_ms - over_rows[0].start_ms, 100);
+    cleanup(&over_root);
+}
+
+#[test]
+fn a_backward_step_of_one_tick_closes_at_the_previous_frame_like_a_forward_one() {
+    let (root, mut recorder, rows) = rig("backtick", "cam-back-tick", 4, 8);
+    recorder.push(&frame(SPS, 0));
+    recorder.push(&frame(PPS, 0));
+    recorder.push(&frame(IDR, 600_000));
+    recorder.push(&frame(NON_IDR, 603_000));
+    recorder.push(&frame(NON_IDR, 606_000));
+    // one tick back: any negative step closes, however small.
+    recorder.push(&frame(NON_IDR, 605_999));
+    recorder.push(&frame(NON_IDR, 608_999));
+    recorder.push(&frame(IDR, 609_000));
+    recorder.push(&frame(NON_IDR, 612_000));
+    recorder.finish();
+
+    let rows = drain(&rows);
+    assert_eq!(rows.len(), 2, "the backward step closed the first piece");
+    assert_eq!(
+        rows[0].end_ms - rows[0].start_ms,
+        100,
+        "ends at the frame before the step"
+    );
+    assert_eq!(rows[1].end_ms - rows[1].start_ms, 66);
+    for (index, row) in rows.iter().enumerate() {
+        let bytes = std::fs::read(root.join(&row.path)).expect("piece on disk");
+        let facts = piece_walk::walk(&bytes).expect("piece parses");
+        assert_eq!(facts.duration_ms, row.end_ms - row.start_ms);
+        assert!(facts.duration_ms < 60_000, "no wrapped sample duration");
+        assert_eq!(first_tfdt(&bytes), 0);
+        if index > 0 {
+            assert_eq!(first_sample_flags(&bytes), 0x0200_0000);
+        }
+    }
+    assert!(part_files(&root).is_empty());
+    cleanup(&root);
+}
+
+#[test]
+fn a_backward_step_of_one_second_closes_at_the_previous_frame_like_a_forward_one() {
+    let (root, mut recorder, rows) = rig("backsecond", "cam-back-second", 4, 8);
+    recorder.push(&frame(SPS, 0));
+    recorder.push(&frame(PPS, 0));
+    recorder.push(&frame(IDR, 600_000));
+    recorder.push(&frame(NON_IDR, 603_000));
+    recorder.push(&frame(NON_IDR, 606_000));
+    // one second back: far under the forward threshold, yet still a close.
+    recorder.push(&frame(NON_IDR, 606_000 - 90_000));
+    recorder.push(&frame(NON_IDR, 609_000 - 90_000));
+    recorder.push(&frame(IDR, 609_000));
+    recorder.push(&frame(NON_IDR, 612_000));
+    recorder.finish();
+
+    let rows = drain(&rows);
+    assert_eq!(rows.len(), 2, "the backward step closed the first piece");
+    assert_eq!(
+        rows[0].end_ms - rows[0].start_ms,
+        100,
+        "ends at the frame before the step"
+    );
+    assert_eq!(rows[1].end_ms - rows[1].start_ms, 66);
+    for (index, row) in rows.iter().enumerate() {
+        let bytes = std::fs::read(root.join(&row.path)).expect("piece on disk");
+        let facts = piece_walk::walk(&bytes).expect("piece parses");
+        assert_eq!(facts.duration_ms, row.end_ms - row.start_ms);
+        assert!(facts.duration_ms < 60_000, "no wrapped sample duration");
+        assert_eq!(first_tfdt(&bytes), 0);
+        if index > 0 {
+            assert_eq!(first_sample_flags(&bytes), 0x0200_0000);
+        }
+    }
+    assert!(part_files(&root).is_empty());
+    cleanup(&root);
+}
+
+#[test]
+fn a_backward_step_of_ten_seconds_closes_at_the_previous_frame_like_a_forward_one() {
+    let (root, mut recorder, rows) = rig("backten", "cam-back-ten", 4, 8);
+    recorder.push(&frame(SPS, 0));
+    recorder.push(&frame(PPS, 0));
+    recorder.push(&frame(IDR, 600_000));
+    recorder.push(&frame(NON_IDR, 603_000));
+    recorder.push(&frame(NON_IDR, 606_000));
+    // ten seconds back, wrapping the u32 clock: closes like any negative step.
+    let jumped = 606_000u32.wrapping_sub(900_000);
+    recorder.push(&frame(NON_IDR, jumped));
+    recorder.push(&frame(NON_IDR, jumped.wrapping_add(3_000)));
+    recorder.push(&frame(IDR, 609_000));
+    recorder.push(&frame(NON_IDR, 612_000));
+    recorder.finish();
+
+    let rows = drain(&rows);
+    assert_eq!(rows.len(), 2, "the backward step closed the first piece");
+    assert_eq!(
+        rows[0].end_ms - rows[0].start_ms,
+        100,
+        "ends at the frame before the step"
+    );
+    assert_eq!(rows[1].end_ms - rows[1].start_ms, 66);
+    for (index, row) in rows.iter().enumerate() {
+        let bytes = std::fs::read(root.join(&row.path)).expect("piece on disk");
+        let facts = piece_walk::walk(&bytes).expect("piece parses");
+        assert_eq!(facts.duration_ms, row.end_ms - row.start_ms);
+        assert!(facts.duration_ms < 60_000, "no wrapped sample duration");
+        assert_eq!(first_tfdt(&bytes), 0);
+        if index > 0 {
+            assert_eq!(first_sample_flags(&bytes), 0x0200_0000);
+        }
+    }
+    assert!(part_files(&root).is_empty());
+    cleanup(&root);
+}

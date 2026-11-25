@@ -12,7 +12,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::SyncSender;
 use std::thread::JoinHandle;
+use std::time::Duration;
 use tokio::sync::broadcast;
+
+/// Silence that closes the open piece short in `run_record`. RTSP reconnects are invisible to subscribers, so frame arrival is the only liveness signal here.
+pub const WATCHDOG_SILENCE: Duration = Duration::from_secs(3);
 
 #[derive(Debug)]
 pub enum RecordSetupError {
@@ -127,7 +131,7 @@ pub async fn record_task(
     let Some(recorder) = runtime.recorder_for(&name) else {
         return;
     };
-    run_record(name, frames, recorder).await;
+    run_record(name, frames, recorder, WATCHDOG_SILENCE).await;
 }
 
 /// # Errors
@@ -177,16 +181,30 @@ pub async fn run_record(
     name: String,
     mut frames: broadcast::Receiver<ClientFrame>,
     mut recorder: PieceRecorder,
+    silence: Duration,
 ) {
+    let mut silent = false;
     loop {
-        match frames.recv().await {
-            Ok(frame) => tokio::task::block_in_place(|| recorder.push(&frame)),
-            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+        match tokio::time::timeout(silence, frames.recv()).await {
+            Ok(Ok(frame)) => {
+                silent = false;
+                tokio::task::block_in_place(|| recorder.push(&frame));
+            }
+            Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
+                silent = false;
+                tokio::task::block_in_place(|| recorder.close_short());
                 log_event(&name, "record-lagged", format_args!("skipped={skipped}"));
             }
-            Err(broadcast::error::RecvError::Closed) => {
+            Ok(Err(broadcast::error::RecvError::Closed)) => {
                 tokio::task::block_in_place(|| recorder.finish());
                 return;
+            }
+            Err(_elapsed) => {
+                if !silent {
+                    silent = true;
+                    tokio::task::block_in_place(|| recorder.close_short());
+                    log_event(&name, "record-watchdog", "");
+                }
             }
         }
     }

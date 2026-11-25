@@ -28,7 +28,11 @@ struct OpenPiece {
     ticks: u64,
     bytes_written: usize,
     codec: &'static str,
+    prev_ts: u32,
+    last_step: i64,
 }
+
+const DISCONTINUOUS_TICKS: i64 = 2 * VIDEO_CLOCK_RATE_HZ as i64;
 
 /// Writes one camera's pieces from frames handed to it by its owner; `clock` is read at each piece start, and dropping without `finish` leaves the open piece's `.part` file for the startup sweep.
 pub struct PieceRecorder {
@@ -91,6 +95,19 @@ impl PieceRecorder {
             self.open = Some(piece);
             return;
         };
+        let step = i64::from(frame.timestamp.wrapping_sub(piece.prev_ts).cast_signed());
+        if step < 0 || step > piece.last_step + DISCONTINUOUS_TICKS {
+            self.close_piece(piece);
+            log_event(
+                &self.settings.camera,
+                "record-discontinuity",
+                format_args!("step_ticks={step}"),
+            );
+            self.maybe_start(frame);
+            return;
+        }
+        piece.prev_ts = frame.timestamp;
+        piece.last_step = step.abs();
         if fragment.is_keyframe && piece.ticks >= cut_ticks {
             self.close_piece(piece);
             self.maybe_start(frame);
@@ -109,6 +126,11 @@ impl PieceRecorder {
 
     /// Closes the open piece the way a cut does; does nothing when none is open.
     pub fn finish(&mut self) {
+        self.close_short();
+    }
+
+    /// Ends the open piece early with a normal cut's full close sequence; the piece's in-progress fragmenter is discarded with it, so only complete fragments reach disk and the next piece waits for a keyframe. Does nothing when none is open.
+    pub fn close_short(&mut self) {
         if let Some(piece) = self.open.take() {
             self.close_piece(piece);
         }
@@ -162,6 +184,8 @@ impl PieceRecorder {
             ticks: u64::from(fragment.duration_ticks),
             bytes_written: init.len() + fragment.bytes.len(),
             codec,
+            prev_ts: frame.timestamp,
+            last_step: 0,
         });
     }
 

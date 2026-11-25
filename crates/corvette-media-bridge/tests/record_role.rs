@@ -3,6 +3,7 @@
 //! feed into pieces whose index rows match the files on disk.
 
 use corvette_media_bridge::index::Index;
+use corvette_media_bridge::piece_walk;
 use corvette_media_bridge::record_config::{self, CameraRecord, RecordConfig, Storage, Streams};
 use corvette_media_bridge::record_role;
 use corvette_media_bridge::recorder::PieceRecorder;
@@ -212,7 +213,13 @@ async fn a_whole_frame_feed_lands_as_pieces_the_index_and_disk_agree_on() {
     let (sender, receiver) = broadcast::channel::<ClientFrame>(600);
     feed_video(&sender, 450, 150);
     drop(sender);
-    record_role::run_record("cam-d".to_string(), receiver, recorder).await;
+    record_role::run_record(
+        "cam-d".to_string(),
+        receiver,
+        recorder,
+        Duration::from_hours(1),
+    )
+    .await;
 
     drop(join_writer(runtime));
     let index = Index::open(&root.join("index.sqlite"), &[("cam-d".to_owned(), 4)])
@@ -261,6 +268,7 @@ async fn a_lagged_receiver_survives_and_later_frames_still_produce_a_piece() {
         "cam-e".to_string(),
         receiver,
         recorder,
+        Duration::from_hours(1),
     ));
 
     // The later frames go in one at a time, each followed by a pause long
@@ -479,6 +487,182 @@ async fn each_record_task_run_builds_a_fresh_recorder_above_the_abandoned_piece(
         "the abandoned part is untouched"
     );
     assert_eq!(visible_pieces(&root).len(), 2);
+    drop(index);
+    cleanup(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lagged_overflow_closes_the_open_piece_short_and_a_later_keyframe_starts_a_clean_piece() {
+    let root = fresh_root("lagclose");
+    let record = config(vec![camera_record("cam-l", true, 4)], Some(root.clone()));
+    let runtime = record_role::prepare(&record)
+        .expect("prepare succeeds")
+        .expect("a recording camera prepares");
+    let recorder = runtime.recorder_for("cam-l").expect("cam-l records");
+    let (sender, receiver) = broadcast::channel::<ClientFrame>(2);
+    let role = tokio::spawn(record_role::run_record(
+        "cam-l".to_string(),
+        receiver,
+        recorder,
+        Duration::from_hours(1),
+    ));
+
+    for (nal, timestamp) in [
+        (SPS, 0u32),
+        (PPS, 0),
+        (IDR, 0),
+        (NON_IDR, 3_000),
+        (NON_IDR, 6_000),
+    ] {
+        sender.send(frame(nal, timestamp)).expect("accepted");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    for _ in 0..400 {
+        if !part_files(&root).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        !part_files(&root).is_empty(),
+        "the piece opened before the overflow"
+    );
+
+    // more sends than the two-slot ring holds, back to back: the receiver's
+    // next read reports the skip.
+    for timestamp in [9_000u32, 12_000, 15_000, 18_000, 21_000] {
+        sender.send(frame(NON_IDR, timestamp)).expect("accepted");
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    for (nal, timestamp) in [
+        (SPS, 30_000u32),
+        (PPS, 30_000),
+        (IDR, 30_000),
+        (NON_IDR, 33_000),
+    ] {
+        sender.send(frame(nal, timestamp)).expect("accepted");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    drop(sender);
+    role.await.expect("the role finishes");
+
+    drop(join_writer(runtime));
+    let index = Index::open(&root.join("index.sqlite"), &[("cam-l".to_owned(), 4)])
+        .expect("the index reopens after the writer joins");
+    let rows = index.all_pieces().expect("rows read");
+    assert_eq!(rows.len(), 2, "the lag closed the open piece short");
+    for row in &rows {
+        let bytes = std::fs::read(root.join(&row.path)).expect("piece on disk");
+        piece_walk::walk(&bytes).expect("each piece walks with no stitched corruption");
+    }
+    assert!(part_files(&root).is_empty(), "nothing left in .part");
+    drop(index);
+    cleanup(&root);
+}
+
+const WATCHDOG_TEST_NAME: &str =
+    "a_silent_feed_closes_the_open_piece_once_and_recording_resumes_at_a_keyframe";
+const RECORD_WATCHDOG_CHILD_RUN: &str = "RECORD_WATCHDOG_CHILD_RUN";
+const RECORD_WATCHDOG_CHILD_TOKEN: &str = "watchdog-child";
+
+#[test]
+fn a_silent_feed_closes_the_open_piece_once_and_recording_resumes_at_a_keyframe() {
+    let child_run = std::env::var(RECORD_WATCHDOG_CHILD_RUN).unwrap_or_default();
+    if child_run != RECORD_WATCHDOG_CHILD_TOKEN {
+        let child = std::process::Command::new(std::env::current_exe().expect("test binary path"))
+            .arg("--exact")
+            .arg(WATCHDOG_TEST_NAME)
+            .arg("--nocapture")
+            .env_remove(RECORD_WATCHDOG_CHILD_RUN)
+            .env(RECORD_WATCHDOG_CHILD_RUN, RECORD_WATCHDOG_CHILD_TOKEN)
+            .output()
+            .expect("the child test runs");
+        let stderr = String::from_utf8_lossy(&child.stderr);
+        assert!(child.status.success(), "the child run failed:\n{stderr}");
+        let fires = stderr.matches("event=record-watchdog").count();
+        assert_eq!(fires, 1, "one watchdog event per silent stretch\n{stderr}");
+        return;
+    }
+
+    let root = fresh_root("watchdog");
+    let record = config(vec![camera_record("cam-w", true, 4)], Some(root.clone()));
+    let runtime = record_role::prepare(&record)
+        .expect("prepare succeeds")
+        .expect("a recording camera prepares");
+    let recorder = runtime.recorder_for("cam-w").expect("cam-w records");
+    let (sender, receiver) = broadcast::channel::<ClientFrame>(64);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime builds");
+    rt.block_on(async {
+        let role = tokio::spawn(record_role::run_record(
+            "cam-w".to_string(),
+            receiver,
+            recorder,
+            Duration::from_millis(100),
+        ));
+        for (nal, timestamp) in [
+            (SPS, 0u32),
+            (PPS, 0),
+            (IDR, 0),
+            (NON_IDR, 3_000),
+            (NON_IDR, 6_000),
+        ] {
+            sender.send(frame(nal, timestamp)).expect("accepted");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        for _ in 0..400 {
+            if !part_files(&root).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(!part_files(&root).is_empty(), "the piece opened");
+        // several silence windows with no frame at all
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(
+            part_files(&root).is_empty(),
+            "the watchdog closed the piece short"
+        );
+        for (nal, timestamp) in [(NON_IDR, 9_000u32), (IDR, 12_000), (NON_IDR, 15_000)] {
+            sender.send(frame(nal, timestamp)).expect("accepted");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        drop(sender);
+        role.await.expect("the role finishes");
+    });
+    drop(join_writer(runtime));
+    let index = Index::open(&root.join("index.sqlite"), &[("cam-w".to_owned(), 4)])
+        .expect("the index reopens after the writer joins");
+    let mut rows = index.all_pieces().expect("rows read");
+    rows.sort_by_key(|row| (row.start_ms, row.seq));
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows[1].seq > rows[0].seq,
+        "the next piece has a fresh sequence"
+    );
+    assert_eq!(
+        rows[0].end_ms - rows[0].start_ms,
+        100,
+        "the closed row carries its true duration"
+    );
+    assert!(
+        rows[1].start_ms > rows[0].end_ms,
+        "the silent stretch shows as a gap between the rows"
+    );
+    assert_eq!(
+        rows[1].end_ms - rows[1].start_ms,
+        66,
+        "the resumed piece starts only at the keyframe"
+    );
+    for row in &rows {
+        let bytes = std::fs::read(root.join(&row.path)).expect("piece on disk");
+        piece_walk::walk(&bytes).expect("piece parses");
+    }
+    assert!(part_files(&root).is_empty(), "nothing left in .part");
     drop(index);
     cleanup(&root);
 }
