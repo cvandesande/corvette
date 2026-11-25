@@ -728,6 +728,8 @@ fn a_row_path_naming_an_existing_directory_is_refused_and_every_file_below_it_su
         "recordings/victim",
         "recordings/victim/2026-01-01",
         "recordings/victim/2026-01-01/00",
+        "recordings/victim/2026-01-01/00/staydir",
+        "recordings/victim/2026-01-01/00/staydir/deep.mp4",
     ] {
         let root = fresh_root(&format!("refused-dir-{}", stored.replace('/', "-")));
         let mut index = open_index(&root);
@@ -743,6 +745,10 @@ fn a_row_path_naming_an_existing_directory_is_refused_and_every_file_below_it_su
             std::fs::write(&path, format!("victim bytes in {victim}"))
                 .expect("victim file written");
         }
+        let hostile = root.join(stored);
+        std::fs::create_dir_all(&hostile).expect("hostile directory created");
+        std::fs::write(hostile.join("below.bin"), format!("file below {stored}"))
+            .expect("file below hostile path written");
         seed_row_at(&mut index, 1, stored);
         assert!(
             root.join(stored).is_dir(),

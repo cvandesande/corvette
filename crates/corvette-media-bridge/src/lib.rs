@@ -9,6 +9,7 @@ pub mod index;
 pub mod moq_publish;
 pub mod parameter_sets;
 pub mod piece_walk;
+pub mod pressure;
 pub mod record_config;
 pub mod record_role;
 pub mod recorder;

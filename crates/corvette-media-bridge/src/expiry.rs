@@ -62,7 +62,7 @@ pub fn plan<S: BuildHasher>(
 }
 
 /// None means this camera never expires: absent from the map or an explicit zero.
-fn cutoff_ms(now_ms: i64, days: Option<u32>) -> Option<i64> {
+pub(crate) fn cutoff_ms(now_ms: i64, days: Option<u32>) -> Option<i64> {
     let days = days.filter(|days| *days != 0)?;
     let window_ms = i64::from(days).checked_mul(DAY_MS)?;
     Some(now_ms.saturating_sub(window_ms))
@@ -171,7 +171,15 @@ fn run_pass_at<S: BuildHasher>(
             continue;
         }
         for row in &camera.to_delete {
-            match expire_piece(root, index, row, now_ms, &mut report, crash_after) {
+            match delete_piece_staged(
+                root,
+                index,
+                row,
+                now_ms,
+                EXPIRY_WORDS,
+                &mut report,
+                crash_after,
+            ) {
                 StepOutcome::Crashed => return Ok(report),
                 StepOutcome::Done | StepOutcome::Failed => {}
             }
@@ -180,30 +188,42 @@ fn run_pass_at<S: BuildHasher>(
     Ok(report)
 }
 
-enum StepOutcome {
+pub(crate) enum StepOutcome {
     Done,
     Failed,
     Crashed,
 }
 
-fn expire_piece(
+#[derive(Clone, Copy)]
+pub(crate) struct StageWords {
+    pub(crate) reason: &'static str,
+    pub(crate) step_event: &'static str,
+}
+
+const EXPIRY_WORDS: StageWords = StageWords {
+    reason: "expired",
+    step_event: "expiry-step-failed",
+};
+
+pub(crate) fn delete_piece_staged(
     root: &Path,
     index: &mut Index,
     row: &PieceRow,
     now_ms: i64,
+    words: StageWords,
     report: &mut PassReport,
     crash_after: u8,
 ) -> StepOutcome {
     let staged = match stage_piece(root, row) {
         Stage::Moved(path) => Some(path),
         Stage::AlreadyGone => None,
-        Stage::Failed => return note_step_failure(report, row, 1),
+        Stage::Failed => return note_step_failure(report, row, 1, words.step_event),
     };
     if crash_after == 1 {
         return StepOutcome::Crashed;
     }
     if index.remove(&row.camera, row.seq).is_err() {
-        return note_step_failure(report, row, 2);
+        return note_step_failure(report, row, 2, words.step_event);
     }
     if crash_after == 2 {
         return StepOutcome::Crashed;
@@ -211,18 +231,23 @@ fn expire_piece(
     if let Some(trashed) = &staged
         && fs::remove_file(trashed).is_err()
     {
-        return note_step_failure(report, row, 3);
+        return note_step_failure(report, row, 3, words.step_event);
     }
-    if append_deletion_log(root, row, now_ms).is_err() {
-        return note_step_failure(report, row, 4);
+    if append_deletion_log(root, row, now_ms, words.reason).is_err() {
+        return note_step_failure(report, row, 4, words.step_event);
     }
     report.deleted += 1;
     StepOutcome::Done
 }
 
-fn note_step_failure(report: &mut PassReport, row: &PieceRow, step: usize) -> StepOutcome {
+fn note_step_failure(
+    report: &mut PassReport,
+    row: &PieceRow,
+    step: usize,
+    step_event: &str,
+) -> StepOutcome {
     report.step_failures[step - 1] += 1;
-    log_event(&row.camera, "expiry-step-failed", format!("step={step}"));
+    log_event(&row.camera, step_event, format!("step={step}"));
     StepOutcome::Failed
 }
 
@@ -271,14 +296,19 @@ fn visible_piece_path(root: &Path, stored: &str) -> Option<PathBuf> {
     Some(root.join(stored))
 }
 
-fn append_deletion_log(root: &Path, row: &PieceRow, now_ms: i64) -> std::io::Result<()> {
+fn append_deletion_log(
+    root: &Path,
+    row: &PieceRow,
+    now_ms: i64,
+    reason: &str,
+) -> std::io::Result<()> {
     let mut log = OpenOptions::new()
         .create(true)
         .append(true)
         .open(root.join("deletions.log.jsonl"))?;
     let line = format!(
         "{{\"camera\":\"{camera}\",\"seq\":{seq},\"path\":\"{path}\",\"start_ms\":{start},\
-         \"end_ms\":{end},\"age_days\":{age},\"reason\":\"expired\",\"size_bytes\":{size},\
+         \"end_ms\":{end},\"age_days\":{age},\"reason\":\"{reason}\",\"size_bytes\":{size},\
          \"mode\":\"enforce\"}}\n",
         camera = json_escape(&row.camera),
         seq = row.seq,
@@ -315,7 +345,7 @@ fn json_escape(value: &str) -> String {
     escaped
 }
 
-const fn age_days(now_ms: i64, end_ms: i64) -> i64 {
+pub(crate) const fn age_days(now_ms: i64, end_ms: i64) -> i64 {
     now_ms.saturating_sub(end_ms).div_euclid(DAY_MS)
 }
 
