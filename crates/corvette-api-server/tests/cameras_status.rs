@@ -3,6 +3,7 @@
 use corvette_api::ErrorBody;
 use corvette_api_server::config::ConfigSource;
 use corvette_api_server::{ApiServer, CONNECTION_TIMEOUT};
+use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,6 +18,26 @@ use tokio::task::JoinHandle;
 const CACHE_TTL: Duration = Duration::from_mins(5);
 
 const STATUS_PATH: &str = "/corvette/api/v1/cameras/status";
+
+/// Env var that makes the streak child test run its work instead of resting.
+const STREAK_CHILD_ENV: &str = "CORVETTE_STATUS_STREAK_CHILD";
+
+/// Tables as crates/corvette-media-bridge/src/index.rs:14-29 creates them.
+const INDEX_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS pieces (
+    camera TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    start_ts INTEGER NOT NULL,
+    end_ts INTEGER NOT NULL,
+    duration_s REAL NOT NULL,
+    path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    codec TEXT NOT NULL,
+    upload_state TEXT NOT NULL DEFAULT 'local',
+    PRIMARY KEY (camera, seq)
+);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+";
 
 struct TestEnv {
     socket: PathBuf,
@@ -77,7 +98,8 @@ impl TestEnv {
             .with_clock({
                 let clock = Arc::clone(&clock);
                 move || Duration::from_secs(clock.load(Ordering::Relaxed)).as_secs_f64()
-            });
+            })
+            .with_index_path(&dir.join("index.sqlite"));
         let socket = server.socket_path().to_path_buf();
         let handle = tokio::spawn(server.serve_until(std::future::pending::<()>()));
         Self {
@@ -116,6 +138,40 @@ impl TestEnv {
 
     fn set_clock(&self, seconds: u64) {
         self.clock.store(seconds, Ordering::Relaxed);
+    }
+
+    /// Writes piece-length meta and pieces of `(camera, start_ms, end_ms)` into the server's index.
+    fn seed_index(&self, piece_seconds: &[(&str, i64)], pieces: &[(&str, i64, i64)]) {
+        let index = Connection::open(self.dir.join("index.sqlite")).expect("create index");
+        index
+            .execute_batch(INDEX_SCHEMA)
+            .expect("create index schema");
+        for (camera, seconds) in piece_seconds {
+            index
+                .execute(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+                    params![format!("piece_seconds:{camera}"), seconds.to_string()],
+                )
+                .expect("insert piece length");
+        }
+        for (n, (camera, start, end)) in pieces.iter().enumerate() {
+            let seq = i64::try_from(n).expect("piece count fits i64") + 1;
+            index
+                .execute(
+                    "INSERT INTO pieces \
+                     (camera, seq, start_ts, end_ts, duration_s, path, size_bytes, codec) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 'h264')",
+                    params![
+                        camera,
+                        seq,
+                        start,
+                        end,
+                        1.0,
+                        format!("/{camera}/{start}.mp4")
+                    ],
+                )
+                .expect("insert piece");
+        }
     }
 
     fn stats_request_lines(&self) -> Vec<String> {
@@ -464,16 +520,16 @@ async fn status_lists_only_the_role_cameras_with_their_state() {
     assert_eq!(
         answer["cameras"],
         json!([
-            {"name": "back", "state": "no_picture", "since": 1000.0},
-            {"name": "back yard", "state": "no_picture", "since": 1000.0},
-            {"name": "front", "state": "live", "since": 1000.0},
-            {"name": "living", "state": "off_by_choice", "since": 1000.0}
+            {"name": "back", "state": "no_picture", "since": 1000.0, "recording": false},
+            {"name": "back yard", "state": "no_picture", "since": 1000.0, "recording": false},
+            {"name": "front", "state": "live", "since": 1000.0, "recording": false},
+            {"name": "living", "state": "off_by_choice", "since": 1000.0, "recording": false}
         ])
     );
 
     assert_eq!(
         status(&env, "frontonly").await,
-        json!({"cameras": [{"name": "front", "state": "live", "since": 1000.0}]})
+        json!({"cameras": [{"name": "front", "state": "live", "since": 1000.0, "recording": false}]})
     );
     assert_eq!(status(&env, "ghost").await, json!({"cameras": []}));
 
@@ -542,7 +598,7 @@ async fn status_keeps_since_while_a_state_holds_and_moves_it_when_the_state_chan
     let answer = status(&env, "admin").await;
     assert_eq!(
         *entry(&answer, "front"),
-        json!({"name": "front", "state": "no_picture", "since": 1060.0})
+        json!({"name": "front", "state": "no_picture", "since": 1060.0, "recording": false})
     );
     assert_eq!(entry(&answer, "back")["since"], 1000.0);
     assert_eq!(entry(&answer, "living")["since"], 1000.0);
@@ -552,7 +608,7 @@ async fn status_keeps_since_while_a_state_holds_and_moves_it_when_the_state_chan
     let answer = status(&env, "admin").await;
     assert_eq!(
         *entry(&answer, "front"),
-        json!({"name": "front", "state": "live", "since": 1090.0})
+        json!({"name": "front", "state": "live", "since": 1090.0, "recording": false})
     );
     env.finish();
 }
@@ -682,7 +738,7 @@ async fn status_reports_stale_when_a_live_cameras_stills_have_failed_for_over_a_
     let answer = status(&env, "admin").await;
     assert_eq!(
         *entry(&answer, "front"),
-        json!({"name": "front", "state": "live", "since": 1000.0})
+        json!({"name": "front", "state": "live", "since": 1000.0, "recording": false})
     );
 
     env.set_clock(1030);
@@ -701,11 +757,11 @@ async fn status_reports_stale_when_a_live_cameras_stills_have_failed_for_over_a_
     let answer = status(&env, "admin").await;
     assert_eq!(
         *entry(&answer, "front"),
-        json!({"name": "front", "state": "stale", "since": 1070.0})
+        json!({"name": "front", "state": "stale", "since": 1070.0, "recording": false})
     );
     assert_eq!(
         *entry(&answer, "back"),
-        json!({"name": "back", "state": "no_picture", "since": 1000.0})
+        json!({"name": "back", "state": "no_picture", "since": 1000.0, "recording": false})
     );
     env.finish();
 }
@@ -727,7 +783,7 @@ async fn status_returns_a_stale_camera_to_live_when_a_still_is_delivered() {
     let answer = status(&env, "admin").await;
     assert_eq!(
         *entry(&answer, "front"),
-        json!({"name": "front", "state": "live", "since": 1080.0})
+        json!({"name": "front", "state": "live", "since": 1080.0, "recording": false})
     );
     env.finish();
 }
@@ -829,5 +885,101 @@ async fn status_never_reports_stale_for_a_camera_that_is_off_or_has_no_picture_a
     assert_eq!(entry(&answer, "back")["state"], "live");
     assert_eq!(entry(&answer, "living")["state"], "off_by_choice");
     assert_eq!(entry(&answer, "back yard")["state"], "no_picture");
+    env.finish();
+}
+
+#[tokio::test]
+async fn status_marks_recording_only_for_a_camera_whose_last_piece_ended_recently() {
+    let env = TestEnv::start("recording-fresh-and-old").await;
+    // The clock reads 1000 s; front's piece ends 990 s, within 3 * 10 s,
+    // and back's ended at 900 s, beyond it.
+    env.seed_index(
+        &[("front", 10), ("back", 10)],
+        &[("front", 900_000, 990_000), ("back", 800_000, 900_000)],
+    );
+
+    let answer = status(&env, "admin").await;
+    assert_eq!(entry(&answer, "front")["recording"], json!(true));
+    assert_eq!(entry(&answer, "back")["recording"], json!(false));
+    assert_eq!(entry(&answer, "living")["recording"], json!(false));
+    env.finish();
+}
+
+#[tokio::test]
+async fn status_answers_recording_false_for_every_camera_without_an_index() {
+    let env = TestEnv::start("recording-no-index").await;
+
+    let answer = status(&env, "admin").await;
+    for camera in answer["cameras"].as_array().expect("cameras array") {
+        assert_eq!(camera["recording"], json!(false));
+    }
+    env.finish();
+}
+
+#[tokio::test]
+async fn an_index_adds_the_recording_field_and_changes_nothing_else_in_the_answer() {
+    let env = TestEnv::start("recording-field-identity").await;
+    let without = exchange(&env.socket, &status_request()).await;
+    env.seed_index(&[("front", 10)], &[("front", 900_000, 990_000)]);
+    let with = exchange(&env.socket, &status_request()).await;
+
+    let strip = |raw: &[u8]| -> String {
+        let (_status, _headers, body) = http_parts(raw);
+        let mut answer: Value = serde_json::from_slice(&body).expect("status answer is JSON");
+        for camera in answer["cameras"].as_array_mut().expect("cameras array") {
+            camera
+                .as_object_mut()
+                .expect("camera object")
+                .remove("recording");
+        }
+        answer.to_string()
+    };
+    assert_eq!(
+        strip(&without),
+        strip(&with),
+        "only the recording field differs"
+    );
+    let with: Value = serde_json::from_slice(&http_parts(&with).2).expect("status answer is JSON");
+    assert_eq!(entry(&with, "front")["recording"], json!(true));
+    env.finish();
+}
+
+#[tokio::test]
+async fn the_recording_index_logs_one_failure_line_per_run_and_one_on_recovery() {
+    for (mode, unreadable, readable) in [("fail", 1_usize, 0_usize), ("recover", 1, 1)] {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", "recording_index_streak_child", "--nocapture"])
+            .env(STREAK_CHILD_ENV, mode)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .expect("run the streak child");
+        assert!(output.status.success(), "mode {mode}:\n{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            stderr.matches("event=recording-index-unreadable").count(),
+            unreadable,
+            "mode {mode}: {stderr}"
+        );
+        assert_eq!(
+            stderr.matches("event=recording-index-readable").count(),
+            readable,
+            "mode {mode}: {stderr}"
+        );
+    }
+}
+
+/// Child of the streak test: two status requests; in `recover` the index appears between them.
+#[tokio::test]
+async fn recording_index_streak_child() {
+    let Ok(mode) = std::env::var(STREAK_CHILD_ENV) else {
+        return;
+    };
+    let env = TestEnv::start("streak-child").await;
+    let _ = status(&env, "admin").await;
+    if mode == "recover" {
+        env.seed_index(&[], &[]);
+    }
+    let _ = status(&env, "admin").await;
     env.finish();
 }

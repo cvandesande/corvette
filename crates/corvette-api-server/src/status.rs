@@ -5,6 +5,7 @@ use corvette_api::CameraEntry;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // The whole stats answer measured on the current backing is 13653 bytes.
 const STATS_LIMIT: usize = 4 * 1024 * 1024;
@@ -42,6 +43,9 @@ struct StillFailure {
 pub(crate) struct StatusState {
     observed: Mutex<HashMap<String, (CameraState, f64)>>,
     still_failures: Mutex<HashMap<String, StillFailure>>,
+    /// True while a run of recording-index read failures is open; the two
+    /// `note_index` methods below report the run's start and end to the caller.
+    recording_index_unreadable: AtomicBool,
 }
 
 impl StatusState {
@@ -82,6 +86,17 @@ impl StatusState {
                 );
             }
         }
+    }
+
+    pub(crate) fn note_index_failure(&self) -> bool {
+        !self
+            .recording_index_unreadable
+            .swap(true, Ordering::Relaxed)
+    }
+
+    pub(crate) fn note_index_success(&self) -> bool {
+        self.recording_index_unreadable
+            .swap(false, Ordering::Relaxed)
     }
 
     /// True while a run of failures began over a minute ago and a failure is recent.
@@ -132,15 +147,18 @@ fn parse_stats(body: &[u8]) -> Result<HashMap<String, f64>, String> {
     Ok(fps_by_name)
 }
 
+/// The status body: `recording[i]` is the flag of `entries[i]`; a missing flag reads as not recording.
 pub(crate) fn status_body(
     entries: &[CameraEntry],
     fps: &HashMap<String, f64>,
     status_state: &StatusState,
+    recording: &[bool],
     now: f64,
 ) -> Vec<u8> {
     let cameras: Vec<Value> = entries
         .iter()
-        .map(|entry| {
+        .enumerate()
+        .map(|(index, entry)| {
             let mut state = classify(entry, fps);
             if state == CameraState::Live && status_state.still_failing(&entry.name, now) {
                 state = CameraState::Stale;
@@ -149,6 +167,7 @@ pub(crate) fn status_body(
                 "name": entry.name,
                 "state": state.as_str(),
                 "since": status_state.observe(&entry.name, state, now),
+                "recording": recording.get(index).copied().unwrap_or(false),
             })
         })
         .collect();
@@ -334,14 +353,44 @@ mod tests {
             status_state.still_failed(camera, 1000.0);
             status_state.still_failed(camera, 1070.0);
         }
-        let answer: Value =
-            serde_json::from_slice(&status_body(&entries, &fps, &status_state, 1070.0))
-                .expect("status body is JSON");
+        let answer: Value = serde_json::from_slice(&status_body(
+            &entries,
+            &fps,
+            &status_state,
+            &[true, false, false],
+            1070.0,
+        ))
+        .expect("status body is JSON");
         assert_eq!(
             answer["cameras"][0],
-            json!({"name": "front", "state": "stale", "since": 1070.0})
+            json!({"name": "front", "state": "stale", "since": 1070.0, "recording": true})
         );
         assert_eq!(answer["cameras"][1]["state"], "no_picture");
+        assert_eq!(answer["cameras"][1]["recording"], false);
         assert_eq!(answer["cameras"][2]["state"], "off_by_choice");
+        assert_eq!(answer["cameras"][2]["recording"], false);
+    }
+
+    #[test]
+    fn the_recording_flag_reads_a_missing_entry_as_not_recording() {
+        let status_state = StatusState::default();
+        let entries = [camera_entry("front", true), camera_entry("back", true)];
+        let fps = HashMap::new();
+        let answer: Value =
+            serde_json::from_slice(&status_body(&entries, &fps, &status_state, &[true], 1000.0))
+                .expect("status body is JSON");
+        assert_eq!(answer["cameras"][0]["recording"], true);
+        assert_eq!(answer["cameras"][1]["recording"], false);
+    }
+
+    #[test]
+    fn one_failure_line_opens_the_index_run_and_one_success_line_closes_it() {
+        let state = StatusState::default();
+        assert!(state.note_index_failure());
+        assert!(!state.note_index_failure());
+        assert!(!state.note_index_failure());
+        assert!(state.note_index_success());
+        assert!(!state.note_index_success());
+        assert!(state.note_index_failure());
     }
 }

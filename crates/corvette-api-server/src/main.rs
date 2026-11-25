@@ -7,6 +7,7 @@ use corvette_api_server::config::{
 };
 use corvette_api_server::database::{DB_PATH_ENV, DEFAULT_DB_PATH};
 use corvette_api_server::detection::DETECTION_SOCKET_ENV;
+use corvette_api_server::recordings::{DEFAULT_INDEX_PATH, INDEX_PATH_ENV};
 use corvette_api_server::{ApiServer, CONNECTION_TIMEOUT, SOCKET_PATH_ENV, shutdown_signal};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,6 +23,8 @@ async fn main() -> std::process::ExitCode {
     let config_addr =
         std::env::var(CONFIG_ADDR_ENV).unwrap_or_else(|_| DEFAULT_CONFIG_ADDR.to_owned());
     let db_path = std::env::var(DB_PATH_ENV).unwrap_or_else(|_| DEFAULT_DB_PATH.to_owned());
+    let index_path =
+        std::env::var(INDEX_PATH_ENV).unwrap_or_else(|_| DEFAULT_INDEX_PATH.to_owned());
     let media_root =
         std::env::var(MEDIA_ROOT_ENV).unwrap_or_else(|_| DEFAULT_MEDIA_ROOT.to_owned());
     let config = Arc::new(ConfigSource::new(config_addr, DEFAULT_CACHE_TTL));
@@ -32,7 +35,9 @@ async fn main() -> std::process::ExitCode {
         Path::new(&db_path),
     ) {
         Ok(server) => {
-            let server = server.with_media_root(Path::new(&media_root));
+            let server = server
+                .with_media_root(Path::new(&media_root))
+                .with_index_path(Path::new(&index_path));
             match std::env::var(DETECTION_SOCKET_ENV) {
                 Ok(path) => server.with_detection_socket(PathBuf::from(path)),
                 Err(_env_not_set) => server,

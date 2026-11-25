@@ -755,6 +755,12 @@ where `code` is a stable machine value to branch on and `message` describes the 
   has no usable Frigate configuration.
 - `database_unavailable` (`503`): the activity or range-link route could not read Frigate's
   database. The underlying error is logged, not returned.
+- `recording_unavailable` (`503`): the recordings route could not read Corvette's recording
+  index, because the file is absent, unreadable or corrupt. No answer or log line carries
+  the underlying error or names the index path. A read-only mount of the index cannot be
+  served between recorder runs, after the recorder closes it cleanly, until the recorder
+  reopens it; that case answers this code. The status route answers the same failure
+  inside its `recording` field instead.
 - `no_picture` (`404`): the still route found a camera the caller may see that is switched
   off.
 - `picture_unavailable` (`503`): the still route could not get a usable picture from the
@@ -981,6 +987,54 @@ as Frigate does not detect it.
 The route accepts `GET` only, with the identity rules "Corvette's own API lives under
 `/corvette/api/v1/`" states for every route.
 
+## Recorded coverage answers as merged ranges
+
+A timeline and a player need to know where footage exists before addressing it.
+This route answers one camera's recorded coverage of a requested range as merged
+continuous ranges, read from Corvette's recording index (`index.sqlite`, the
+media bridge's file, opened strictly read-only through `CORVETTE_API_INDEX_PATH`,
+default `/media/corvette/index.sqlite`).
+
+`GET /corvette/api/v1/recordings?camera=&start=&end=` answers
+`{"ranges":[{"camera","start","end"}, ...]}`:
+
+- `camera` is required and names one camera.
+- `start` and `end` are required Unix seconds, decimal fractions allowed, finite
+  and not negative, with `start < end` and a range of at most 31 days (2678400 s),
+  the bounds of the activity route's `after` and `before`.
+- Names and values are percent-decoded (`+` stays `+`). A missing required
+  parameter, an unknown, repeated or value-less parameter, an empty segment (`&&`
+  or a trailing `&`), a malformed escape or one that decodes to invalid UTF-8, or
+  a value outside these rules answers `400` `bad_request` with a message naming
+  the reason.
+
+The query is checked before the configuration is fetched, so a malformed request
+answers `400` even while the configuration is unavailable.
+
+A stored piece belongs to the range when it overlaps it: it starts before `end`
+and ends after `start`, the half-open rule of "Ranges use half-open overlap". The
+answer carries Unix seconds with millisecond precision, because the index stores
+milliseconds, and every returned range is clipped to the requested bounds.
+Ranges are ordered by `start`. Pieces that touch at their ends or overlap merge
+into one range — adjacent pieces are continuous coverage — and a gap of any
+positive length separates ranges. Each entry names the requested camera; an
+empty array answers when the camera is allowed and no piece overlaps the range.
+
+A camera that does not exist or a camera the caller's role may not see answers
+`404` `not_found` exactly as the range-link route answers for such a camera, so
+the route reveals nothing about cameras the caller cannot see. The route answers
+`503` `config_unavailable` under the condition the cameras route states for it,
+and `503` `recording_unavailable` when the recording index is absent, unreadable
+or corrupt; no answer or log line carries the underlying error or names the
+index path. Request bounds are read on a one-millisecond grid, so a bound is
+rounded to the nearest millisecond before the half-open comparison.
+
+**Current backing**: recorded coverage today answers from the backing's
+recordings summary routes; this contract replaces them.
+
+The route accepts `GET` only, with the identity rules "Corvette's own API lives
+under `/corvette/api/v1/`" states for every route.
+
 ## The server serves a camera's current picture
 
 A client shows a camera's picture — a tile, a preview — without building a backing
@@ -1034,7 +1088,7 @@ the four states as one Corvette contract.
 `GET /corvette/api/v1/cameras/status` answers the state of the caller's cameras. The
 route takes no parameters and ignores the query string.
 
-The answer is `200` `{"cameras":[{"name","state","since"}, ...]}`: one entry per camera
+The answer is `200` `{"cameras":[{"name","state","since","recording"}, ...]}`: one entry per camera
 the caller's role may see, cameras that are switched off included, in the order the
 cameras route lists them; a role that sees no camera gets `{"cameras":[]}`. `state` is
 one of four values:
@@ -1053,6 +1107,14 @@ one of four values:
 in its current state. A camera turning `stale` or returning to `live` gets a new `since`.
 The service keeps these times in process memory, so a restart resets every `since` to
 the first observation after the restart.
+
+`recording` is `true` when Corvette's recording index holds a piece of that camera that
+ends within three piece lengths of the moment of the request, the piece length being the
+value the index records for the camera. It answers `false` for every camera when the index
+cannot be read, and the service logs one line when the index first becomes unreadable and
+one line when it becomes readable again; the rest of the answer stands either way. An
+intentionally switched-off recorder and a broken recorder both read `false`, since the
+field reads the index alone.
 
 No usable configuration copy answers `503` `config_unavailable` under the condition the
 cameras route states for it, and the server asks the backing for no stats in that case.

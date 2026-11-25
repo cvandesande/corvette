@@ -18,6 +18,7 @@ pub mod config;
 pub mod database;
 pub mod detection;
 pub mod detection_config;
+pub mod recordings;
 pub mod status;
 pub mod still;
 
@@ -102,6 +103,7 @@ struct ConnectionContext {
     detection: detection::Relay,
     config: Arc<ConfigSource>,
     db_path: PathBuf,
+    index_path: PathBuf,
     media_root: PathBuf,
     clock: Clock,
     status_state: Arc<StatusState>,
@@ -113,6 +115,7 @@ pub struct ApiServer {
     connection_timeout: Duration,
     config: Arc<ConfigSource>,
     db_path: PathBuf,
+    index_path: PathBuf,
     media_root: PathBuf,
     clock: Clock,
     status_state: Arc<StatusState>,
@@ -125,6 +128,7 @@ impl std::fmt::Debug for ApiServer {
             .field("socket_path", &self.socket_path)
             .field("connection_timeout", &self.connection_timeout)
             .field("db_path", &self.db_path)
+            .field("index_path", &self.index_path)
             .field("media_root", &self.media_root)
             .finish_non_exhaustive()
     }
@@ -157,6 +161,7 @@ impl ApiServer {
             connection_timeout,
             config,
             db_path: db_path.to_path_buf(),
+            index_path: PathBuf::from(recordings::DEFAULT_INDEX_PATH),
             media_root: PathBuf::from(activity::DEFAULT_MEDIA_ROOT),
             clock: Arc::new(system_clock),
             status_state: Arc::new(StatusState::default()),
@@ -167,6 +172,12 @@ impl ApiServer {
     #[must_use]
     pub fn with_media_root(mut self, media_root: &Path) -> Self {
         self.media_root = media_root.to_path_buf();
+        self
+    }
+
+    #[must_use]
+    pub fn with_index_path(mut self, index_path: &Path) -> Self {
+        self.index_path = index_path.to_path_buf();
         self
     }
 
@@ -200,6 +211,7 @@ impl ApiServer {
             connection_timeout,
             config,
             db_path,
+            index_path,
             media_root,
             clock,
             status_state,
@@ -210,6 +222,7 @@ impl ApiServer {
             detection,
             config,
             db_path,
+            index_path,
             media_root,
             clock,
             status_state,
@@ -548,16 +561,18 @@ pub enum Route {
     ClipLink,
     DetectionStatus,
     Health,
+    Recordings,
 }
 
 impl Route {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Activity,
         Self::CameraStatus,
         Self::Cameras,
         Self::ClipLink,
         Self::DetectionStatus,
         Self::Health,
+        Self::Recordings,
     ];
 
     #[must_use]
@@ -569,6 +584,7 @@ impl Route {
             Self::ClipLink => format!("{API_PREFIX}clip-link"),
             Self::DetectionStatus => format!("{API_PREFIX}detection/status"),
             Self::Health => format!("{API_PREFIX}health"),
+            Self::Recordings => format!("{API_PREFIX}recordings"),
         }
     }
 }
@@ -578,6 +594,7 @@ async fn route(request: &Request, context: &ConnectionContext) -> Response {
         detection,
         config,
         db_path,
+        index_path,
         media_root,
         clock,
         status_state,
@@ -608,12 +625,20 @@ async fn route(request: &Request, context: &ConnectionContext) -> Response {
     match route {
         Route::Activity => activity(request, config, db_path, media_root, clock).await,
         Route::CameraStatus => {
-            camera_status(config, status_state, &request.remote_role, clock).await
+            camera_status(
+                config,
+                status_state,
+                index_path,
+                &request.remote_role,
+                clock,
+            )
+            .await
         }
         Route::Cameras => cameras(config, &request.remote_role).await,
         Route::ClipLink => clip_link(request, config, db_path, clock).await,
         Route::DetectionStatus => detection::status(config, &request.remote_role, detection).await,
         Route::Health => health(config, db_path).await,
+        Route::Recordings => recordings(request, config, index_path).await,
     }
 }
 
@@ -627,6 +652,7 @@ async fn cameras(config: &ConfigSource, role: &str) -> Response {
 async fn camera_status(
     config: &ConfigSource,
     status_state: &StatusState,
+    index_path: &Path,
     role: &str,
     clock: &Clock,
 ) -> Response {
@@ -641,10 +667,58 @@ async fn camera_status(
             return status_unavailable();
         }
     };
+    let now = clock();
+    // rusqlite is synchronous: the recording-index read moves off the async worker.
+    let camera_names: Vec<String> = entries.iter().map(|entry| entry.name.clone()).collect();
+    let index_path = index_path.to_path_buf();
+    let read = tokio::task::spawn_blocking(move || {
+        recordings::recording_states(&index_path, &camera_names, now)
+    })
+    .await;
+    let recording = if let Ok(Ok(flags)) = read {
+        if status_state.note_index_success() {
+            log_event("status", "recording-index-readable", "");
+        }
+        flags
+    } else {
+        if status_state.note_index_failure() {
+            log_event("status", "recording-index-unreadable", "");
+        }
+        vec![false; entries.len()]
+    };
     Response::json(
         "200 OK",
-        status::status_body(&entries, &fps, status_state, clock()),
+        status::status_body(&entries, &fps, status_state, &recording, now),
     )
+}
+
+async fn recordings(request: &Request, config: &ConfigSource, index_path: &Path) -> Response {
+    let query = match recordings::RecordingsQuery::parse(&request.query) {
+        Ok(query) => query,
+        Err(reason) => return bad_request(&reason),
+    };
+    let allowed = match config.allowed_camera_names(&request.remote_role).await {
+        Ok(cameras) => cameras,
+        Err(err) => return config_unavailable(&err),
+    };
+    if !allowed.contains(&query.camera) {
+        return no_footage();
+    }
+    // rusqlite is synchronous: the index read moves off the async worker.
+    let index_path = index_path.to_path_buf();
+    let camera = query.camera.clone();
+    let start_ms = recordings::to_millis(query.start);
+    let end_ms = recordings::to_millis(query.end);
+    let read =
+        tokio::task::spawn_blocking(move || -> Result<Vec<(i64, i64)>, recordings::IndexError> {
+            let connection = database::open_read_only(&index_path)?;
+            recordings::overlapping_ranges(&connection, &camera, start_ms, end_ms)
+        })
+        .await;
+    match read {
+        Ok(Ok(ranges)) => Response::json("200 OK", recordings::ranges_body(&query.camera, &ranges)),
+        Ok(Err(_)) | Err(_) => recording_unavailable(),
+    }
 }
 
 async fn still_picture(
@@ -844,6 +918,14 @@ fn database_unavailable() -> Response {
         "503 Service Unavailable",
         "database_unavailable",
         "Frigate's database could not be read.",
+    )
+}
+
+fn recording_unavailable() -> Response {
+    error_response(
+        "503 Service Unavailable",
+        "recording_unavailable",
+        "The recording index could not be read.",
     )
 }
 
