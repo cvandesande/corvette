@@ -18,6 +18,7 @@ pub mod config;
 pub mod database;
 pub mod detection;
 pub mod detection_config;
+pub mod rebase;
 pub mod recordings;
 pub mod status;
 pub mod still;
