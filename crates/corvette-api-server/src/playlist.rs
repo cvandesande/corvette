@@ -37,6 +37,7 @@ pub(crate) enum MediaFile {
     Index,
     Init(u64),
     Segment(u64),
+    Download,
 }
 
 /// The raw parts of one playlist-route address; the values are validated by `handle`.
@@ -49,13 +50,13 @@ pub(crate) struct MediaPath<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PieceRead {
+pub(crate) enum PieceRead {
     Unreadable,
     Malformed,
 }
 
 #[derive(Debug)]
-enum PlanError {
+pub(crate) enum PlanError {
     IndexUnreadable,
     PieceUnreadable { seq: i64 },
     PieceMalformed { seq: i64 },
@@ -63,7 +64,7 @@ enum PlanError {
 }
 
 #[derive(Debug)]
-enum Answer {
+pub(crate) enum Answer {
     Playlist(Vec<u8>),
     Mp4(Vec<u8>),
     Mp4Partial {
@@ -98,17 +99,18 @@ struct PieceRow {
     size_bytes: i64,
 }
 
-struct PlannedPiece {
-    seq: i64,
-    start_ts: i64,
-    duration_s: f64,
-    size_bytes: i64,
-    path: PathBuf,
+pub(crate) struct PlannedPiece {
+    pub(crate) seq: i64,
+    pub(crate) start_ts: i64,
+    pub(crate) end_ts: i64,
+    pub(crate) duration_s: f64,
+    pub(crate) size_bytes: i64,
+    pub(crate) path: PathBuf,
 }
 
-struct Plan {
-    pieces: Vec<PlannedPiece>,
-    timeline: Timeline,
+pub(crate) struct Plan {
+    pub(crate) pieces: Vec<PlannedPiece>,
+    pub(crate) timeline: Timeline,
 }
 
 /// Splits a playlist-route address into its camera, bounds and file, or `None`
@@ -126,6 +128,7 @@ pub(crate) fn media_parts(path: &str) -> Option<MediaPath<'_>> {
     let file = match *file {
         "master.m3u8" => MediaFile::Master,
         "index.m3u8" => MediaFile::Index,
+        "download.mp4" => MediaFile::Download,
         name => match (
             name.strip_prefix("init-")
                 .and_then(|rest| rest.strip_suffix(".mp4")),
@@ -152,61 +155,76 @@ pub(crate) async fn handle(
     index_path: &Path,
     media: MediaPath<'_>,
 ) -> Response {
-    let camera = match percent_decode(media.camera) {
-        Ok(camera) => camera,
-        Err(reason) => return bad_request(&reason),
-    };
-    let start = match parse_timestamp("start", media.start) {
-        Ok(start) => start,
-        Err(reason) => return bad_request(&reason),
-    };
-    let end = match parse_timestamp("end", media.end) {
-        Ok(end) => end,
-        Err(reason) => return bad_request(&reason),
-    };
-    if to_millis(start) > to_millis(end) {
-        return no_footage();
+    if media.file == MediaFile::Download {
+        return crate::download::handle(request, config, index_path, media).await;
     }
-    if end - start > MAX_RANGE_SECONDS {
-        return no_footage();
-    }
-    let allowed = match config.allowed_camera_names(&request.remote_role).await {
-        Ok(cameras) => cameras,
-        Err(err) => return config_unavailable(&err),
+    let (camera, start, end) = match validated_bounds(request, config, &media).await {
+        Ok(bounds) => bounds,
+        Err(response) => return response,
     };
-    if !allowed.contains(&camera) {
-        return no_footage();
-    }
     let range = request.range.clone();
-    let camera_for_plan = camera.clone();
-    let file = media.file;
-    let index_path = index_path.to_path_buf();
-    let root = index_path
-        .parent()
-        .map_or_else(PathBuf::new, Path::to_path_buf);
-    // rusqlite and the piece reads are synchronous: the plan moves off the async worker.
-    let planned = tokio::task::spawn_blocking(move || {
-        let start_ms = to_millis(start);
-        let end_ms = to_millis(end);
-        let Ok(connection) = crate::database::open_read_only(&index_path) else {
-            return Answer::IndexUnreadable;
-        };
-        match plan_range(&connection, &root, &camera_for_plan, start_ms, end_ms) {
-            Err(PlanError::TooManyPieces) => Answer::NotFound,
-            Err(PlanError::IndexUnreadable) => Answer::IndexUnreadable,
-            Err(PlanError::PieceUnreadable { seq }) => Answer::PieceUnreadable { seq },
-            Err(PlanError::PieceMalformed { seq }) => Answer::PieceMalformed { seq },
-            Ok(plan) => serve(&plan, file, range.as_deref()),
-        }
-    })
-    .await;
-    let Ok(answer) = planned else {
-        return recording_unavailable();
+    let answer = match read_plan(index_path, &camera, to_millis(start), to_millis(end)).await {
+        Err(PlanError::TooManyPieces) => Answer::NotFound,
+        Err(PlanError::IndexUnreadable) => Answer::IndexUnreadable,
+        Err(PlanError::PieceUnreadable { seq }) => Answer::PieceUnreadable { seq },
+        Err(PlanError::PieceMalformed { seq }) => Answer::PieceMalformed { seq },
+        Ok(plan) => serve(&plan, media.file, range.as_deref()),
     };
     answer_response(answer, &camera)
 }
 
-fn answer_response(answer: Answer, camera: &str) -> Response {
+pub(crate) async fn validated_bounds(
+    request: &Request,
+    config: &ConfigSource,
+    media: &MediaPath<'_>,
+) -> Result<(String, f64, f64), Response> {
+    let camera = percent_decode(media.camera).map_err(|reason| bad_request(&reason))?;
+    let start = parse_timestamp("start", media.start).map_err(|reason| bad_request(&reason))?;
+    let end = parse_timestamp("end", media.end).map_err(|reason| bad_request(&reason))?;
+    if to_millis(start) > to_millis(end) {
+        return Err(no_footage());
+    }
+    if end - start > MAX_RANGE_SECONDS {
+        return Err(no_footage());
+    }
+    let allowed = config
+        .allowed_camera_names(&request.remote_role)
+        .await
+        .map_err(|err| config_unavailable(&err))?;
+    if !allowed.contains(&camera) {
+        return Err(no_footage());
+    }
+    Ok((camera, start, end))
+}
+
+pub(crate) async fn read_plan(
+    index_path: &Path,
+    camera: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Plan, PlanError> {
+    let index_path = index_path.to_path_buf();
+    let camera = camera.to_owned();
+    tokio::task::spawn_blocking(move || plan_blocking(&index_path, &camera, start_ms, end_ms))
+        .await
+        .map_err(|_| PlanError::IndexUnreadable)?
+}
+
+pub(crate) fn plan_blocking(
+    index_path: &Path,
+    camera: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Plan, PlanError> {
+    let root = index_path
+        .parent()
+        .map_or_else(PathBuf::new, Path::to_path_buf);
+    let connection =
+        crate::database::open_read_only(index_path).map_err(|_| PlanError::IndexUnreadable)?;
+    plan_range(&connection, &root, camera, start_ms, end_ms)
+}
+
+pub(crate) fn answer_response(answer: Answer, camera: &str) -> Response {
     match answer {
         Answer::Playlist(body) => Response {
             status: Cow::Borrowed("200 OK"),
@@ -214,6 +232,7 @@ fn answer_response(answer: Answer, camera: &str) -> Response {
             content_type: Cow::Borrowed(MEDIA_TYPE_PLAYLIST),
             cache_control: Cow::Borrowed("no-store"),
             extra: Vec::new(),
+            stream: None,
         },
         Answer::Mp4(body) => Response {
             status: Cow::Borrowed("200 OK"),
@@ -221,6 +240,7 @@ fn answer_response(answer: Answer, camera: &str) -> Response {
             content_type: Cow::Borrowed(MEDIA_TYPE_MP4),
             cache_control: Cow::Borrowed("no-store"),
             extra: vec![(Cow::Borrowed("Accept-Ranges"), "bytes".to_owned())],
+            stream: None,
         },
         Answer::Mp4Partial {
             body,
@@ -231,6 +251,7 @@ fn answer_response(answer: Answer, camera: &str) -> Response {
             content_type: Cow::Borrowed(MEDIA_TYPE_MP4),
             cache_control: Cow::Borrowed("no-store"),
             extra: vec![(Cow::Borrowed("Content-Range"), content_range)],
+            stream: None,
         },
         Answer::Mp4Unsatisfiable { total } => {
             let mut response = error_response(
@@ -321,6 +342,7 @@ fn plan_range(
         plan.pieces.push(PlannedPiece {
             seq: row.seq,
             start_ts: row.start_ts,
+            end_ts: row.end_ts,
             duration_s: row.duration_s,
             size_bytes: row.size_bytes,
             path,
@@ -360,7 +382,7 @@ fn piece_relative_path<'a>(stored: &'a str, camera: &str) -> Option<&'a str> {
 
 /// Reads a piece's init prefix by walking top-level box headers only, bounded to
 /// [`MAX_INIT_BYTES`]: the file body beyond the init prefix is never read.
-fn read_init_prefix(path: &Path) -> Result<Vec<u8>, PieceRead> {
+pub(crate) fn read_init_prefix(path: &Path) -> Result<Vec<u8>, PieceRead> {
     let mut file = File::open(path).map_err(|_| PieceRead::Unreadable)?;
     let mut header = [0_u8; 16];
     let mut start: u64 = 0;
@@ -412,7 +434,7 @@ fn read_exact_at(file: &mut File, at: u64, buffer: &mut [u8]) -> Result<(), Piec
     }
 }
 
-fn segment_body(path: &Path, offset_ticks: u64) -> Result<Vec<u8>, PieceRead> {
+pub(crate) fn segment_body(path: &Path, offset_ticks: u64) -> Result<Vec<u8>, PieceRead> {
     let length = std::fs::metadata(path)
         .map_err(|_| PieceRead::Unreadable)?
         .len();
@@ -440,6 +462,7 @@ fn serve(plan: &Plan, file: MediaFile, range: Option<&str>) -> Answer {
     match file {
         MediaFile::Master => Answer::Playlist(master_text(plan)),
         MediaFile::Index => Answer::Playlist(index_text(plan)),
+        MediaFile::Download => Answer::NotFound,
         MediaFile::Init(run) => {
             let piece = usize::try_from(run)
                 .ok()
@@ -483,7 +506,7 @@ fn serve(plan: &Plan, file: MediaFile, range: Option<&str>) -> Answer {
 /// The recorder truncates each piece's media ticks to a whole millisecond for
 /// `duration_s`; rounding back to the media timescale places the next piece so
 /// each junction overlaps the following piece by less than one millisecond.
-fn duration_ticks(duration_s: f64, timescale: u32) -> u64 {
+pub(crate) fn duration_ticks(duration_s: f64, timescale: u32) -> u64 {
     rounded_u64(duration_s.max(0.0) * f64::from(timescale), u64::MAX)
 }
 

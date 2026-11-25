@@ -608,8 +608,10 @@ the next sequence number — is a plain mutex-guarded snapshot rather than the
 schedule instead of being pushed updates over a held-open connection, so there is no
 "no receivers yet" race to solve, and every write simply replaces the snapshot.
 
-Every accepted connection carries a five-second bound covering both reading its request and
-writing its response. Without it, a peer that opens a connection and never finishes sending
+Every accepted connection carries a five-second bound covering reading its request and
+preparing its answer; a buffered response is written inside that same bound, and a streamed
+body continues under the per-write bound its route states. Without it, a peer that opens a
+connection and never finishes sending
 would leave the read loop parked forever, leaking one task and one file descriptor per
 connection — a live deployment showed roughly seventy such stuck connections after less
 than an hour. Five seconds is a generous bound because nginx is this listener's only real
@@ -949,14 +951,16 @@ like a range with no recording. Whether the deployed recordings ever reach
 
 ## The playlist route answers four files under the range's directory
 
-The playlist address names a directory, and four file names resolve under it
+The playlist address names a directory. Four playlist files resolve under it
 with relative URIs and no leading slash: `master.m3u8`, `index.m3u8`,
-`init-<run>.mp4` and `seg-<n>.m4s`. `<run>` numbers a run of stored pieces
+`init-<run>.mp4` and `seg-<n>.m4s`; `download.mp4` resolves in the same
+directory and is specified by "A recorded range downloads as one stitched
+MP4". `<run>` numbers a run of stored pieces
 that share one set of stream parameters, and `<n>` numbers a piece of the
 requested range; both count from 0 and are written as plain decimal
 integers. A `<run>` or `<n>` in any other spelling, and any range with no
 overlapping piece, answer `404` `not_found`; a file name that is not one of
-these four is no route at all.
+these five is no route at all.
 
 The playlists carry media type `application/vnd.apple.mpegurl`; init and
 segment files carry `video/mp4`. Every answer under the directory carries
@@ -1027,6 +1031,67 @@ positions in the current plan: when retention deletes a piece between a
 playlist request and a later segment request, the numbers after it shift
 onto the following pieces; a clip is requested promptly after its playlist,
 and a short plan keeps that window small.
+
+## A recorded range downloads as one stitched MP4
+
+A person sometimes wants a recording as a single file rather than a stream:
+`GET /corvette/api/v1/media/<camera>/start/<start>/end/<end>/download.mp4`.
+The address takes the same `<camera>` percent-encoding, the same Unix-second
+`<start>` and `<end>`, and the same bounds as the playlist route: an inverted
+range, a range longer than 31 days, and a range whose index rows number more
+than 25000 each answer `404` `not_found` before any stored piece is read, a
+camera the caller's role may not see, a range with no retained recording, and
+a camera name carrying bytes outside `A-Za-z0-9_-` answer the same `404`
+`not_found` before the name reaches a header or a log line, and an unreadable
+index answers `503` `recording_unavailable`.
+**Current backing**: this replaces the backing's `clip.mp4` and export
+download routes.
+
+The answer is `200` with media type `application/mp4`, `Cache-Control:
+no-store`, and `Content-Disposition: attachment; filename="<camera>-<start>-<end>.mp4"`
+carrying the validated camera name and the requested Unix seconds floored to
+whole seconds. The body is the init prefix of the first piece of the run,
+then every piece's rebased fragments in time order — one MP4 on one continuous
+time base, assembled by the same serve-time rebase the playlist route uses.
+
+The file covers one run of identical stream parameters, and gaps inside that
+run collapse: a run holding a pause in the recording answers as one
+continuous clip with no time-base jump, its duration the sum of the pieces it
+holds. When the range reaches a stream-parameter change, the answer holds the
+first run and carries `X-Corvette-Next-Start: <value>`, where `<value>` is
+Unix seconds with three decimals, the greater of the next run's first piece
+start and the last piece's end inside this answer. The client asks the next
+part at the same address with `start=<value>` and the original `end`; that
+answer holds the next run, starts its own time base, and carries the header
+again only when a further run follows. Every piece of the range arrives in
+exactly one of the parts. A range holding a single run answers without the
+header.
+
+The body streams as chunked bytes with no `Content-Length` and no `Accept-Ranges`;
+the server sends each piece as it reads it. A `Range` header on a download is
+ignored: the answer is always `200` with the whole file. Byte ranges belong to
+the playlist route's segments.
+
+The shared five-second request deadline bounds reading the request and
+preparing the answer up to its first body byte; a download that has begun is
+never expired by that deadline. Each body write — the head, every chunk, the
+terminating chunk — must complete within 15 seconds of starting, and every
+completed write resets that bound; a download has no total time limit, so a
+slow reader receives the whole file at its own pace. Buffered answers keep the
+deadline over their whole write.
+
+The failures the playlist routes state for pieces apply before the first body
+byte: a piece file that is absent or unreadable, stored bytes that do not
+parse, a stored path outside the layout the recorder writes, or a piece file
+longer than 64 MiB answer `503` `recording_unavailable` with the fixed-word
+log line naming the camera and the piece's `seq`. Once the headers are sent,
+a piece that turns unreadable or malformed cannot change the status: the
+server closes the stream without the terminating zero-length chunk, so the
+client sees a failed download rather than a complete file cut short, and logs
+the same fixed-word line naming the camera and the piece's `seq`. A body write
+that has not completed within its 15 seconds — a client that stopped reading —
+ends the stream the same way, and the server logs one fixed-word line
+`recording-download-stalled` naming the camera alone.
 
 ## The server issues a link for any recorded range
 

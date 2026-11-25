@@ -18,6 +18,7 @@ pub mod config;
 pub mod database;
 pub mod detection;
 pub mod detection_config;
+pub mod download;
 pub mod playlist;
 pub mod rebase;
 pub mod recordings;
@@ -70,6 +71,7 @@ struct Response {
     content_type: Cow<'static, str>,
     cache_control: Cow<'static, str>,
     extra: Vec<(Cow<'static, str>, String)>,
+    stream: Option<download::StreamBody>,
 }
 
 impl Response {
@@ -80,6 +82,7 @@ impl Response {
             content_type: Cow::Borrowed("application/json"),
             cache_control: Cow::Borrowed("no-store"),
             extra: Vec::new(),
+            stream: None,
         }
     }
 
@@ -90,13 +93,17 @@ impl Response {
             content_type: Cow::Borrowed("image/jpeg"),
             cache_control: Cow::Borrowed("no-store"),
             extra: Vec::new(),
+            stream: None,
         }
     }
 }
 
-enum Outcome {
-    Responded,
+enum Ready {
     ClosedEarly,
+    Answer {
+        response: Box<Response>,
+        drain_after_write: bool,
+    },
 }
 
 /// Per-connection settings handed to every request the connection carries.
@@ -267,48 +274,69 @@ pub async fn shutdown_signal() {
 }
 
 async fn handle_connection(mut stream: UnixStream, context: &ConnectionContext) {
-    let outcome =
-        tokio::time::timeout(context.timeout, read_route_respond(&mut stream, context)).await;
-    match outcome {
-        Ok(Ok(Outcome::Responded)) => {}
-        Ok(Ok(Outcome::ClosedEarly)) => {
-            log_event(
-                "http",
-                "request-incomplete",
-                "peer closed before a complete request header block arrived",
-            );
-        }
-        Ok(Err(err)) => log_event("http", "response-write-error", err),
-        Err(_elapsed) => log_event(
+    // The connection deadline covers everything up to the answer being ready to write.
+    // A streamed body then continues under the per-write inactivity bound in `download`.
+    let deadline = tokio::time::Instant::now() + context.timeout;
+    match tokio::time::timeout_at(deadline, read_and_route(&mut stream, context)).await {
+        Err(_elapsed) => connection_timeout_log(context),
+        Ok(Ready::ClosedEarly) => log_event(
             "http",
-            "connection-timeout",
-            format!(
-                "peer did not complete a request within {:?}; closed to avoid leaking the connection",
-                context.timeout
-            ),
+            "request-incomplete",
+            "peer closed before a complete request header block arrived",
         ),
+        Ok(Ready::Answer {
+            mut response,
+            drain_after_write,
+        }) => {
+            if response.stream.is_some() {
+                if let Err(err) = write_response(&mut stream, &mut response).await {
+                    log_event("http", "response-write-error", err);
+                }
+            } else {
+                match tokio::time::timeout_at(deadline, write_response(&mut stream, &mut response))
+                    .await
+                {
+                    Err(_elapsed) => connection_timeout_log(context),
+                    Ok(Err(err)) => log_event("http", "response-write-error", err),
+                    Ok(Ok(())) => {}
+                }
+            }
+            if drain_after_write {
+                drain_buffered(&stream);
+            }
+        }
     }
 }
 
-async fn read_route_respond(
-    stream: &mut UnixStream,
-    context: &ConnectionContext,
-) -> std::io::Result<Outcome> {
+fn connection_timeout_log(context: &ConnectionContext) {
+    log_event(
+        "http",
+        "connection-timeout",
+        format!(
+            "peer did not complete a request within {:?}; closed to avoid leaking the connection",
+            context.timeout
+        ),
+    );
+}
+
+async fn read_and_route(stream: &mut UnixStream, context: &ConnectionContext) -> Ready {
     let (block, body_prefix) = match read_header_block(stream).await {
         HeaderRead::Complete(block, prefix) => (block, prefix),
         HeaderRead::TooLarge => {
-            let response = bad_request("request header block exceeded the size limit");
-            write_response(stream, &response).await?;
-            drain_buffered(stream);
-            return Ok(Outcome::Responded);
+            return Ready::Answer {
+                response: Box::new(bad_request("request header block exceeded the size limit")),
+                drain_after_write: true,
+            };
         }
-        HeaderRead::Closed => return Ok(Outcome::ClosedEarly),
+        HeaderRead::Closed => return Ready::ClosedEarly,
     };
     let mut request = match parse_request(&block) {
         Ok(request) => request,
         Err(reason) => {
-            write_response(stream, &bad_request(&reason)).await?;
-            return Ok(Outcome::Responded);
+            return Ready::Answer {
+                response: Box::new(bad_request(&reason)),
+                drain_after_write: false,
+            };
         }
     };
     if let Some(length) = request
@@ -324,21 +352,20 @@ async fn read_route_respond(
                 Ok(_read) => body.extend_from_slice(&tail),
                 Err(err) => {
                     log_event("http", "request-read-error", err);
-                    return Ok(Outcome::ClosedEarly);
+                    return Ready::ClosedEarly;
                 }
             }
         }
         request.body = body;
     }
-    let over_bound = request
+    let drain_after_write = request
         .body_len
         .is_some_and(|len| len > detection_config::MAX_BODY_BYTES);
     let response = route(&request, context).await;
-    write_response(stream, &response).await?;
-    if over_bound {
-        drain_buffered(stream);
+    Ready::Answer {
+        response: Box::new(response),
+        drain_after_write,
     }
-    Ok(Outcome::Responded)
 }
 
 enum HeaderRead {
@@ -992,7 +1019,10 @@ fn drain_buffered(stream: &UnixStream) {
     while stream.try_read(&mut scratch).is_ok_and(|read| read > 0) {}
 }
 
-async fn write_response(stream: &mut UnixStream, response: &Response) -> std::io::Result<()> {
+async fn write_response(stream: &mut UnixStream, response: &mut Response) -> std::io::Result<()> {
+    if let Some(body) = response.stream.take() {
+        return download::write_streamed(stream, response, body, download::WRITE_INACTIVITY).await;
+    }
     let mut header = format!(
         "HTTP/1.0 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\n",
         response.status,

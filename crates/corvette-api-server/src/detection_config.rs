@@ -154,6 +154,7 @@ fn passthrough(answer: BackendAnswer) -> Response {
         content_type: Cow::Owned(answer.content_type),
         cache_control: Cow::Owned(answer.cache_control),
         extra,
+        stream: None,
     }
 }
 
@@ -211,6 +212,7 @@ fn problem(status: u16, title: &str, code: &str, detail: &str, instance: &str) -
         content_type: Cow::Borrowed("application/problem+json"),
         cache_control: Cow::Borrowed("no-store"),
         extra: Vec::new(),
+        stream: None,
     }
 }
 
