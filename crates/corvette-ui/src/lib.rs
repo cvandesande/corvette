@@ -12,6 +12,7 @@ mod api;
 mod calendar;
 mod camera_page;
 mod dashboard;
+mod download_offer;
 mod events;
 mod expanded_view;
 mod health_line;

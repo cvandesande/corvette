@@ -1050,6 +1050,31 @@ main {
   background: #281c1a;
 }
 
+.download-offers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.75rem;
+}
+
+.download-offer {
+  padding: 0.55rem 0.8rem;
+  border: 1px solid #3a4848;
+  border-radius: 0.55rem;
+  color: inherit;
+  text-decoration: none;
+}
+
+.download-offer:hover {
+  border-color: #8fa09e;
+}
+
+.download-note {
+  margin: 0.25rem 0 0;
+  color: #8fa09e;
+}
+
 .camera-card h2 {
   padding-top: 1rem;
   font-size: 1rem;

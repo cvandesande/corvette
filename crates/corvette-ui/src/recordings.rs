@@ -2,12 +2,14 @@
 
 use corvette_api::{Camera, Event, PreviewClip, ReviewSegment};
 use leptos::prelude::*;
+use leptos::reactive::owner::LocalStorage;
 
 use crate::activity::{day_severity, severity_class};
 use crate::all_cameras::AllCamerasPlayback;
 use crate::calendar::{
     ActivityLegend, CalendarRecordingStatus, calendar_day_label, recording_day_available,
 };
+use crate::download_offer::{DownloadOffers, DownloadSelection};
 use crate::local_time::{
     CalendarDay, CalendarSelection, browser_timezone, format_event_time, local_day_time,
     next_local_day, recent_calendar_days, select_calendar_range,
@@ -37,6 +39,7 @@ pub(crate) fn RecordingBrowser() -> impl IntoView {
     let timezone = browser_timezone();
     let start_clock = RwSignal::new("00:00".to_owned());
     let end_clock = RwSignal::new("23:59".to_owned());
+    let downloads = StoredValue::new_local(DownloadSelection::default());
     let review_activity = LocalResource::new(move || {
         let camera = recording_camera.get();
         async move {
@@ -94,6 +97,14 @@ pub(crate) fn RecordingBrowser() -> impl IntoView {
         selected_event.set(events.into_iter().find(|event| event.id == event_id));
     });
 
+    Effect::new(move |_| {
+        let range = recording_range.get();
+        downloads
+            .get_value()
+            .restart(range.filter(|range| range.camera != ALL_CAMERAS));
+    });
+    on_cleanup(move || downloads.get_value().cancel());
+
     provide_context(RecordingContext {
         cameras,
         selected_event,
@@ -109,6 +120,7 @@ pub(crate) fn RecordingBrowser() -> impl IntoView {
         recording_days,
         recording_clips,
         preview_clips,
+        downloads,
     });
 
     view! {
@@ -139,6 +151,7 @@ struct RecordingContext {
     recording_days: LocalResource<Result<std::collections::BTreeMap<String, bool>, String>>,
     recording_clips: LocalResource<Result<RecordingMedia, String>>,
     preview_clips: LocalResource<Result<Vec<PreviewClip>, String>>,
+    downloads: StoredValue<DownloadSelection, LocalStorage>,
 }
 
 impl RecordingContext {
@@ -360,6 +373,7 @@ fn RangePlayback(range: RecordingRange) -> impl IntoView {
         format_event_time(range.start_time),
         format_event_time(range.end_time),
     );
+    let downloads = context.downloads;
     view! {
         <div class="playback-heading"><h2>{heading}</h2><p>{detail}</p></div>
         {move || match (
@@ -396,5 +410,6 @@ fn RangePlayback(range: RecordingRange) -> impl IntoView {
                 })}
             }.into_any(),
         }}
+        <DownloadOffers selection=downloads/>
     }
 }
