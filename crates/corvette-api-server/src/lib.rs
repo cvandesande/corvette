@@ -115,6 +115,7 @@ struct ConnectionContext {
     config: Arc<ConfigSource>,
     db_path: PathBuf,
     index_path: PathBuf,
+    activity_backing: activity::ActivityBacking,
     media_root: PathBuf,
     clock: Clock,
     status_state: Arc<StatusState>,
@@ -127,6 +128,7 @@ pub struct ApiServer {
     config: Arc<ConfigSource>,
     db_path: PathBuf,
     index_path: PathBuf,
+    activity_backing: activity::ActivityBacking,
     media_root: PathBuf,
     clock: Clock,
     status_state: Arc<StatusState>,
@@ -173,6 +175,7 @@ impl ApiServer {
             config,
             db_path: db_path.to_path_buf(),
             index_path: PathBuf::from(recordings::DEFAULT_INDEX_PATH),
+            activity_backing: activity::ActivityBacking::default(),
             media_root: PathBuf::from(activity::DEFAULT_MEDIA_ROOT),
             clock: Arc::new(system_clock),
             status_state: Arc::new(StatusState::default()),
@@ -189,6 +192,12 @@ impl ApiServer {
     #[must_use]
     pub fn with_index_path(mut self, index_path: &Path) -> Self {
         self.index_path = index_path.to_path_buf();
+        self
+    }
+
+    #[must_use]
+    pub const fn with_activity_backing(mut self, backing: activity::ActivityBacking) -> Self {
+        self.activity_backing = backing;
         self
     }
 
@@ -223,6 +232,7 @@ impl ApiServer {
             config,
             db_path,
             index_path,
+            activity_backing,
             media_root,
             clock,
             status_state,
@@ -234,6 +244,7 @@ impl ApiServer {
             config,
             db_path,
             index_path,
+            activity_backing,
             media_root,
             clock,
             status_state,
@@ -632,6 +643,7 @@ async fn route(request: &Request, context: &ConnectionContext) -> Response {
         config,
         db_path,
         index_path,
+        activity_backing,
         media_root,
         clock,
         status_state,
@@ -666,7 +678,18 @@ async fn route(request: &Request, context: &ConnectionContext) -> Response {
         return not_found();
     };
     match route {
-        Route::Activity => activity(request, config, db_path, media_root, clock).await,
+        Route::Activity => {
+            activity(
+                request,
+                config,
+                db_path,
+                index_path,
+                media_root,
+                *activity_backing,
+                clock,
+            )
+            .await
+        }
         Route::CameraStatus => {
             camera_status(
                 config,
@@ -871,7 +894,9 @@ async fn activity(
     request: &Request,
     config: &ConfigSource,
     db_path: &Path,
+    index_path: &Path,
     media_root: &Path,
+    backing: activity::ActivityBacking,
     clock: &Clock,
 ) -> Response {
     let now = clock();
@@ -886,36 +911,57 @@ async fn activity(
     if let Some(requested) = &query.cameras {
         cameras.retain(|name| requested.contains(name));
     }
-    let response = if cameras.is_empty() {
-        activity::activity_response(&query, ActivityRows::default(), media_root, now)
+    let body = if cameras.is_empty() {
+        serde_json::to_vec(&activity::activity_response(
+            &query,
+            ActivityRows::default(),
+            media_root,
+            now,
+        ))
+        .expect("activity body serializes")
     } else {
-        // rusqlite and the media `stat` calls are synchronous: off the async worker.
-        let db_path = db_path.to_path_buf();
-        let media_root = media_root.to_path_buf();
-        let read = tokio::task::spawn_blocking(move || -> rusqlite::Result<ActivityResponse> {
-            let mut connection = database::open_read_only(&db_path)?;
-            let rows = activity::read_activity(&mut connection, &query, &cameras, now)?;
-            drop(connection);
-            Ok(activity::activity_response(&query, rows, &media_root, now))
-        })
-        .await;
-        match read {
-            Ok(Ok(response)) => response,
-            Ok(Err(err)) => {
-                log_event("database", "activity-read-error", err);
-                return database_unavailable();
+        match backing {
+            activity::ActivityBacking::Frigate => {
+                // rusqlite and the media `stat` calls are synchronous: off the async worker.
+                let db_path = db_path.to_path_buf();
+                let media_root = media_root.to_path_buf();
+                let read =
+                    tokio::task::spawn_blocking(move || -> rusqlite::Result<ActivityResponse> {
+                        let mut connection = database::open_read_only(&db_path)?;
+                        let rows = activity::read_activity(&mut connection, &query, &cameras, now)?;
+                        drop(connection);
+                        Ok(activity::activity_response(&query, rows, &media_root, now))
+                    })
+                    .await;
+                let response = match read {
+                    Ok(Ok(response)) => response,
+                    Ok(Err(err)) => {
+                        log_event("database", "activity-read-error", err);
+                        return database_unavailable();
+                    }
+                    Err(err) => {
+                        log_event("database", "activity-task-error", err);
+                        return database_unavailable();
+                    }
+                };
+                // ActivityResponse is strings and numbers only; this cannot fail to serialize.
+                serde_json::to_vec(&response).expect("activity body serializes")
             }
-            Err(err) => {
-                log_event("database", "activity-task-error", err);
-                return database_unavailable();
+            activity::ActivityBacking::Corvette => {
+                let index_path = index_path.to_path_buf();
+                let read = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<u8>> {
+                    let connection = database::open_read_only(&index_path)?;
+                    activity::corvette_body(&connection, &query, &cameras, now)
+                })
+                .await;
+                match read {
+                    Ok(Ok(body)) => body,
+                    Ok(Err(_)) | Err(_) => return recording_unavailable(),
+                }
             }
         }
     };
-    // ActivityResponse is strings and numbers only; this cannot fail to serialize.
-    Response::json(
-        "200 OK",
-        serde_json::to_vec(&response).expect("activity body serializes"),
-    )
+    Response::json("200 OK", body)
 }
 
 async fn clip_link(

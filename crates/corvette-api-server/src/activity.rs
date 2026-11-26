@@ -5,6 +5,7 @@ use corvette_api::{
 };
 use rusqlite::types::{Type, Value};
 use rusqlite::{Connection, params, params_from_iter};
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::{Component, Path};
 
@@ -16,6 +17,34 @@ pub const MOTION_BUCKET_SECONDS: u32 = 30;
 pub const MEDIA_ROOT_ENV: &str = "CORVETTE_API_MEDIA_ROOT";
 
 pub const DEFAULT_MEDIA_ROOT: &str = "/media/frigate";
+
+pub const ACTIVITY_BACKING_ENV: &str = "CORVETTE_API_ACTIVITY_BACKING";
+
+/// Which store answers the activity route; `frigate` is the default.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ActivityBacking {
+    #[default]
+    Frigate,
+    Corvette,
+}
+
+impl ActivityBacking {
+    /// Reads the backing setting; `None` is the absent setting.
+    ///
+    /// # Errors
+    ///
+    /// Names the accepted values when the text is neither backing.
+    pub fn from_setting(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            None => Ok(Self::default()),
+            Some("frigate") => Ok(Self::Frigate),
+            Some("corvette") => Ok(Self::Corvette),
+            Some(other) => Err(format!(
+                "{ACTIVITY_BACKING_ENV} must be `frigate` or `corvette`, not `{other}`"
+            )),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActivityQuery {
@@ -251,10 +280,42 @@ fn read_motion(
         Value::Real(ceil30(query.before)),
     ]);
 
-    let mut buckets: Vec<MotionBucket> = Vec::new();
-    let mut open: Option<MotionBucket> = None;
     let mut statement = transaction.prepare(&sql)?;
     let mut rows = statement.query(params_from_iter(&parameters))?;
+    fold_motion_rows(&mut rows)
+}
+
+fn read_motion_from_index(
+    connection: &Connection,
+    query: &ActivityQuery,
+    cameras: &[String],
+) -> rusqlite::Result<Vec<MotionBucket>> {
+    let placeholders = camera_placeholders(cameras);
+    let sql = format!(
+        "SELECT CAST(second / {MOTION_BUCKET_SECONDS} AS INTEGER) * {MOTION_BUCKET_SECONDS}, \
+         camera, COUNT(*) FROM motion WHERE camera IN ({placeholders}) \
+         AND second >= ? AND second < ? \
+         GROUP BY 1, camera ORDER BY 1, camera"
+    );
+    let mut parameters: Vec<Value> = cameras
+        .iter()
+        .map(|camera| Value::Text(camera.clone()))
+        .collect();
+    parameters.extend([
+        Value::Real(ceil30(query.after)),
+        Value::Real(ceil30(query.before)),
+    ]);
+
+    let mut statement = connection.prepare(&sql)?;
+    let mut rows = statement.query(params_from_iter(&parameters))?;
+    fold_motion_rows(&mut rows)
+}
+
+/// Folds `(bucket start, camera, level)` rows ordered by bucket start into buckets:
+/// one per bucket, `level` the maximum across the bucket's rows, cameras sorted.
+fn fold_motion_rows(rows: &mut rusqlite::Rows<'_>) -> rusqlite::Result<Vec<MotionBucket>> {
+    let mut buckets: Vec<MotionBucket> = Vec::new();
+    let mut open: Option<MotionBucket> = None;
     while let Some(row) = rows.next()? {
         let start: i64 = row.get(0)?;
         let camera: String = row.get(1)?;
@@ -476,6 +537,35 @@ pub fn activity_response(
             .collect(),
         motion: rows.motion,
     }
+}
+
+/// Builds the activity body from the Corvette index: reviews through the shared
+/// review read and motion buckets from the `motion` table, in the response
+/// envelope `activity_response` writes.
+pub(crate) fn corvette_body(
+    connection: &Connection,
+    query: &ActivityQuery,
+    cameras: &[String],
+    now: f64,
+) -> rusqlite::Result<Vec<u8>> {
+    let reviews = if query.include_reviews {
+        crate::events::reviews_in_range(connection, cameras, query.after, query.before, now)?
+    } else {
+        Vec::new()
+    };
+    let motion = if query.include_motion {
+        read_motion_from_index(connection, query, cameras)?
+    } else {
+        Vec::new()
+    };
+    let body = json!({
+        "after": query.after,
+        "before": query.before,
+        "motion_bucket_seconds": MOTION_BUCKET_SECONDS,
+        "reviews": reviews,
+        "motion": serde_json::to_value(motion).expect("motion buckets serialize"),
+    });
+    Ok(serde_json::to_vec(&body).expect("activity body serializes"))
 }
 
 /// The prefix Frigate stores in `reviewsegment.thumb_path`, its own mount.

@@ -1,7 +1,9 @@
 //! Entrypoint: binds the Unix socket named by `CORVETTE_API_SOCKET` and serves
 //! until the process is asked to terminate (issue #4 A2, A3).
 
-use corvette_api_server::activity::{DEFAULT_MEDIA_ROOT, MEDIA_ROOT_ENV};
+use corvette_api_server::activity::{
+    ACTIVITY_BACKING_ENV, ActivityBacking, DEFAULT_MEDIA_ROOT, MEDIA_ROOT_ENV,
+};
 use corvette_api_server::config::{
     CONFIG_ADDR_ENV, ConfigSource, DEFAULT_CACHE_TTL, DEFAULT_CONFIG_ADDR,
 };
@@ -27,6 +29,14 @@ async fn main() -> std::process::ExitCode {
         std::env::var(INDEX_PATH_ENV).unwrap_or_else(|_| DEFAULT_INDEX_PATH.to_owned());
     let media_root =
         std::env::var(MEDIA_ROOT_ENV).unwrap_or_else(|_| DEFAULT_MEDIA_ROOT.to_owned());
+    let activity_backing =
+        match ActivityBacking::from_setting(std::env::var(ACTIVITY_BACKING_ENV).ok().as_deref()) {
+            Ok(backing) => backing,
+            Err(reason) => {
+                eprintln!("corvette-api-server: {reason}");
+                return std::process::ExitCode::FAILURE;
+            }
+        };
     let config = Arc::new(ConfigSource::new(config_addr, DEFAULT_CACHE_TTL));
     let server = match ApiServer::bind(
         Path::new(&socket_path),
@@ -37,7 +47,8 @@ async fn main() -> std::process::ExitCode {
         Ok(server) => {
             let server = server
                 .with_media_root(Path::new(&media_root))
-                .with_index_path(Path::new(&index_path));
+                .with_index_path(Path::new(&index_path))
+                .with_activity_backing(activity_backing);
             match std::env::var(DETECTION_SOCKET_ENV) {
                 Ok(path) => server.with_detection_socket(PathBuf::from(path)),
                 Err(_env_not_set) => server,

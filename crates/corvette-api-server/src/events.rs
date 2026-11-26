@@ -167,28 +167,50 @@ pub(crate) fn list_body(
     cameras: &[String],
     now_seconds: f64,
 ) -> rusqlite::Result<Vec<u8>> {
+    let reviews = reviews_values(
+        connection,
+        cameras,
+        query.after,
+        query.before,
+        Some(&query.severities),
+        now_seconds,
+    )?;
+    Ok(body_with("reviews", &reviews))
+}
+
+fn reviews_values(
+    connection: &Connection,
+    cameras: &[String],
+    after_seconds: f64,
+    before_seconds: f64,
+    severities: Option<&[String]>,
+    now_seconds: f64,
+) -> rusqlite::Result<Vec<Value>> {
+    let severity_filter = severities.map_or_else(String::new, |severities| {
+        format!(" AND severity IN ({})", placeholders(severities.len()))
+    });
     let sql = format!(
         "SELECT id, camera, severity, start_ts, end_ts FROM reviews \
          WHERE camera IN ({}) AND start_ts < ? AND (end_ts IS NULL OR end_ts > ? \
-         OR start_ts >= ?) AND severity IN ({}) ORDER BY start_ts, id",
+         OR start_ts >= ?){severity_filter} ORDER BY start_ts, id",
         placeholders(cameras.len()),
-        placeholders(query.severities.len()),
     );
     let mut parameters: Vec<SqlValue> = cameras
         .iter()
         .map(|camera| SqlValue::Text(camera.clone()))
         .collect();
     parameters.extend([
-        SqlValue::Integer(to_millis(query.before)),
-        SqlValue::Integer(to_millis(query.after)),
-        SqlValue::Integer(to_millis(query.after)),
+        SqlValue::Integer(to_millis(before_seconds)),
+        SqlValue::Integer(to_millis(after_seconds)),
+        SqlValue::Integer(to_millis(after_seconds)),
     ]);
-    parameters.extend(
-        query
-            .severities
-            .iter()
-            .map(|severity| SqlValue::Text(severity.clone())),
-    );
+    if let Some(severities) = severities {
+        parameters.extend(
+            severities
+                .iter()
+                .map(|severity| SqlValue::Text(severity.clone())),
+        );
+    }
 
     let mut reviews = Vec::new();
     let mut statement = connection.prepare(&sql)?;
@@ -209,7 +231,24 @@ pub(crate) fn list_body(
             now_seconds,
         )?);
     }
-    Ok(body_with("reviews", &reviews))
+    Ok(reviews)
+}
+
+pub(crate) fn reviews_in_range(
+    connection: &Connection,
+    cameras: &[String],
+    after_seconds: f64,
+    before_seconds: f64,
+    now_seconds: f64,
+) -> rusqlite::Result<Vec<Value>> {
+    reviews_values(
+        connection,
+        cameras,
+        after_seconds,
+        before_seconds,
+        None,
+        now_seconds,
+    )
 }
 
 pub(crate) fn empty_list_body() -> Vec<u8> {

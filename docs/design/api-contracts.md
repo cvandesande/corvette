@@ -814,6 +814,32 @@ reviews, so a review's `media` carries only its thumbnail and its clip. Each lin
   recording file deleted outside Frigate while its row remains is not detected, as
   Frigate does not detect it.
 
+Which store answers the route is chosen at startup by `CORVETTE_API_ACTIVITY_BACKING`:
+`frigate`, the default, reads Frigate's database as described above; `corvette` reads
+Corvette's own recording index, through the same reads as `/corvette/api/v1/events`; any
+other value is a configuration error and the server does not start.
+
+Under the `corvette` backing each review is the form the events list route gives: `id` (a
+number), `camera`, `severity`, `start`, `end`, and `media` carrying only `clip`. It has no
+`thumbnail`, and no `objects`, `zones`, `detections`, `sub_labels` or `audio` list:
+Corvette builds no review thumbnail and keeps no per-review summary lists, so a consumer
+must treat `thumbnail` as absent, not as a deletion event. Its severities are `alert` and
+`detection`, the severities the index holds. Camera selection, ordering and window overlap
+are as above; `media.clip` is computed from the index's pieces with the same half-open
+overlap and the same padding.
+
+The `corvette` motion source is Corvette's own detection state: a second counts when the
+detection motion stage triggered in it, and the index holds one tick per camera per
+second. Buckets use the same 30 s arithmetic and bounds as above; a bucket's `level` is
+the largest number of motion seconds any one camera holds in that bucket, and `cameras`
+lists each camera with a motion second in the bucket, sorted. Because this is a measured
+source and Frigate's `recordings.motion` counts are the backing's, the same interval can
+answer different `level`s from the two backings, and ticks exist only where Corvette's
+detection ran.
+
+An unreadable index answers `503` `recording_unavailable`, the events routes' code; the
+Frigate backing answers `503` `database_unavailable` when its store cannot be read.
+
 When Corvette owns login (issue #30), and later its own camera configuration, these
 response shapes stay the same; only their sources change.
 
