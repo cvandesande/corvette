@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# Installs this repository's pre-commit hook: the standards gates on every commit,
-# plus the Rust checks when Rust files are staged. Refuses to overwrite a foreign hook.
+# Installs pre-commit and commit-msg, refusing to overwrite a foreign hook.
 set -eu
 
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT" || exit 1
-HOOK_PATH="$(git rev-parse --git-path hooks)/pre-commit"
+HOOKS="$(git rev-parse --git-path hooks)"
 
-hook_text() {
+precommit_text() {
 	cat <<'HOOK'
 #!/usr/bin/env bash
 set -eu
@@ -24,20 +23,35 @@ fi
 HOOK
 }
 
-WANT="$(mktemp)"
-trap 'rm -f "$WANT"' EXIT
-hook_text > "$WANT"
+commitmsg_text() {
+	cat <<'HOOK'
+#!/usr/bin/env bash
+bash docs/standards/issue-ref.sh check "$1"
+HOOK
+}
 
-if [ -e "$HOOK_PATH" ]; then
-	if cmp -s "$WANT" "$HOOK_PATH"; then
-		echo "pre-commit hook already installed and identical: $HOOK_PATH"
-		exit 0
+install_hook() {
+	local name="$1" want="$2" note="$3" path
+	path="$HOOKS/$name"
+	if [ -e "$path" ]; then
+		if cmp -s "$want" "$path"; then
+			echo "$name hook already installed and identical: $path"
+			return 0
+		fi
+		echo "install_hooks.sh: refusing to overwrite a different $name hook: $path" >&2
+		echo "remove or merge it first; this installer never touches other hooks" >&2
+		exit 1
 	fi
-	echo "install_hooks.sh: refusing to overwrite a different pre-commit hook: $HOOK_PATH" >&2
-	echo "remove or merge it first; this installer never touches other hooks" >&2
-	exit 1
-fi
+	cp "$want" "$path"
+	chmod 755 "$path"
+	echo "installed $path (mode 755)$note"
+}
 
-cp "$WANT" "$HOOK_PATH"
-chmod 755 "$HOOK_PATH"
-echo "installed $HOOK_PATH (mode 755): make check-standards, plus make check-rust when Rust is staged"
+WANT="$(mktemp)"
+WANT_MSG="$(mktemp)"
+trap 'rm -f "$WANT" "$WANT_MSG"' EXIT
+precommit_text > "$WANT"
+commitmsg_text > "$WANT_MSG"
+
+install_hook pre-commit "$WANT" ": make check-standards, plus make check-rust when Rust is staged"
+install_hook commit-msg "$WANT_MSG" ": issue-ref check on every commit message"
