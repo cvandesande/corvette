@@ -7,10 +7,11 @@ use corvette_media_bridge::piece_walk;
 use corvette_media_bridge::record_config::{self, CameraRecord, RecordConfig, Storage, Streams};
 use corvette_media_bridge::record_role;
 use corvette_media_bridge::recorder::PieceRecorder;
+use corvette_media_bridge::shutdown;
 use corvette_rtsp_client::depacketize::{Codec, Frame as ClientFrame};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 const SPS: &[u8] = &[
     0x67, 0x42, 0xc0, 0x1f, 0xdc, 0x42, 0x6c, 0x04, 0x40, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00,
@@ -215,11 +216,15 @@ async fn a_whole_frame_feed_lands_as_pieces_the_index_and_disk_agree_on() {
     let (sender, receiver) = broadcast::channel::<ClientFrame>(600);
     feed_video(&sender, 450, 150);
     drop(sender);
+    let (_stop_trigger, stop) = shutdown::Shutdown::channel();
+    let (settled_tx, _settled_rx) = watch::channel(false);
     record_role::run_record(
         "cam-d".to_string(),
         receiver,
         recorder,
         Duration::from_hours(1),
+        stop,
+        settled_tx,
     )
     .await;
 
@@ -266,11 +271,15 @@ async fn a_lagged_receiver_survives_and_later_frames_still_produce_a_piece() {
     sender.send(frame(NON_IDR, 0)).expect("accepted");
     sender.send(frame(NON_IDR, 3000)).expect("accepted");
     sender.send(frame(NON_IDR, 6000)).expect("accepted");
+    let (_stop_trigger, stop) = shutdown::Shutdown::channel();
+    let (settled_tx, _settled_rx) = watch::channel(false);
     let role = tokio::spawn(record_role::run_record(
         "cam-e".to_string(),
         receiver,
         recorder,
         Duration::from_hours(1),
+        stop,
+        settled_tx,
     ));
 
     // The later frames go in one at a time, each followed by a pause long
@@ -431,10 +440,14 @@ async fn each_record_task_run_builds_a_fresh_recorder_above_the_abandoned_piece(
     );
     let (sender, _) = broadcast::channel::<ClientFrame>(600);
 
+    let (_stop_trigger, stop) = shutdown::Shutdown::channel();
+    let (settled_tx, _settled_rx) = watch::channel(false);
     let first = tokio::spawn(record_role::record_task(
         std::sync::Arc::clone(&runtime),
         "cam-t".to_owned(),
         sender.subscribe(),
+        stop.clone(),
+        settled_tx.clone(),
     ));
     sender.send(frame(SPS, 0)).expect("accepted");
     sender.send(frame(PPS, 0)).expect("accepted");
@@ -463,6 +476,8 @@ async fn each_record_task_run_builds_a_fresh_recorder_above_the_abandoned_piece(
         std::sync::Arc::clone(&runtime),
         "cam-t".to_owned(),
         sender.subscribe(),
+        stop,
+        settled_tx,
     ));
     feed_video(&sender, 151, 150);
     drop(sender);
@@ -502,11 +517,15 @@ async fn a_lagged_overflow_closes_the_open_piece_short_and_a_later_keyframe_star
         .expect("a recording camera prepares");
     let recorder = runtime.recorder_for("cam-l").expect("cam-l records");
     let (sender, receiver) = broadcast::channel::<ClientFrame>(2);
+    let (_stop_trigger, stop) = shutdown::Shutdown::channel();
+    let (settled_tx, _settled_rx) = watch::channel(false);
     let role = tokio::spawn(record_role::run_record(
         "cam-l".to_string(),
         receiver,
         recorder,
         Duration::from_hours(1),
+        stop,
+        settled_tx,
     ));
 
     for (nal, timestamp) in [
@@ -600,11 +619,15 @@ fn a_silent_feed_closes_the_open_piece_once_and_recording_resumes_at_a_keyframe(
         .build()
         .expect("runtime builds");
     rt.block_on(async {
+        let (_stop_trigger, stop) = shutdown::Shutdown::channel();
+        let (settled_tx, _settled_rx) = watch::channel(false);
         let role = tokio::spawn(record_role::run_record(
             "cam-w".to_string(),
             receiver,
             recorder,
             Duration::from_millis(100),
+            stop,
+            settled_tx,
         ));
         for (nal, timestamp) in [
             (SPS, 0u32),

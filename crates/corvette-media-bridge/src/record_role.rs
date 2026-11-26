@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::mpsc::SyncSender;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 /// Silence that closes the open piece short in `run_record`. RTSP reconnects are invisible to subscribers, so frame arrival is the only liveness signal here.
 pub const WATCHDOG_SILENCE: Duration = Duration::from_secs(3);
@@ -79,20 +79,29 @@ pub struct RecordingRuntime {
 
 impl RecordingRuntime {
     /// Starts the track-events consumer writing into this runtime's index writer; the contract comment lives on [`event_consumer::run`].
-    pub fn spawn_event_consumer(self: &Arc<Self>, socket: std::path::PathBuf) {
+    #[must_use]
+    pub fn spawn_event_consumer(
+        self: &Arc<Self>,
+        socket: std::path::PathBuf,
+        stop: &crate::shutdown::Shutdown,
+    ) -> tokio::task::JoinHandle<()> {
         let runtime = Arc::clone(self);
+        let stop = stop.clone();
         tokio::spawn(async move {
             let writer = EventWriter::new(runtime.review.clone());
-            event_consumer::run(
+            let consuming = event_consumer::run(
                 socket,
                 runtime.rows.clone(),
                 writer,
                 runtime.open_events,
                 PieceRecorder::wall_clock_ms,
                 event_consumer::EVENT_RECONNECT_BACKOFF,
-            )
-            .await;
-        });
+            );
+            tokio::select! {
+                () = consuming => {}
+                () = stop.wait() => {} // releasing this task releases the rows sender for the writer thread
+            }
+        })
     }
 }
 
@@ -118,15 +127,24 @@ impl RecordingRuntime {
         self: &Arc<Self>,
         camera: &str,
         client: &Arc<Client>,
-    ) -> Option<Supervised> {
+        stop: &crate::shutdown::Shutdown,
+    ) -> Option<(Supervised, watch::Receiver<bool>)> {
         self.recorder_for(camera)?;
         let camera = camera.to_owned();
         let client = Arc::clone(client);
         let runtime = Arc::clone(self);
-        Some(supervise::spawn_supervised_with(
-            format!("{camera}/record"),
-            move || record_task(Arc::clone(&runtime), camera.clone(), client.subscribe()),
-        ))
+        let worker_stop = stop.clone();
+        let (settled_tx, settled_rx) = watch::channel(false);
+        let supervised = supervise::spawn_supervised_with(format!("{camera}/record"), move || {
+            record_task(
+                Arc::clone(&runtime),
+                camera.clone(),
+                client.subscribe(),
+                worker_stop.clone(),
+                settled_tx.clone(),
+            )
+        });
+        Some((supervised, settled_rx)) // the drain waits on this watch before dropping the role
     }
 
     pub fn warn_unknown_cameras<'a>(&self, dialled: impl Iterator<Item = &'a str>) {
@@ -148,16 +166,18 @@ impl RecordingRuntime {
     }
 }
 
-/// Runs one record pass for `name` on a freshly built recorder, up to a closed feed.
+/// Runs one record pass for `name` on a freshly built recorder, up to a closed feed or a stop signal.
 pub async fn record_task(
     runtime: Arc<RecordingRuntime>,
     name: String,
     frames: broadcast::Receiver<ClientFrame>,
+    stop: crate::shutdown::Shutdown,
+    settled: watch::Sender<bool>,
 ) {
     let Some(recorder) = runtime.recorder_for(&name) else {
         return;
     };
-    run_record(name, frames, recorder, WATCHDOG_SILENCE).await;
+    run_record(name, frames, recorder, WATCHDOG_SILENCE, stop, settled).await;
 }
 
 /// # Errors
@@ -255,35 +275,55 @@ pub fn prepare(record: &RecordConfig) -> Result<Option<RecordingRuntime>, Record
 }
 
 /// Streams one camera's frames into `recorder`, parking a worker for its blocking I/O.
+///
+/// A stop signal finalizes the open piece, flips `settled` and parks the task
+/// until the stop drain drops it, so no respawn reopens a piece after the stop.
 pub async fn run_record(
     name: String,
     mut frames: broadcast::Receiver<ClientFrame>,
     mut recorder: PieceRecorder,
     silence: Duration,
+    stop: crate::shutdown::Shutdown,
+    settled: watch::Sender<bool>,
 ) {
     let mut silent = false;
     loop {
-        match tokio::time::timeout(silence, frames.recv()).await {
-            Ok(Ok(frame)) => {
-                silent = false;
-                tokio::task::block_in_place(|| recorder.push(&frame));
-            }
-            Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
-                silent = false;
-                tokio::task::block_in_place(|| recorder.close_short());
-                log_event(&name, "record-lagged", format_args!("skipped={skipped}"));
-            }
-            Ok(Err(broadcast::error::RecvError::Closed)) => {
-                tokio::task::block_in_place(|| recorder.finish());
-                return;
-            }
-            Err(_elapsed) => {
-                if !silent {
-                    silent = true;
-                    tokio::task::block_in_place(|| recorder.close_short());
-                    log_event(&name, "record-watchdog", "");
+        tokio::select! {
+            biased;
+            received = tokio::time::timeout(silence, frames.recv()) => {
+                match received {
+                    Ok(Ok(frame)) => {
+                        silent = false;
+                        tokio::task::block_in_place(|| recorder.push(&frame));
+                    }
+                    Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
+                        silent = false;
+                        tokio::task::block_in_place(|| recorder.close_short());
+                        log_event(&name, "record-lagged", format_args!("skipped={skipped}"));
+                    }
+                    Ok(Err(broadcast::error::RecvError::Closed)) => {
+                        tokio::task::block_in_place(|| recorder.finish());
+                        settled.send_replace(true);
+                        if stop.is_triggered() {
+                            break; // a stop raced the feed closing; stay parked like the stop arm
+                        }
+                        return;
+                    }
+                    Err(_elapsed) => {
+                        if !silent {
+                            silent = true;
+                            tokio::task::block_in_place(|| recorder.close_short());
+                            log_event(&name, "record-watchdog", "");
+                        }
+                    }
                 }
+            }
+            () = stop.wait() => { // buffered frames go in first (biased): a stop racing a burst still records what the camera last sent
+                tokio::task::block_in_place(|| recorder.finish());
+                settled.send_replace(true);
+                break;
             }
         }
     }
+    std::future::pending::<()>().await;
 }

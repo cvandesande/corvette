@@ -70,6 +70,12 @@ The pod runs the containers as three concerns:
 - **Detection** — `corvette-detect-service`, supervising `corvette-detect-worker` as its
   child process and one `ffmpeg` decode child per camera.
 
+The media bridge serves as the container's first process, so it handles SIGTERM and SIGINT itself:
+on a stop signal it stops accepting, closes and finalizes each camera's open recording piece, commits
+those index rows and exits 0 within an 8-second budget that leaves room inside the kubelet's 30-second
+grace. A second signal exits immediately; a budget that runs out exits nonzero and recovery on the next
+start repairs the unfinished piece.
+
 The camera and detection config file lives on the detection container's config volume: the API
 server relays the apply route over the shared detection socket, the detection service owns and writes
 it, and camera changes take effect on restart. Alert push to Home Assistant over MQTT is planned.
