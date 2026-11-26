@@ -4,7 +4,7 @@
 
 use crate::index::{Index, IndexError, PieceRow};
 use crate::supervise::log_event;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::hash::BuildHasher;
 use std::io::Write as _;
@@ -68,6 +68,43 @@ pub(crate) fn cutoff_ms(now_ms: i64, days: Option<u32>) -> Option<i64> {
     Some(now_ms.saturating_sub(window_ms))
 }
 
+/// Newest review age base that still holds footage at `now_ms`; zero means an age never passes, so nothing is ever released or pruned.
+pub(crate) fn age_floor_ms(now_ms: i64, event_retention_days: u32) -> i64 {
+    if event_retention_days == 0 {
+        return i64::MIN;
+    }
+    now_ms.saturating_sub(i64::from(event_retention_days).saturating_mul(DAY_MS))
+}
+
+/// Per-camera age floors for cameras that own expiring footage; a camera that never expires needs no hold.
+pub(crate) fn camera_floors<S: BuildHasher, T: BuildHasher>(
+    now_ms: i64,
+    retention_days: &HashMap<String, u32, S>,
+    event_retention_days: &HashMap<String, u32, T>,
+) -> HashMap<String, i64> {
+    event_retention_days
+        .iter()
+        .filter(|(camera, _)| {
+            cutoff_ms(now_ms, retention_days.get(camera.as_str()).copied()).is_some()
+        })
+        .map(|(camera, days)| (camera.clone(), age_floor_ms(now_ms, *days)))
+        .collect()
+}
+
+/// The `(camera, seq)` pairs of pieces an in-window review holds, read with the one hold query for every camera in `floors`.
+pub(crate) fn held_from_floors(
+    index: &Index,
+    floors: &HashMap<String, i64>,
+) -> Result<HashSet<(String, u64)>, IndexError> {
+    let mut held = HashSet::new();
+    for (camera, floor_ms) in floors {
+        for seq in index.held_seqs(camera, *floor_ms)? {
+            held.insert((camera.clone(), seq));
+        }
+    }
+    Ok(held)
+}
+
 /// One pass's counts; `step_failures[k]` tallies staged step k+1 failures.
 ///
 /// Each failure leaves the piece in a state `crate::recovery::scan` repairs: trash copy, dangling row, orphan, or missing log line.
@@ -75,6 +112,7 @@ pub(crate) fn cutoff_ms(now_ms: i64, days: Option<u32>) -> Option<i64> {
 pub struct PassReport {
     pub enforce: bool,
     pub would_delete: usize,
+    pub held: usize,
     pub deleted: usize,
     pub refused_cameras: usize,
     pub step_failures: [usize; 4],
@@ -107,45 +145,87 @@ impl std::error::Error for ExpiryError {
 ///
 /// # Errors
 /// [`ExpiryError::ReadRows`] when the rows cannot be read; per-piece failures are counted in the report.
-pub fn run_pass<S: BuildHasher>(
+pub fn run_pass<S: BuildHasher, T: BuildHasher>(
     root: &Path,
     index: &mut Index,
     now_ms: i64,
     retention_days: &HashMap<String, u32, S>,
+    event_retention_days: &HashMap<String, u32, T>,
     enforce: bool,
 ) -> Result<PassReport, ExpiryError> {
-    run_pass_at(root, index, now_ms, retention_days, enforce, 0)
+    run_pass_at(
+        root,
+        index,
+        now_ms,
+        retention_days,
+        event_retention_days,
+        enforce,
+        0,
+    )
 }
 
 /// [`run_pass`] but a piece's enforce sequence stops after its first `steps` staged steps, leaving that crash-window state for recovery tests; 0 runs whole pieces.
 ///
 /// # Errors
 /// See [`run_pass`].
-pub fn run_pass_crash_after<S: BuildHasher>(
+pub fn run_pass_crash_after<S: BuildHasher, T: BuildHasher>(
     root: &Path,
     index: &mut Index,
     now_ms: i64,
     retention_days: &HashMap<String, u32, S>,
+    event_retention_days: &HashMap<String, u32, T>,
     enforce: bool,
     steps: u8,
 ) -> Result<PassReport, ExpiryError> {
-    run_pass_at(root, index, now_ms, retention_days, enforce, steps)
+    run_pass_at(
+        root,
+        index,
+        now_ms,
+        retention_days,
+        event_retention_days,
+        enforce,
+        steps,
+    )
 }
 
-fn run_pass_at<S: BuildHasher>(
+fn run_pass_at<S: BuildHasher, T: BuildHasher>(
     root: &Path,
     index: &mut Index,
     now_ms: i64,
     retention_days: &HashMap<String, u32, S>,
+    event_retention_days: &HashMap<String, u32, T>,
     enforce: bool,
     crash_after: u8,
 ) -> Result<PassReport, ExpiryError> {
     let rows = index
         .all_pieces()
         .map_err(|source| ExpiryError::ReadRows { source })?;
-    let decided = plan(&rows, now_ms, retention_days);
+    let floors = camera_floors(now_ms, retention_days, event_retention_days);
+    let held =
+        held_from_floors(index, &floors).map_err(|source| ExpiryError::ReadRows { source })?;
+    let mut held_by_camera: BTreeMap<&str, usize> = BTreeMap::new();
+    let free_rows: Vec<PieceRow> = rows
+        .iter()
+        .filter(|row| {
+            let key = (row.camera.clone(), row.seq);
+            let held_piece = held.contains(&key);
+            if held_piece
+                && cutoff_ms(now_ms, retention_days.get(&row.camera).copied())
+                    .is_some_and(|cutoff| row.end_ms < cutoff)
+            {
+                *held_by_camera.entry(row.camera.as_str()).or_default() += 1;
+            }
+            !held_piece
+        })
+        .cloned()
+        .collect();
+    for (camera, count) in &held_by_camera {
+        log_event(camera, "expiry-held", format!("pieces={count}"));
+    }
+    let decided = plan(&free_rows, now_ms, retention_days);
     let mut report = PassReport {
         enforce,
+        held: held_by_camera.values().sum(),
         ..PassReport::default()
     };
     for camera in decided.cameras {
@@ -182,6 +262,23 @@ fn run_pass_at<S: BuildHasher>(
             ) {
                 StepOutcome::Crashed => return Ok(report),
                 StepOutcome::Done | StepOutcome::Failed => {}
+            }
+        }
+    }
+    if enforce {
+        for (camera, days) in event_retention_days {
+            let counts = index
+                .prune_rows(camera, age_floor_ms(now_ms, *days))
+                .map_err(|source| ExpiryError::ReadRows { source })?;
+            if counts != [0, 0, 0] {
+                log_event(
+                    camera,
+                    "expiry-pruned",
+                    format!(
+                        "events={} reviews={} motion={}",
+                        counts[0], counts[1], counts[2]
+                    ),
+                );
             }
         }
     }

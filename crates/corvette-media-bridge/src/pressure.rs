@@ -3,7 +3,7 @@
 use crate::expiry::{self, ExpiryError, PassReport, StageWords, StepOutcome, delete_piece_staged};
 use crate::index::{Index, PieceRow};
 use crate::supervise::log_event;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::BuildHasher;
 use std::path::Path;
 
@@ -113,12 +113,13 @@ fn build_alerts<S: BuildHasher>(
 
 /// Plans the pieces one pressure pass takes from `rows` at `now_ms`.
 ///
-/// `retention_days` is per camera (absent or zero means the camera never expires), `recording_cameras` feeds the fallback floor, and `free_bytes` is the estimated free space, which grows by each planned piece's `size_bytes`. The floor is one hour of the measured last-hour recording rate, falling back to the fallback rate times `recording_cameras` until an hour of history exists, and the hard floor is a quarter of it; below the floor expired pieces go oldest-first until the estimate reaches it or none remain, and still below the hard floor after that within-retention pieces go oldest-first across cameras, never one inside a camera's newest hour. Saturating throughout, so no input panics. Each alert carries `days_held`, whole days from its camera's oldest remaining piece to `now`, and `configured_days`, that camera's retention with zero meaning never expires.
+/// `retention_days` is per camera (absent or zero means the camera never expires), `recording_cameras` feeds the fallback floor, and `free_bytes` is the estimated free space, which grows by each planned piece's `size_bytes`. Pieces keyed in `held` are review-held: the expired stage never takes them, and the within-retention stage takes them at the hard floor like any other within-retention piece, because freeing space wins there. The floor is one hour of the measured last-hour recording rate, falling back to the fallback rate times `recording_cameras` until an hour of history exists, and the hard floor is a quarter of it; below the floor expired pieces go oldest-first until the estimate reaches it or none remain, and still below the hard floor after that within-retention pieces go oldest-first across cameras, never one inside a camera's newest hour. Saturating throughout, so no input panics. Each alert carries `days_held`, whole days from its camera's oldest remaining piece to `now`, and `configured_days`, that camera's retention with zero meaning never expires.
 #[must_use]
-pub fn plan_pressure<S: BuildHasher>(
+pub fn plan_pressure<S: BuildHasher, T: BuildHasher>(
     rows: &[PieceRow],
     now_ms: i64,
     retention_days: &HashMap<String, u32, S>,
+    held: &HashSet<(String, u64), T>,
     recording_cameras: usize,
     free_bytes: u64,
 ) -> PressurePlan {
@@ -128,10 +129,14 @@ pub fn plan_pressure<S: BuildHasher>(
         expiry::cutoff_ms(now_ms, retention_days.get(&row.camera).copied())
             .is_some_and(|cutoff| row.end_ms < cutoff)
     };
+    let is_held = |row: &PieceRow| held.contains(&(row.camera.clone(), row.seq));
     let mut estimate = free_bytes;
     let mut deletions: Vec<PressureDeletion> = Vec::new();
     if estimate < floor_bytes {
-        let mut oldest: Vec<&PieceRow> = rows.iter().filter(|row| expired(row)).collect();
+        let mut oldest: Vec<&PieceRow> = rows
+            .iter()
+            .filter(|row| expired(row) && !is_held(row))
+            .collect();
         oldest_first(&mut oldest);
         for row in oldest {
             if estimate >= floor_bytes {
@@ -152,7 +157,7 @@ pub fn plan_pressure<S: BuildHasher>(
         }
         let mut oldest: Vec<&PieceRow> = rows
             .iter()
-            .filter(|row| !expired(row))
+            .filter(|row| !expired(row) || is_held(row))
             .filter(|row| {
                 newest_end
                     .get(row.camera.as_str())
@@ -180,25 +185,42 @@ pub fn plan_pressure<S: BuildHasher>(
     }
 }
 
+/// The free-space estimate and enabled-camera count that size one pressure pass's floor.
+#[derive(Debug, Clone, Copy)]
+pub struct PressureBudget {
+    pub recording_cameras: usize,
+    pub free_bytes: u64,
+}
+
 /// Runs one pressure pass at `now_ms` over `index`'s rows rooted at `root`, deciding with [`plan_pressure`].
 ///
 /// Dry run logs `pressure-would-delete` and touches nothing; enforce deletes through `crate::expiry::delete_piece_staged` with deletion-log reason `pressure` and logs one `pressure-alert` per camera that actually lost within-retention pieces. The delete-everything guard does not apply here; the newest-hour rule bounds the pass.
 ///
 /// # Errors
 /// [`ExpiryError::ReadRows`] when the rows cannot be read; per-piece failures are counted in the report.
-pub fn run_pressure_pass<S: BuildHasher>(
+pub fn run_pressure_pass<S: BuildHasher, T: BuildHasher>(
     root: &Path,
     index: &mut Index,
     now_ms: i64,
     retention_days: &HashMap<String, u32, S>,
-    recording_cameras: usize,
-    free_bytes: u64,
+    event_retention_days: &HashMap<String, u32, T>,
+    budget: PressureBudget,
     enforce: bool,
 ) -> Result<PassReport, ExpiryError> {
     let rows = index
         .all_pieces()
         .map_err(|source| ExpiryError::ReadRows { source })?;
-    let plan = plan_pressure(&rows, now_ms, retention_days, recording_cameras, free_bytes);
+    let floors = expiry::camera_floors(now_ms, retention_days, event_retention_days);
+    let held = expiry::held_from_floors(index, &floors)
+        .map_err(|source| ExpiryError::ReadRows { source })?;
+    let plan = plan_pressure(
+        &rows,
+        now_ms,
+        retention_days,
+        &held,
+        budget.recording_cameras,
+        budget.free_bytes,
+    );
     let mut report = PassReport {
         enforce,
         would_delete: plan.deletions.len(),

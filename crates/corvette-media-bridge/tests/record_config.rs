@@ -12,6 +12,7 @@ enabled = false
 enabled = true
 piece_seconds = 8
 retention_days = 14
+event_retention_days = 45
 
 [cameras.source.main]
 host = "127.0.0.1"
@@ -37,6 +38,7 @@ path = "/srv/corvette"
     assert!(front.record_enabled);
     assert_eq!(front.piece_seconds, 8);
     assert_eq!(front.retention_days, 14);
+    assert_eq!(front.event_retention_days, 45);
     assert!(front.streams.main);
     assert!(!front.streams.sub);
     assert!(!front.records());
@@ -46,6 +48,7 @@ path = "/srv/corvette"
     assert!(living.record_enabled);
     assert_eq!(living.piece_seconds, 4);
     assert_eq!(living.retention_days, 7);
+    assert_eq!(living.event_retention_days, 30);
     assert!(!living.streams.main);
     assert!(living.streams.sub);
     assert!(!living.records());
@@ -110,6 +113,16 @@ fn each_bad_setting_is_refused_naming_camera_and_key() {
             "[[cameras]]\nname = \"front\"\n[cameras.record]\nretention_days = 3651\n",
             "front",
             "record.retention_days",
+        ),
+        (
+            "[[cameras]]\nname = \"front\"\n[cameras.record]\nevent_retention_days = -1\n",
+            "front",
+            "record.event_retention_days",
+        ),
+        (
+            "[[cameras]]\nname = \"front\"\n[cameras.record]\nevent_retention_days = 3651\n",
+            "front",
+            "record.event_retention_days",
         ),
         ("[[cameras]]\nname = \"\"\n", "file", "cameras[0].name"),
         (

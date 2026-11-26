@@ -197,19 +197,27 @@ pub fn prepare(record: &RecordConfig) -> Result<Option<RecordingRuntime>, Record
         .filter(|camera| camera.records())
         .map(|camera| (camera.name.clone(), camera.retention_days))
         .collect();
+    let event_retention_days: HashMap<String, u32> = record
+        .cameras
+        .iter()
+        .filter(|camera| camera.records())
+        .map(|camera| (camera.name.clone(), camera.event_retention_days))
+        .collect();
     let enforce = record.storage.retention_enforce;
     let expiry_report = expiry::run_pass(
         &root,
         &mut index,
         PieceRecorder::wall_clock_ms(),
         &retention_days,
+        &event_retention_days,
         enforce,
     )
     .map_err(|source| RecordSetupError::Expiry { source })?;
     eprintln!(
-        "corvette-media-bridge: expiry startup pass would-delete={} deleted={} refused-cameras={} step-failures={}",
+        "corvette-media-bridge: expiry startup pass would-delete={} deleted={} held={} refused-cameras={} step-failures={}",
         expiry_report.would_delete,
         expiry_report.deleted,
+        expiry_report.held,
         expiry_report.refused_cameras,
         expiry_report.step_failures.iter().sum::<usize>()
     );
@@ -228,6 +236,7 @@ pub fn prepare(record: &RecordConfig) -> Result<Option<RecordingRuntime>, Record
         index::ExpiryWiring {
             root: root.clone(),
             retention_days,
+            event_retention_days,
             enforce,
             clock: Box::new(PieceRecorder::wall_clock_ms),
             recording_cameras: cameras.len(),

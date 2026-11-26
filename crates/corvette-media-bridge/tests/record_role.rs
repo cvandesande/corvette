@@ -45,6 +45,7 @@ fn camera_record(name: &str, record_enabled: bool, piece_seconds: u32) -> Camera
         record_enabled,
         piece_seconds,
         retention_days: 7,
+        event_retention_days: 30,
         streams: Streams {
             main: true,
             sub: false,

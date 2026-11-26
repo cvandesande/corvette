@@ -1,5 +1,6 @@
 //! The recording index: the sole `SQLite` writer, the per-camera sequence counter, and the range queries playback asks.
 
+use crate::record_config::MAX_PIECE_SPAN_MS;
 use crate::reviews;
 use crate::supervise::log_event;
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -58,6 +59,19 @@ CREATE TABLE IF NOT EXISTS motion (
     second INTEGER NOT NULL,
     UNIQUE(camera, second)
 );
+";
+
+/// Camera pieces a review item holds: `?1` camera, `?2` the newest age base that still holds, `?3` the longest a piece can run. Each review within the age window seeks pieces by a `(camera, start_ts)` range, `end_ts` checked exactly; the same half-open overlap and age base `COALESCE(end_ts, last_activity_ts)` as before.
+pub const REVIEWS_HOLD_SQL: &str = "
+SELECT DISTINCT p.seq
+FROM reviews r
+JOIN pieces p
+  ON p.camera = r.camera
+ AND p.start_ts > r.start_ts - ?3
+ AND p.start_ts < COALESCE(r.end_ts, r.last_activity_ts)
+ AND p.end_ts > r.start_ts
+WHERE r.camera = ?1
+  AND NOT (?2 > COALESCE(r.end_ts, r.last_activity_ts))
 ";
 
 #[derive(Debug, Clone)]
@@ -584,6 +598,50 @@ impl Index {
     }
 
     /// # Errors
+    pub fn held_seqs(&self, camera: &str, age_floor_ms: i64) -> Result<Vec<u64>, IndexError> {
+        let mut statement = self
+            .conn
+            .prepare(REVIEWS_HOLD_SQL)
+            .map_err(|source| query("reviews hold", camera, source))?;
+        let mut rows = statement
+            .query(params![camera, age_floor_ms, MAX_PIECE_SPAN_MS])
+            .map_err(|source| query("reviews hold", camera, source))?;
+        let mut seqs = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|source| query("reviews hold", camera, source))?
+        {
+            seqs.push(int_column(row, 0, "reviews hold", camera)?);
+        }
+        Ok(seqs)
+    }
+
+    /// Deletes closed rows older than `age_floor_ms` from `events`, `reviews` and `motion` in one transaction; the counts are `[events, reviews, motion]`.
+    pub(crate) fn prune_rows(
+        &mut self,
+        camera: &str,
+        age_floor_ms: i64,
+    ) -> Result<[usize; 3], IndexError> {
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|source| query("prune", camera, source))?;
+        let mut counts = [0usize; 3];
+        for (count, statement) in counts.iter_mut().zip([
+            "DELETE FROM events WHERE camera = ?1 AND end_ts IS NOT NULL AND ?2 > end_ts",
+            "DELETE FROM reviews WHERE camera = ?1 AND end_ts IS NOT NULL AND ?2 > end_ts",
+            "DELETE FROM motion WHERE camera = ?1 AND ?2 > second * 1000",
+        ]) {
+            *count = tx
+                .execute(statement, params![camera, age_floor_ms])
+                .map_err(|source| query("prune", camera, source))?;
+        }
+        tx.commit()
+            .map_err(|source| query("prune", camera, source))?;
+        Ok(counts)
+    }
+
+    /// # Errors
     pub fn coverage(
         &self,
         camera: &str,
@@ -945,10 +1003,11 @@ const EXPIRY_TICK: Duration = Duration::from_mins(1);
 
 pub type FreeSpaceReader = Box<dyn Fn(&Path) -> std::io::Result<u64> + Send>;
 
-/// Storage root, per-camera `retention_days`, dry-run switch, injected clock and injected free-space reader for the hourly expiry pass and the pressure pass.
+/// Storage root, per-camera `retention_days` and `event_retention_days`, dry-run switch, injected clock and injected free-space reader for the hourly expiry pass and the pressure pass.
 pub struct ExpiryWiring {
     pub root: PathBuf,
     pub retention_days: HashMap<String, u32>,
+    pub event_retention_days: HashMap<String, u32>,
     pub enforce: bool,
     pub clock: Box<dyn Fn() -> i64 + Send>,
     pub recording_cameras: usize,
@@ -960,6 +1019,7 @@ impl std::fmt::Debug for ExpiryWiring {
         f.debug_struct("ExpiryWiring")
             .field("root", &self.root)
             .field("retention_days", &self.retention_days)
+            .field("event_retention_days", &self.event_retention_days)
             .field("enforce", &self.enforce)
             .field("clock", &"injected")
             .field("recording_cameras", &self.recording_cameras)
@@ -997,6 +1057,7 @@ pub fn spawn_writer_with_expiry(
                     &mut index,
                     now_ms,
                     &wiring.retention_days,
+                    &wiring.event_retention_days,
                     wiring.enforce,
                 ) {
                     eprintln!("corvette-media-bridge: expiry pass failed: {error}");
@@ -1021,8 +1082,11 @@ pub fn spawn_writer_with_expiry(
                             &mut index,
                             now_ms,
                             &wiring.retention_days,
-                            wiring.recording_cameras,
-                            free_bytes,
+                            &wiring.event_retention_days,
+                            crate::pressure::PressureBudget {
+                                recording_cameras: wiring.recording_cameras,
+                                free_bytes,
+                            },
                             wiring.enforce,
                         ) {
                             eprintln!("corvette-media-bridge: pressure pass failed: {error}");

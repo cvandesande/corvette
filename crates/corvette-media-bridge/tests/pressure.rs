@@ -34,6 +34,17 @@ fn retention(entries: &[(&str, u32)]) -> HashMap<String, u32> {
         .collect()
 }
 
+fn empty_held() -> std::collections::HashSet<(String, u64)> {
+    std::collections::HashSet::new()
+}
+
+fn event_days(entries: &[(&str, u32)]) -> HashMap<String, u32> {
+    entries
+        .iter()
+        .map(|(camera, days)| ((*camera).to_owned(), *days))
+        .collect()
+}
+
 fn piece_relative_path(camera: &str, start_ms: i64, seq: u64) -> String {
     let parts = utc_parts(start_ms);
     format!(
@@ -276,6 +287,7 @@ fn below_the_hard_floor_within_retention_pieces_go_oldest_first_and_each_camera_
             &index.all_pieces().expect("rows read"),
             NOW,
             &retention(&[("front", 7), ("back", 7)]),
+            &empty_held(),
             3,
             0,
         );
@@ -301,8 +313,11 @@ fn below_the_hard_floor_within_retention_pieces_go_oldest_first_and_each_camera_
             &mut index,
             NOW,
             &retention(&[("front", 7), ("back", 7)]),
-            3,
-            0,
+            &event_days(&[]),
+            pressure::PressureBudget {
+                recording_cameras: 3,
+                free_bytes: 0,
+            },
             true,
         )
         .expect("pass runs");
@@ -355,8 +370,11 @@ fn a_dry_run_changes_no_file_and_no_row_and_logs_one_would_delete_line_per_plann
             &mut index,
             NOW,
             &retention(&[("front", 7), ("back", 7)]),
-            3,
-            0,
+            &event_days(&[]),
+            pressure::PressureBudget {
+                recording_cameras: 3,
+                free_bytes: 0,
+            },
             false,
         )
         .expect("dry pass runs");
@@ -402,7 +420,14 @@ fn free_at_or_above_the_floor_plans_and_deletes_nothing() {
     );
     seed_piece(&root, &mut index, "front", 2, NOW - 2000, NOW - 1000, 5000);
     let rows = index.all_pieces().expect("rows read");
-    let plan = pressure::plan_pressure(&rows, NOW, &retention(&[("front", 7)]), 3, 5000);
+    let plan = pressure::plan_pressure(
+        &rows,
+        NOW,
+        &retention(&[("front", 7)]),
+        &empty_held(),
+        3,
+        5000,
+    );
     assert!(
         plan.deletions.is_empty(),
         "free at the floor is not below it"
@@ -413,8 +438,11 @@ fn free_at_or_above_the_floor_plans_and_deletes_nothing() {
         &mut index,
         NOW,
         &retention(&[("front", 7)]),
-        3,
-        5000,
+        &event_days(&[]),
+        pressure::PressureBudget {
+            recording_cameras: 3,
+            free_bytes: 5000,
+        },
         true,
     )
     .expect("pass runs");
@@ -423,6 +451,7 @@ fn free_at_or_above_the_floor_plans_and_deletes_nothing() {
         PassReport {
             enforce: true,
             would_delete: 0,
+            held: 0,
             deleted: 0,
             refused_cameras: 0,
             step_failures: [0; 4],
@@ -466,7 +495,8 @@ fn below_the_floor_only_the_oldest_expired_pieces_the_floor_needs_are_deleted() 
     );
     seed_piece(&root, &mut index, "front", 4, NOW - 2000, NOW - 1000, 5000);
     let rows = index.all_pieces().expect("rows read");
-    let plan = pressure::plan_pressure(&rows, NOW, &retention(&[("front", 7)]), 3, 0);
+    let plan =
+        pressure::plan_pressure(&rows, NOW, &retention(&[("front", 7)]), &empty_held(), 3, 0);
     assert_eq!(
         seq_reasons(&plan),
         vec![("front".to_owned(), 1, PressureReason::Expired)],
@@ -477,8 +507,11 @@ fn below_the_floor_only_the_oldest_expired_pieces_the_floor_needs_are_deleted() 
         &mut index,
         NOW,
         &retention(&[("front", 7)]),
-        3,
-        0,
+        &event_days(&[]),
+        pressure::PressureBudget {
+            recording_cameras: 3,
+            free_bytes: 0,
+        },
         true,
     )
     .expect("pass runs");
@@ -534,7 +567,14 @@ fn the_newest_hour_of_every_camera_survives_when_the_estimate_cannot_reach_the_h
     seed_piece(&root, &mut index, "back", 1, NOW - 1200, NOW - 600, 5000);
     seed_piece(&root, &mut index, "back", 2, NOW - 7200, NOW - 6600, 5000);
     let rows = index.all_pieces().expect("rows read");
-    let plan = pressure::plan_pressure(&rows, NOW, &retention(&[("front", 7), ("back", 7)]), 3, 0);
+    let plan = pressure::plan_pressure(
+        &rows,
+        NOW,
+        &retention(&[("front", 7), ("back", 7)]),
+        &empty_held(),
+        3,
+        0,
+    );
     assert_eq!(
         plan.deletions.len(),
         3,
@@ -559,8 +599,11 @@ fn the_newest_hour_of_every_camera_survives_when_the_estimate_cannot_reach_the_h
         &mut index,
         NOW,
         &retention(&[("front", 7), ("back", 7)]),
-        3,
-        0,
+        &event_days(&[]),
+        pressure::PressureBudget {
+            recording_cameras: 3,
+            free_bytes: 0,
+        },
         true,
     )
     .expect("pass runs");
@@ -581,7 +624,7 @@ fn the_newest_hour_of_every_camera_survives_when_the_estimate_cannot_reach_the_h
 
 #[test]
 fn with_no_hour_of_history_the_floor_is_the_fallback_rate_per_recording_camera() {
-    let plan = pressure::plan_pressure(&[], NOW, &HashMap::new(), 3, 0);
+    let plan = pressure::plan_pressure(&[], NOW, &HashMap::new(), &empty_held(), 3, 0);
     assert_eq!(plan.floor_bytes, 3 * 1_000_000 * 3600);
     assert_eq!(plan.hard_floor_bytes, 3 * 1_000_000 * 3600 / 4);
     assert!(plan.deletions.is_empty());
@@ -589,7 +632,8 @@ fn with_no_hour_of_history_the_floor_is_the_fallback_rate_per_recording_camera()
         plan_row("front", 1, NOW - HOUR + 1, NOW - HOUR + 1001, 7),
         plan_row("front", 2, NOW - 2000, NOW - 1000, 7),
     ];
-    let soon = pressure::plan_pressure(&rows, NOW, &retention(&[("front", 7)]), 1, 0);
+    let soon =
+        pressure::plan_pressure(&rows, NOW, &retention(&[("front", 7)]), &empty_held(), 1, 0);
     assert_eq!(
         soon.floor_bytes,
         1_000_000 * 3600,
@@ -602,6 +646,7 @@ fn with_no_hour_of_history_the_floor_is_the_fallback_rate_per_recording_camera()
         ],
         NOW,
         &retention(&[("front", 7)]),
+        &empty_held(),
         1,
         0,
     );
@@ -618,7 +663,8 @@ fn with_an_hour_of_history_the_floor_is_the_measured_last_hour_sum() {
         plan_row("front", 2, NOW - DAY, NOW - DAY + 1000, 1234),
         plan_row("front", 3, NOW - 2000, NOW - 1000, 1234),
     ];
-    let plan = pressure::plan_pressure(&rows, NOW, &retention(&[("front", 7)]), 5, 0);
+    let plan =
+        pressure::plan_pressure(&rows, NOW, &retention(&[("front", 7)]), &empty_held(), 5, 0);
     assert_eq!(
         plan.floor_bytes, 1234,
         "only the piece ending inside the last hour measures"
@@ -649,7 +695,8 @@ fn both_pressure_kinds_write_reason_pressure_in_the_deletion_log() {
     );
     seed_piece(&root, &mut index, "front", 3, NOW - 2000, NOW - 1000, 10000);
     let rows = index.all_pieces().expect("rows read");
-    let plan = pressure::plan_pressure(&rows, NOW, &retention(&[("front", 7)]), 1, 0);
+    let plan =
+        pressure::plan_pressure(&rows, NOW, &retention(&[("front", 7)]), &empty_held(), 1, 0);
     assert_eq!(
         seq_reasons(&plan),
         vec![
@@ -662,8 +709,11 @@ fn both_pressure_kinds_write_reason_pressure_in_the_deletion_log() {
         &mut index,
         NOW,
         &retention(&[("front", 7)]),
-        1,
-        0,
+        &event_days(&[]),
+        pressure::PressureBudget {
+            recording_cameras: 1,
+            free_bytes: 0,
+        },
         true,
     )
     .expect("pass runs");
@@ -711,8 +761,11 @@ fn a_pressure_pass_refuses_index_paths_outside_the_layout_and_the_targets_surviv
         &mut index,
         NOW,
         &retention(&[("front", 7)]),
-        1,
-        0,
+        &event_days(&[]),
+        pressure::PressureBudget {
+            recording_cameras: 1,
+            free_bytes: 0,
+        },
         true,
     )
     .expect("pass runs");
@@ -740,7 +793,7 @@ fn a_pressure_pass_refuses_index_paths_outside_the_layout_and_the_targets_surviv
 
 #[test]
 fn plan_pressure_holds_up_under_arithmetic_extremes() {
-    let none = pressure::plan_pressure(&[], NOW, &HashMap::new(), 0, 0);
+    let none = pressure::plan_pressure(&[], NOW, &HashMap::new(), &empty_held(), 0, 0);
     assert_eq!((none.floor_bytes, none.hard_floor_bytes), (0, 0));
     assert!(none.deletions.is_empty());
 
@@ -748,7 +801,14 @@ fn plan_pressure_holds_up_under_arithmetic_extremes() {
         plan_row("front", 1, NOW - 2 * DAY, NOW - 2 * DAY + 1000, 5),
         plan_row("front", 2, NOW - 2000, NOW - 1000, 5),
     ];
-    let max_free = pressure::plan_pressure(&rows, NOW, &retention(&[("front", 1)]), 3, u64::MAX);
+    let max_free = pressure::plan_pressure(
+        &rows,
+        NOW,
+        &retention(&[("front", 1)]),
+        &empty_held(),
+        3,
+        u64::MAX,
+    );
     assert!(
         max_free.deletions.is_empty(),
         "free space saturates above any floor"
@@ -759,7 +819,14 @@ fn plan_pressure_holds_up_under_arithmetic_extremes() {
         plan_row("front", 2, NOW - 2000, NOW - 1000, u64::MAX),
         plan_row("back", 1, NOW - 2000, NOW - 1000, u64::MAX),
     ];
-    let saturated = pressure::plan_pressure(&max_sizes, NOW, &retention(&[("front", 1)]), 2, 0);
+    let saturated = pressure::plan_pressure(
+        &max_sizes,
+        NOW,
+        &retention(&[("front", 1)]),
+        &empty_held(),
+        2,
+        0,
+    );
     assert_eq!(
         saturated.floor_bytes,
         u64::MAX,
@@ -775,7 +842,14 @@ fn plan_pressure_holds_up_under_arithmetic_extremes() {
         plan_row("front", 1, i64::MIN, i64::MIN + 100, 9),
         plan_row("front", 2, NOW - 2000, NOW - 1000, 9),
     ];
-    let at_min = pressure::plan_pressure(&deep_past, i64::MIN, &retention(&[("front", 1)]), 0, 18);
+    let at_min = pressure::plan_pressure(
+        &deep_past,
+        i64::MIN,
+        &retention(&[("front", 1)]),
+        &empty_held(),
+        0,
+        18,
+    );
     assert_eq!(
         at_min.floor_bytes, 18,
         "the clock floor saturates, nothing wraps"
@@ -785,7 +859,14 @@ fn plan_pressure_holds_up_under_arithmetic_extremes() {
         "free space meets the saturating floor"
     );
 
-    let at_max = pressure::plan_pressure(&rows, i64::MAX, &retention(&[("front", 1)]), 3, 0);
+    let at_max = pressure::plan_pressure(
+        &rows,
+        i64::MAX,
+        &retention(&[("front", 1)]),
+        &empty_held(),
+        3,
+        0,
+    );
     assert_eq!(
         at_max.floor_bytes, 0,
         "no row ends within an hour of the clock ceiling"
@@ -827,7 +908,14 @@ fn a_never_expiring_camera_is_never_an_expired_pressure_victim_and_its_newest_ho
     );
     seed_piece(&root, &mut index, "keep", 3, NOW - 2000, NOW - 1000, 2000);
     let rows = index.all_pieces().expect("rows read");
-    let plan = pressure::plan_pressure(&rows, NOW, &retention(&[("front", 7), ("keep", 0)]), 2, 0);
+    let plan = pressure::plan_pressure(
+        &rows,
+        NOW,
+        &retention(&[("front", 7), ("keep", 0)]),
+        &empty_held(),
+        2,
+        0,
+    );
     assert_eq!(
         seq_reasons(&plan),
         vec![
@@ -847,8 +935,11 @@ fn a_never_expiring_camera_is_never_an_expired_pressure_victim_and_its_newest_ho
         &mut index,
         NOW,
         &retention(&[("front", 7), ("keep", 0)]),
-        2,
-        0,
+        &event_days(&[]),
+        pressure::PressureBudget {
+            recording_cameras: 2,
+            free_bytes: 0,
+        },
         true,
     )
     .expect("pass runs");
@@ -869,7 +960,14 @@ fn a_within_retention_piece_ending_exactly_at_the_newest_hour_cut_is_planned_and
         plan_row("front", 9, NOW - 1000, NOW, 4000),
         plan_row("front", 6, NOW - 500, NOW - 1, 4000),
     ];
-    let plan = pressure::plan_pressure(&rows, NOW, &retention(&[("front", 30)]), 1, 0);
+    let plan = pressure::plan_pressure(
+        &rows,
+        NOW,
+        &retention(&[("front", 30)]),
+        &empty_held(),
+        1,
+        0,
+    );
     assert_eq!(
         seq_reasons(&plan),
         vec![

@@ -9,7 +9,10 @@ pub const CAMERA_TOML_PATH_ENV_VAR: &str = "CORVETTE_CAMERA_TOML";
 
 const DEFAULT_PIECE_SECONDS: u32 = 4;
 const DEFAULT_RETENTION_DAYS: u32 = 7;
+const DEFAULT_EVENT_RETENTION_DAYS: u32 = 30;
 const MAX_PIECE_SECONDS: u32 = 60;
+/// The longest a piece can run: the recorder closes at the first keyframe at or after the cut, so twice the 60-second `record.piece_seconds` parse ceiling bounds every storable piece.
+pub const MAX_PIECE_SPAN_MS: u32 = MAX_PIECE_SECONDS * 2_000;
 const MAX_RETENTION_DAYS: u32 = 3650;
 pub const DEFAULT_ALERT_LABELS: [&str; 2] = ["person", "car"];
 
@@ -40,6 +43,7 @@ pub struct CameraRecord {
     pub record_enabled: bool,
     pub piece_seconds: u32,
     pub retention_days: u32,
+    pub event_retention_days: u32,
     pub streams: Streams,
     pub review: Review,
 }
@@ -268,6 +272,19 @@ fn camera_from(
                 )
             })?,
     };
+    let event_retention_days = match int_at(table, "record.event_retention_days", &name)? {
+        None => DEFAULT_EVENT_RETENTION_DAYS,
+        Some(value) => u32::try_from(value)
+            .ok()
+            .filter(|days| *days <= MAX_RETENTION_DAYS)
+            .ok_or_else(|| {
+                field(
+                    &name,
+                    "record.event_retention_days",
+                    "expected an integer in 0 to 3650",
+                )
+            })?,
+    };
     let alert_labels =
         string_array_at(table, "review.alert_labels", &name)?.unwrap_or_else(default_alert_labels);
     let detection_labels = string_array_at(table, "review.detection_labels", &name)?;
@@ -277,6 +294,7 @@ fn camera_from(
         record_enabled,
         piece_seconds,
         retention_days,
+        event_retention_days,
         streams: Streams {
             main: has_stream(table, "main"),
             sub: has_stream(table, "sub"),

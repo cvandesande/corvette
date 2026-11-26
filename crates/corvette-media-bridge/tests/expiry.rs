@@ -132,13 +132,21 @@ fn enforce_deletes_exactly_the_expired_pieces_and_writes_one_log_line_each() {
     seed_piece(&root, &mut index, 3, NOW - 7 * DAY - 2000, NOW - 7 * DAY);
     seed_piece(&root, &mut index, 4, NOW - 3_600_000, NOW - 1000);
 
-    let report = expiry::run_pass(&root, &mut index, NOW, &retention(&[("front", 7)]), true)
-        .expect("pass runs");
+    let report = expiry::run_pass(
+        &root,
+        &mut index,
+        NOW,
+        &retention(&[("front", 7)]),
+        &HashMap::new(),
+        true,
+    )
+    .expect("pass runs");
     assert_eq!(
         report,
         PassReport {
             enforce: true,
             would_delete: 2,
+            held: 0,
             deleted: 2,
             refused_cameras: 0,
             step_failures: [0; 4],
@@ -187,8 +195,15 @@ fn zero_retention_deletes_nothing_in_enforce_mode() {
         NOW - 500 * DAY + 1000,
     );
 
-    let report = expiry::run_pass(&root, &mut index, NOW, &retention(&[("front", 0)]), true)
-        .expect("pass runs");
+    let report = expiry::run_pass(
+        &root,
+        &mut index,
+        NOW,
+        &retention(&[("front", 0)]),
+        &HashMap::new(),
+        true,
+    )
+    .expect("pass runs");
     assert_eq!(report.deleted, 0);
     assert_eq!(report.would_delete, 0);
     assert!(file_present(&root, NOW - 400 * DAY, 1));
@@ -212,6 +227,7 @@ fn a_four_hundred_day_clock_jump_refuses_the_pass_and_deletes_nothing() {
             &mut index,
             NOW + 400 * DAY,
             &retention(&[("front", 7)]),
+            &HashMap::new(),
             true,
         )
         .expect("pass runs");
@@ -266,6 +282,7 @@ fn a_few_hour_clock_jump_expires_inside_the_window_without_a_refusal() {
         &mut index,
         NOW + 4 * 3_600_000,
         &retention(&[("front", 7)]),
+        &HashMap::new(),
         true,
     )
     .expect("pass runs");
@@ -312,8 +329,15 @@ fn a_dry_run_changes_no_file_and_no_row_and_logs_one_would_delete_line_per_expir
         files_before.sort();
         let rows_before = row_set(&index);
 
-        let report = expiry::run_pass(&root, &mut index, NOW, &retention(&[("front", 7)]), false)
-            .expect("dry pass runs");
+        let report = expiry::run_pass(
+            &root,
+            &mut index,
+            NOW,
+            &retention(&[("front", 7)]),
+            &HashMap::new(),
+            false,
+        )
+        .expect("dry pass runs");
         assert_eq!(report.would_delete, 3);
         assert_eq!(report.deleted, 0);
 
@@ -350,8 +374,16 @@ fn a_crash_after_the_stage_rename_is_repaired_by_startup_scan() {
     seed_piece(&root, &mut index, 7, start, start + 1000);
     seed_piece(&root, &mut index, 20, NOW - DAY, NOW);
 
-    expiry::run_pass_crash_after(&root, &mut index, NOW, &retention(&[("front", 7)]), true, 1)
-        .expect("the staged steps run up to the simulated stop");
+    expiry::run_pass_crash_after(
+        &root,
+        &mut index,
+        NOW,
+        &retention(&[("front", 7)]),
+        &HashMap::new(),
+        true,
+        1,
+    )
+    .expect("the staged steps run up to the simulated stop");
     assert!(
         !file_present(&root, start, 7),
         "the file moved to the trash"
@@ -396,8 +428,16 @@ fn a_crash_after_the_row_delete_is_repaired_by_startup_scan() {
     seed_piece(&root, &mut index, 7, start, start + 1000);
     seed_piece(&root, &mut index, 20, NOW - DAY, NOW);
 
-    expiry::run_pass_crash_after(&root, &mut index, NOW, &retention(&[("front", 7)]), true, 2)
-        .expect("the staged steps run up to the simulated stop");
+    expiry::run_pass_crash_after(
+        &root,
+        &mut index,
+        NOW,
+        &retention(&[("front", 7)]),
+        &HashMap::new(),
+        true,
+        2,
+    )
+    .expect("the staged steps run up to the simulated stop");
     assert_eq!(
         row_set(&index),
         vec![("front".to_owned(), 20)],
@@ -434,8 +474,15 @@ fn nine_of_ten_expire_and_delete_while_ten_of_ten_refuses() {
     }
     seed_piece(&root, &mut index, 10, NOW - DAY, NOW);
 
-    let report = expiry::run_pass(&root, &mut index, NOW, &retention(&[("front", 7)]), true)
-        .expect("pass runs");
+    let report = expiry::run_pass(
+        &root,
+        &mut index,
+        NOW,
+        &retention(&[("front", 7)]),
+        &HashMap::new(),
+        true,
+    )
+    .expect("pass runs");
     assert_eq!(report.refused_cameras, 0, "exactly 90 percent is allowed");
     assert_eq!(report.deleted, 9);
     assert_eq!(row_set(&index), vec![("front".to_owned(), 10)]);
@@ -453,8 +500,15 @@ fn a_piece_with_an_already_missing_file_still_leaves_the_index() {
     std::fs::remove_file(root.join(piece_relative_path(start, 1)))
         .expect("the seeded file is gone before the pass");
 
-    let report = expiry::run_pass(&root, &mut index, NOW, &retention(&[("front", 7)]), true)
-        .expect("pass runs");
+    let report = expiry::run_pass(
+        &root,
+        &mut index,
+        NOW,
+        &retention(&[("front", 7)]),
+        &HashMap::new(),
+        true,
+    )
+    .expect("pass runs");
     assert_eq!(report.deleted, 1);
     assert_eq!(report.step_failures, [0; 4]);
     assert_eq!(
@@ -475,7 +529,15 @@ fn the_enforce_deletion_log_line_parses_with_the_documented_fields() {
     seed_piece(&root, &mut index, 1, start, start + 1000);
     seed_piece(&root, &mut index, 2, NOW - DAY, NOW);
 
-    expiry::run_pass(&root, &mut index, NOW, &retention(&[("front", 7)]), true).expect("pass runs");
+    expiry::run_pass(
+        &root,
+        &mut index,
+        NOW,
+        &retention(&[("front", 7)]),
+        &HashMap::new(),
+        true,
+    )
+    .expect("pass runs");
     let lines = deletion_lines(&root);
     assert_eq!(lines.len(), 1);
     let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("the line parses");
@@ -504,6 +566,7 @@ fn the_writer_thread_runs_the_expiry_pass_when_the_clock_passes_the_hour() {
     let wiring = corvette_media_bridge::index::ExpiryWiring {
         root: root.clone(),
         retention_days: retention(&[("front", 7)]),
+        event_retention_days: HashMap::new(),
         enforce: true,
         clock: Box::new(move || clock_for_wiring.load(Ordering::SeqCst)),
         recording_cameras: 1,
@@ -598,8 +661,15 @@ fn a_row_path_naming_the_database_is_refused_and_the_database_survives() {
     seed_row_at(&mut index, 1, "index.sqlite");
     let db = root.join("index.sqlite");
     let before = std::fs::read(&db).expect("database readable");
-    let report = expiry::run_pass(&root, &mut index, NOW, &retention(&[("front", 7)]), true)
-        .expect("pass runs");
+    let report = expiry::run_pass(
+        &root,
+        &mut index,
+        NOW,
+        &retention(&[("front", 7)]),
+        &HashMap::new(),
+        true,
+    )
+    .expect("pass runs");
     assert_eq!(report.deleted, 1, "the expired piece is deleted");
     assert_eq!(report.refused_cameras, 0);
     assert_eq!(report.step_failures, [1, 0, 0, 0], "step one refuses");
@@ -620,8 +690,15 @@ fn a_row_path_naming_the_deletion_log_is_refused_and_the_log_keeps_its_earlier_l
     seed_row_at(&mut index, 1, "deletions.log.jsonl");
     std::fs::write(root.join("deletions.log.jsonl"), "{\"earlier\":\"line\"}\n")
         .expect("log seeded");
-    let report = expiry::run_pass(&root, &mut index, NOW, &retention(&[("front", 7)]), true)
-        .expect("pass runs");
+    let report = expiry::run_pass(
+        &root,
+        &mut index,
+        NOW,
+        &retention(&[("front", 7)]),
+        &HashMap::new(),
+        true,
+    )
+    .expect("pass runs");
     assert_eq!(report.deleted, 1, "the expired piece is deleted");
     assert_eq!(report.refused_cameras, 0);
     assert_eq!(report.step_failures, [1, 0, 0, 0], "step one refuses");
@@ -642,8 +719,15 @@ fn a_row_path_escaping_through_parent_directories_is_refused_and_the_database_su
     seed_row_at(&mut index, 1, "recordings/cam/../../index.sqlite");
     let db = root.join("index.sqlite");
     let before = std::fs::read(&db).expect("database readable");
-    let report = expiry::run_pass(&root, &mut index, NOW, &retention(&[("front", 7)]), true)
-        .expect("pass runs");
+    let report = expiry::run_pass(
+        &root,
+        &mut index,
+        NOW,
+        &retention(&[("front", 7)]),
+        &HashMap::new(),
+        true,
+    )
+    .expect("pass runs");
     assert_eq!(report.deleted, 1, "the expired piece is deleted");
     assert_eq!(report.refused_cameras, 0);
     assert_eq!(report.step_failures, [1, 0, 0, 0], "step one refuses");
@@ -665,8 +749,15 @@ fn a_row_path_that_is_absolute_is_refused_and_its_target_file_survives() {
     std::fs::write(&target, "sibling bytes").expect("target written");
     seed_row_at(&mut index, 1, &target.to_string_lossy());
     let before = std::fs::read(&target).expect("target readable");
-    let report = expiry::run_pass(&root, &mut index, NOW, &retention(&[("front", 7)]), true)
-        .expect("pass runs");
+    let report = expiry::run_pass(
+        &root,
+        &mut index,
+        NOW,
+        &retention(&[("front", 7)]),
+        &HashMap::new(),
+        true,
+    )
+    .expect("pass runs");
     assert_eq!(report.deleted, 1, "the expired piece is deleted");
     assert_eq!(report.refused_cameras, 0);
     assert_eq!(report.step_failures, [1, 0, 0, 0], "step one refuses");
@@ -686,8 +777,15 @@ fn a_row_path_that_is_just_a_dot_is_refused_and_the_recordings_tree_survives() {
     seed_piece(&root, &mut index, 3, NOW - DAY, NOW);
     // The guard refuses a lone dot (and the empty path) as a non-layout path, so no rename runs.
     seed_row_at(&mut index, 1, ".");
-    let report = expiry::run_pass(&root, &mut index, NOW, &retention(&[("front", 7)]), true)
-        .expect("pass runs");
+    let report = expiry::run_pass(
+        &root,
+        &mut index,
+        NOW,
+        &retention(&[("front", 7)]),
+        &HashMap::new(),
+        true,
+    )
+    .expect("pass runs");
     assert_eq!(report.deleted, 1, "the expired piece is deleted");
     assert_eq!(report.refused_cameras, 0);
     assert_eq!(report.step_failures, [1, 0, 0, 0], "step one refuses");
@@ -710,8 +808,15 @@ fn a_row_with_an_empty_stored_path_is_refused_and_the_pass_deletes_the_real_piec
     seed_piece(&root, &mut index, 2, NOW - 8 * DAY, NOW - 8 * DAY + 1000);
     seed_piece(&root, &mut index, 3, NOW - DAY, NOW);
     seed_row_at(&mut index, 1, "");
-    let report = expiry::run_pass(&root, &mut index, NOW, &retention(&[("front", 7)]), true)
-        .expect("pass runs");
+    let report = expiry::run_pass(
+        &root,
+        &mut index,
+        NOW,
+        &retention(&[("front", 7)]),
+        &HashMap::new(),
+        true,
+    )
+    .expect("pass runs");
     assert_eq!(report.deleted, 1, "the expired piece is deleted");
     assert_eq!(report.refused_cameras, 0);
     assert_eq!(report.step_failures, [1, 0, 0, 0], "step one refuses");
@@ -759,8 +864,15 @@ fn a_row_path_naming_an_existing_directory_is_refused_and_every_file_below_it_su
         let mut before = Vec::new();
         tree_snapshot(&root.join("recordings"), &root, &mut before);
         before.sort();
-        let report = expiry::run_pass(&root, &mut index, NOW, &retention(&[("front", 7)]), true)
-            .expect("pass runs");
+        let report = expiry::run_pass(
+            &root,
+            &mut index,
+            NOW,
+            &retention(&[("front", 7)]),
+            &HashMap::new(),
+            true,
+        )
+        .expect("pass runs");
         assert_eq!(report.deleted, 1, "the expired piece is deleted ({stored})");
         assert_eq!(report.refused_cameras, 0);
         assert_eq!(
@@ -805,7 +917,15 @@ fn each_deletion_log_line_ends_with_exactly_one_newline() {
         NOW - 8 * DAY + 3000,
     );
     seed_piece(&root, &mut index, 3, NOW - DAY, NOW);
-    expiry::run_pass(&root, &mut index, NOW, &retention(&[("front", 7)]), true).expect("pass runs");
+    expiry::run_pass(
+        &root,
+        &mut index,
+        NOW,
+        &retention(&[("front", 7)]),
+        &HashMap::new(),
+        true,
+    )
+    .expect("pass runs");
     let text = std::fs::read_to_string(root.join("deletions.log.jsonl")).expect("log readable");
     assert!(text.ends_with('\n'), "the file ends in a newline");
     assert!(!text.ends_with("\n\n"), "one newline ends the file");

@@ -171,6 +171,7 @@ fn free_above_the_floor_keeps_everything_across_pressure_ticks() {
     let wiring = ExpiryWiring {
         root: root.clone(),
         retention_days: retention(&[("front", 7)]),
+        event_retention_days: HashMap::new(),
         enforce: true,
         clock: Box::new(move || clock_for_clock.load(Ordering::SeqCst)),
         recording_cameras: 1,
@@ -236,6 +237,7 @@ fn below_the_floor_the_first_pressure_tick_deletes_expired_pieces_oldest_first_a
     let wiring = ExpiryWiring {
         root: root.clone(),
         retention_days: retention(&[("front", 7)]),
+        event_retention_days: HashMap::new(),
         enforce: true,
         clock: Box::new(move || clock_for_clock.load(Ordering::SeqCst)),
         recording_cameras: 1,
@@ -315,6 +317,7 @@ fn a_dry_run_monitor_tick_deletes_nothing_and_logs_each_would_delete_line() {
         let wiring = ExpiryWiring {
             root: root.clone(),
             retention_days: retention(&[("front", 7)]),
+            event_retention_days: HashMap::new(),
             enforce: false,
             clock: Box::new(move || clock_for_clock.load(Ordering::SeqCst)),
             recording_cameras: 1,
@@ -390,6 +393,7 @@ fn an_unreadable_free_figure_is_logged_once_per_failure_streak_and_recovers_once
         let wiring = ExpiryWiring {
             root: root.clone(),
             retention_days: retention(&[("front", 7)]),
+            event_retention_days: HashMap::new(),
             enforce: true,
             clock: Box::new(move || clock_for_clock.load(Ordering::SeqCst)),
             recording_cameras: 1,
@@ -478,6 +482,7 @@ fn pressure_ticks_do_not_run_the_expiry_pass_early_and_the_hourly_expiry_still_f
     let wiring = ExpiryWiring {
         root: root.clone(),
         retention_days: retention(&[("front", 7)]),
+        event_retention_days: HashMap::new(),
         enforce: true,
         clock: Box::new(move || clock_for_clock.load(Ordering::SeqCst)),
         recording_cameras: 1,
@@ -544,6 +549,7 @@ fn dropping_the_sender_returns_the_index_after_pressure_wiring() {
     let wiring = ExpiryWiring {
         root: root.clone(),
         retention_days: retention(&[("front", 7)]),
+        event_retention_days: HashMap::new(),
         enforce: true,
         clock: Box::new(move || START),
         recording_cameras: 1,
