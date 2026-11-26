@@ -40,6 +40,7 @@ const fn frame_of(objects: Vec<TrackedObject>) -> FrameObjects {
         frame_time: 1.0,
         objects,
         ended: Vec::new(),
+        motion_triggered: false,
     }
 }
 

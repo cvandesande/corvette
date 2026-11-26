@@ -1,4 +1,4 @@
-//! Persists the detection service's track lifecycle lines into the recording index, dialed from an environment-named socket path and kept alive across disconnects with backoff.
+//! Persists the detection service's track lifecycle and motion tick lines into the recording index, dialed from an environment-named socket path and kept alive across disconnects with backoff.
 
 use crate::index::{EventWrite, IndexWrite, ReviewActivity};
 use crate::record_config::Review;
@@ -61,6 +61,7 @@ impl EventWriter {
     ) -> (Vec<EventWrite>, Option<ReviewActivity>) {
         match frame {
             TrackFrame::Start(info) | TrackFrame::Update(info) => self.info(info, now_ms),
+            TrackFrame::Motion { .. } => (Vec::new(), None),
             TrackFrame::End { camera, track_id } => self
                 .last_write
                 .remove(&(camera.clone(), track_id.clone()))
@@ -183,6 +184,37 @@ impl EventWriter {
     }
 }
 
+const MILLIS_PER_SECOND: i64 = 1_000;
+
+/// Forwards the index writes one decoded line causes: a motion tick becomes one write with its second clamped to the bridge clock's current second, a track line becomes its event writes and review activity.
+fn forward_frame(
+    sender: &SyncSender<IndexWrite>,
+    writer: &mut EventWriter,
+    frame: &TrackFrame,
+    now_ms: i64,
+) -> Result<(), ()> {
+    if let TrackFrame::Motion { camera, second } = frame {
+        let second = i64::try_from(*second)
+            .unwrap_or(i64::MAX)
+            .min(now_ms / MILLIS_PER_SECOND);
+        return forward(
+            sender,
+            IndexWrite::Motion {
+                camera: camera.clone(),
+                second,
+            },
+        );
+    }
+    let (line_writes, review_activity) = writer.apply(frame, now_ms);
+    for event in line_writes {
+        forward(sender, IndexWrite::Event(event))?;
+    }
+    if let Some(activity) = review_activity {
+        forward(sender, IndexWrite::Review(activity))?;
+    }
+    Ok(())
+}
+
 fn forward(sender: &SyncSender<IndexWrite>, write: IndexWrite) -> Result<(), ()> {
     match sender.try_send(write) {
         Ok(()) => Ok(()),
@@ -222,14 +254,7 @@ async fn pump(
                             match decode_track_line(&line[..line.len() - 1]) {
                                 Err(source) => log_event("events", "track-events-line", source),
                                 Ok(frame) => {
-                                    let (line_writes, review_activity) =
-                                        writer.apply(&frame, clock());
-                                    for event in line_writes {
-                                        forward(sender, IndexWrite::Event(event))?;
-                                    }
-                                    if let Some(activity) = review_activity {
-                                        forward(sender, IndexWrite::Review(activity))?;
-                                    }
+                                    forward_frame(sender, writer, &frame, clock())?;
                                 }
                             }
                         }

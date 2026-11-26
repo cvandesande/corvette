@@ -63,6 +63,7 @@ fn kinds_of(frames: &[TrackFrame]) -> Vec<char> {
             TrackFrame::Start(_) => 's',
             TrackFrame::Update(_) => 'u',
             TrackFrame::End { .. } => 'e',
+            TrackFrame::Motion { .. } => 'm',
         })
         .collect()
 }
@@ -167,7 +168,7 @@ async fn a_track_gets_start_update_end_lines_and_first_motion_flips_after_it_mov
         .iter()
         .filter_map(|frame| match frame {
             TrackFrame::Start(info) | TrackFrame::Update(info) => Some(info.first_motion),
-            TrackFrame::End { .. } => None,
+            TrackFrame::End { .. } | TrackFrame::Motion { .. } => None,
         })
         .collect();
     let flip = motions
@@ -245,6 +246,7 @@ fn moving_track(id: &str, time: f64) -> FrameObjects {
             stationary: false,
         }],
         ended: Vec::new(),
+        motion_triggered: false,
     }
 }
 
@@ -287,6 +289,7 @@ async fn a_stalled_subscriber_drops_updates_keeps_boundaries_and_the_loop_keeps_
             frame_time: 2.0 + f64::from(updates),
             objects: Vec::new(),
             ended: vec!["t1".to_owned()],
+            motion_triggered: false,
         }))
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;

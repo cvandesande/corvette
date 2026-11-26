@@ -128,6 +128,7 @@ mod tests {
             frame_time: 0.0,
             objects,
             ended: ended.iter().map(|id| (*id).to_owned()).collect(),
+            motion_triggered: false,
         }
     }
 

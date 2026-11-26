@@ -35,6 +35,7 @@ fn frame_of(frame_time: f64, objects: Vec<TrackedObject>, ended: Vec<&str>) -> F
         frame_time,
         objects,
         ended: ended.into_iter().map(str::to_owned).collect(),
+        motion_triggered: false,
     }
 }
 

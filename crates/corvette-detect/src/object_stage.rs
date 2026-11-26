@@ -30,6 +30,7 @@ pub struct FrameObjects {
     pub frame_time: f64,
     pub objects: Vec<TrackedObject>,
     pub ended: Vec<String>,
+    pub motion_triggered: bool,
 }
 
 impl FrameObjects {
@@ -147,6 +148,7 @@ impl<'a> ObjectStage<'a> {
             frame_time,
             objects,
             ended,
+            motion_triggered: false,
         })
     }
 }

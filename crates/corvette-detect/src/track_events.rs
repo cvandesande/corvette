@@ -1,4 +1,4 @@
-//! Track-event subscriber socket: per-camera publishers read the frame watch channel and push `start`, `update` and `end` lines to every accepted connection; the service never reads from a subscriber.
+//! Track-event subscriber socket: per-camera publishers read the frame watch channel and push `start`, `update`, `end` and `motion` lines to every accepted connection; the service never reads from a subscriber.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -23,6 +23,7 @@ const TRACK_EVENTS_MAX_QUEUED_LINES: usize = 4_096;
 const _: () = assert!(TRACK_EVENTS_MAX_QUEUED_LINES > TRACK_EVENTS_QUEUE_LINES);
 pub const TRACK_EVENTS_MAX_SUBSCRIBERS: usize = 16;
 pub const TRACK_EVENTS_ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+const CLOCK_SECONDS_MAX: f64 = 4_000_000_000.0;
 
 type Subscribers = Arc<Mutex<Vec<Arc<Subscriber>>>>;
 
@@ -132,7 +133,7 @@ impl Subscriber {
 }
 
 fn broadcast(subscribers: &Subscribers, frame: &TrackFrame) {
-    let droppable = matches!(frame, TrackFrame::Update(_));
+    let droppable = matches!(frame, TrackFrame::Update(_) | TrackFrame::Motion { .. });
     let bytes: Arc<[u8]> = Arc::from(encode_track_line(frame).into_boxed_slice());
     let targets: Vec<Arc<Subscriber>> = subscribers
         .lock()
@@ -177,7 +178,7 @@ impl TrackAccept for UnixListener {
 /// Serves track frames to subscriber connections until the task is stopped.
 ///
 /// Each accepted connection is a subscriber until it closes and receives only pushed lines.
-/// A subscriber whose socket stalls drops queued `update` lines, counted in a log line, and keeps every `start` and `end` line; a queue that reaches `TRACK_EVENTS_MAX_QUEUED_LINES` closes that subscriber so its consumer reconnects and recovers.
+/// A subscriber whose socket stalls drops queued `update` and `motion` lines, counted in a log line, and keeps every `start` and `end` line; a queue that reaches `TRACK_EVENTS_MAX_QUEUED_LINES` closes that subscriber so its consumer reconnects and recovers.
 /// Publishing never blocks on a subscriber.
 /// Connections beyond `TRACK_EVENTS_MAX_SUBSCRIBERS` are closed immediately; a failed `accept` is logged and retried after `TRACK_EVENTS_ACCEPT_BACKOFF`.
 pub async fn serve_track_events<L: TrackAccept + Send + 'static>(
@@ -228,6 +229,7 @@ async fn publish(
     subscribers: Subscribers,
 ) {
     let mut lines: HashMap<String, LineState> = HashMap::new();
+    let mut tick_second: Option<u64> = None;
     loop {
         if objects.changed().await.is_err() {
             return;
@@ -235,6 +237,21 @@ async fn publish(
         let Some(known) = (*objects.borrow_and_update()).clone() else {
             continue;
         };
+        if known.motion_triggered {
+            // The bound matches the consumer's millisecond clamp, so the frame time always converts.
+            let bounded = known.frame_time.clamp(0.0, CLOCK_SECONDS_MAX);
+            let second = Duration::from_secs_f64(bounded).as_secs();
+            if tick_second.is_none_or(|sent| second > sent) {
+                tick_second = Some(second);
+                broadcast(
+                    &subscribers,
+                    &TrackFrame::Motion {
+                        camera: camera.clone(),
+                        second,
+                    },
+                );
+            }
+        }
         for ended in &known.ended {
             if lines.remove(ended).is_some() {
                 broadcast(
@@ -314,6 +331,134 @@ async fn pump(mut stream: UnixStream, subscriber: Arc<Subscriber>, subscribers: 
 mod tests {
     use super::*;
     use std::sync::PoisonError;
+
+    fn queued_lines(subscriber: &Subscriber) -> Vec<String> {
+        subscriber
+            .lock_queue()
+            .lines
+            .iter()
+            .map(|line| String::from_utf8_lossy(&line.bytes).into_owned())
+            .collect()
+    }
+
+    async fn wait_for_lines(subscriber: &Subscriber, expected: usize) -> Vec<String> {
+        for _ in 0..100 {
+            if queued_lines(subscriber).len() >= expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        queued_lines(subscriber)
+    }
+
+    fn motion_frame(frame_time: f64, triggered: bool) -> FrameObjects {
+        FrameObjects {
+            frame_time,
+            objects: Vec::new(),
+            ended: Vec::new(),
+            motion_triggered: triggered,
+        }
+    }
+
+    fn start_info() -> TrackInfo {
+        TrackInfo {
+            camera: "front".to_owned(),
+            track_id: "7".to_owned(),
+            label: "person".to_owned(),
+            bounds: [0.1, 0.2, 0.3, 0.4],
+            zones: Vec::new(),
+            first_motion: None,
+            last_seen: 10.5,
+        }
+    }
+
+    #[tokio::test]
+    async fn triggered_frames_emit_at_most_one_motion_tick_per_camera_per_second() {
+        let subscriber = Arc::new(Subscriber::new(61));
+        let subscribers: Subscribers = Arc::new(Mutex::new(vec![Arc::clone(&subscriber)]));
+        let (sender, receiver) = watch::channel(None);
+        tokio::spawn(publish("front".to_owned(), receiver, subscribers));
+        for time in [100.5, 100.9, 101.2] {
+            sender
+                .send(Some(motion_frame(time, true)))
+                .expect("frame published");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            wait_for_lines(&subscriber, 2).await,
+            vec!["1\tm\tfront\t100\n", "1\tm\tfront\t101\n"],
+            "one tick per wall-clock second, none for a second already ticked"
+        );
+    }
+
+    #[tokio::test]
+    async fn frames_without_a_motion_trigger_emit_no_tick_line() {
+        let subscriber = Arc::new(Subscriber::new(62));
+        let subscribers: Subscribers = Arc::new(Mutex::new(vec![Arc::clone(&subscriber)]));
+        let (sender, receiver) = watch::channel(None);
+        tokio::spawn(publish("front".to_owned(), receiver, subscribers));
+        for time in [100.5, 101.2] {
+            sender
+                .send(Some(motion_frame(time, false)))
+                .expect("frame published");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            wait_for_lines(&subscriber, 1).await.is_empty(),
+            "a frame whose motion stage did not trigger gets no tick"
+        );
+    }
+
+    #[test]
+    fn a_queue_at_the_soft_bound_drops_the_incoming_tick_and_keeps_start_and_end_lines() {
+        let subscriber = Arc::new(Subscriber::new(45));
+        let subscribers: Subscribers = Arc::new(Mutex::new(vec![Arc::clone(&subscriber)]));
+        for index in 0..=TRACK_EVENTS_QUEUE_LINES {
+            subscriber.push(Arc::from(format!("boundary-{index}").into_bytes()), false);
+        }
+        broadcast(&subscribers, &TrackFrame::Start(start_info()));
+        broadcast(
+            &subscribers,
+            &TrackFrame::Motion {
+                camera: "front".to_owned(),
+                second: 100,
+            },
+        );
+        broadcast(
+            &subscribers,
+            &TrackFrame::End {
+                camera: "front".to_owned(),
+                track_id: "7".to_owned(),
+            },
+        );
+        let (dropped, queued, texts) = {
+            let state = subscriber.lock_queue();
+            (
+                state.dropped,
+                state.lines.len(),
+                state
+                    .lines
+                    .iter()
+                    .map(|line| String::from_utf8_lossy(&line.bytes).into_owned())
+                    .collect::<Vec<String>>(),
+            )
+        };
+        assert_eq!(dropped, 1);
+        assert_eq!(queued, TRACK_EVENTS_QUEUE_LINES + 3);
+        assert!(
+            texts.iter().any(|text| text.starts_with("1\ts\t")),
+            "the start line survived: {texts:?}"
+        );
+        assert!(
+            texts.last().is_some_and(|text| text.starts_with("1\te\t")),
+            "the end line survived: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.starts_with("1\tm\t")),
+            "the tick is droppable like an update line"
+        );
+    }
 
     fn logged_drops(subscriber: u64, dropped: u64) -> bool {
         crate::TEST_LOG

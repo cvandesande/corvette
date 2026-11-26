@@ -312,6 +312,7 @@ fn regions_maps_object_edges_in_object_order() {
         frame_time: 0.0,
         objects: vec![tracked("1", [1, 2, 3, 4]), tracked("2", [5, 6, 7, 8])],
         ended: Vec::new(),
+        motion_triggered: false,
     };
     assert_eq!(
         frame_objects.regions(),

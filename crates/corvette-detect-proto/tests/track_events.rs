@@ -34,9 +34,22 @@ fn start_update_and_end_round_trip_byte_for_byte() {
             camera: "back".to_owned(),
             track_id: "12".to_owned(),
         },
+        TrackFrame::Motion {
+            camera: "front".to_owned(),
+            second: 1_780_000_000,
+        },
     ] {
         assert_eq!(round_trip(&frame), frame);
     }
+}
+
+#[test]
+fn a_motion_tick_line_is_version_kind_camera_and_second() {
+    let line = encode_track_line(&TrackFrame::Motion {
+        camera: "front".to_owned(),
+        second: 1_780_000_000,
+    });
+    assert_eq!(&line, b"1\tm\tfront\t1780000000\n");
 }
 
 #[test]
@@ -100,6 +113,27 @@ fn field_count_and_number_and_escape_faults_are_named() {
     );
     let broken_escape = b"1\te\tfr%2ont\t7";
     assert_eq!(decode_track_line(broken_escape), Err(LineError::Escape));
+    let tick_missing_field = b"1\tm\tfront";
+    assert_eq!(
+        decode_track_line(tick_missing_field),
+        Err(LineError::Fields {
+            wanted: 2,
+            found: 1
+        })
+    );
+    let tick_not_a_number = b"1\tm\tfront\tsoon";
+    assert_eq!(
+        decode_track_line(tick_not_a_number),
+        Err(LineError::Number("second"))
+    );
+    for fractional_or_negative in ["-5", "1780000000.5"] {
+        let line = format!("1\tm\tfront\t{fractional_or_negative}");
+        assert_eq!(
+            decode_track_line(line.as_bytes()),
+            Err(LineError::Number("second")),
+            "a whole unsigned second is the only tick value"
+        );
+    }
 }
 
 #[test]

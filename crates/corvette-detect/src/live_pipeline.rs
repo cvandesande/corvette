@@ -139,7 +139,8 @@ impl<'a, E: Infer> LivePipeline<'a, E> {
             }
             Err(error) => return Err(LiveError::Candidate(error)),
         };
-        let frame_objects = self.objects.step(frame_time, detections)?;
+        let mut frame_objects = self.objects.step(frame_time, detections)?;
+        frame_objects.motion_triggered = self.regions.motion_triggered();
         self.previous_boxes = frame_objects.regions();
         self.counters.frames_tracked = self.counters.frames_tracked.saturating_add(1);
         Ok(FrameOutcome::Objects(frame_objects))

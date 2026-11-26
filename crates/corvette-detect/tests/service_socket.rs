@@ -146,6 +146,7 @@ fn frame(ids: &[&str]) -> FrameObjects {
         frame_time: 1.0,
         objects: ids.iter().copied().map(object).collect(),
         ended: Vec::new(),
+        motion_triggered: false,
     }
 }
 

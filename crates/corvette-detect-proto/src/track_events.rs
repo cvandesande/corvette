@@ -1,4 +1,5 @@
 //! One newline-terminated line per track frame on the track-event subscriber socket: a version byte, a kind byte and tab-separated fields.
+//! Motion ticks are droppable like update lines under subscriber queue pressure; start and end lines are never dropped.
 
 use std::fmt;
 
@@ -9,9 +10,11 @@ const ZONE_SEP: u8 = b',';
 const KIND_START: u8 = b's';
 const KIND_UPDATE: u8 = b'u';
 const KIND_END: u8 = b'e';
+const KIND_MOTION: u8 = b'm';
 const NO_VALUE: &str = "-";
 const INFO_FIELDS: usize = 10;
 const END_FIELDS: usize = 2;
+const TICK_FIELDS: usize = 2;
 const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -29,7 +32,15 @@ pub struct TrackInfo {
 pub enum TrackFrame {
     Start(TrackInfo),
     Update(TrackInfo),
-    End { camera: String, track_id: String },
+    End {
+        camera: String,
+        track_id: String,
+    },
+    /// One camera's motion trigger for one whole second; the publisher never sends two for the same camera and second.
+    Motion {
+        camera: String,
+        second: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,6 +101,11 @@ pub fn encode_track_line(frame: &TrackFrame) -> Vec<u8> {
             push_field(camera.as_bytes(), &mut line);
             push_field(track_id.as_bytes(), &mut line);
         }
+        TrackFrame::Motion { camera, second } => {
+            line.push(KIND_MOTION);
+            push_field(camera.as_bytes(), &mut line);
+            push_field(second.to_string().as_bytes(), &mut line);
+        }
     }
     line.push(LINE_END);
     line
@@ -119,6 +135,18 @@ pub fn decode_track_line(line: &[u8]) -> Result<TrackFrame, LineError> {
             Ok(TrackFrame::End {
                 camera: unescape(fields[0])?,
                 track_id: unescape(fields[1])?,
+            })
+        }
+        KIND_MOTION => {
+            if fields.len() != TICK_FIELDS {
+                return Err(LineError::Fields {
+                    wanted: TICK_FIELDS,
+                    found: fields.len(),
+                });
+            }
+            Ok(TrackFrame::Motion {
+                camera: unescape(fields[0])?,
+                second: whole_seconds("second", fields[1])?,
             })
         }
         other => Err(LineError::Kind(other)),
@@ -190,6 +218,13 @@ fn number(name: &'static str, field: &[u8]) -> Result<f64, LineError> {
     std::str::from_utf8(field)
         .map_err(|_| LineError::Number(name))?
         .parse::<f64>()
+        .map_err(|_| LineError::Number(name))
+}
+
+fn whole_seconds(name: &'static str, field: &[u8]) -> Result<u64, LineError> {
+    std::str::from_utf8(field)
+        .map_err(|_| LineError::Number(name))?
+        .parse::<u64>()
         .map_err(|_| LineError::Number(name))
 }
 

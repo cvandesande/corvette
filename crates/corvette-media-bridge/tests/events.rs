@@ -772,3 +772,73 @@ async fn the_consumer_leaves_a_preexisting_open_row_open_until_the_sweep_passes_
     drop(sender);
     drop(handle);
 }
+
+#[tokio::test]
+async fn motion_ticks_write_one_row_per_camera_second_clamped_to_the_bridge_clock() {
+    use tokio::io::AsyncWriteExt;
+    let dir = temp_root("motion");
+    let socket = dir.join("events.sock");
+    let _ = std::fs::remove_file(&socket);
+    let (root, sender, handle) = rig("motion-index");
+    let writer = EventWriter::new(review_all());
+    tokio::spawn(corvette_media_bridge::event_consumer::run(
+        socket.clone(),
+        sender.clone(),
+        writer,
+        0,
+        || BASE_EPOCH_MS,
+        std::time::Duration::from_millis(50),
+    ));
+    let listener = tokio::net::UnixListener::bind(&socket).expect("listener binds");
+
+    let second = BASE_EPOCH_MS / 1_000;
+    let tick = |tick_second: i64| {
+        encode_track_line(&TrackFrame::Motion {
+            camera: "front".to_owned(),
+            second: u64::try_from(tick_second).expect("positive second"),
+        })
+    };
+    let mut bytes: Vec<u8> = Vec::new();
+    bytes.extend(tick(second));
+    bytes.extend(tick(second));
+    bytes.extend_from_slice(b"1\tm\tfront\tsoon\n");
+    bytes.extend_from_slice(b"1\tz\tfront\n");
+    bytes.extend(tick(second + 30));
+    bytes.extend(tick(second - 1));
+
+    let (mut stream, _) = listener.accept().await.expect("connection accepted");
+    stream.write_all(&bytes).await.expect("tick lines written");
+    stream.flush().await.expect("lines flushed");
+    drop(stream);
+    drop(listener);
+
+    let mut seconds: Vec<i64> = Vec::new();
+    for _ in 0..100 {
+        let raw = rusqlite::Connection::open_with_flags(
+            root.join("index.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("read-only reopen");
+        let mut statement = raw
+            .prepare("SELECT second FROM motion WHERE camera = 'front' ORDER BY second")
+            .expect("motion query");
+        seconds = statement
+            .query_map([], |row| row.get(0))
+            .expect("motion rows")
+            .collect::<Result<_, _>>()
+            .expect("motion second");
+        drop(statement);
+        drop(raw);
+        if seconds.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        seconds,
+        vec![second - 1, second],
+        "one row per camera and second, the future tick clamped onto the clock's second, the repeat inert, and the malformed and unknown lines skipped with the stream alive"
+    );
+    drop(sender);
+    drop(handle);
+}

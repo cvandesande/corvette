@@ -57,6 +57,7 @@ pub struct RegionStage {
     model: Shape,
     motion_enabled: bool,
     startup: bool,
+    motion_triggered: bool,
 }
 
 impl RegionStage {
@@ -76,6 +77,7 @@ impl RegionStage {
             model: settings.model,
             motion_enabled: settings.motion_enabled,
             startup: true,
+            motion_triggered: false,
         })
     }
 
@@ -107,6 +109,7 @@ impl RegionStage {
             Some(decision) => decision.boxes.into_iter().map(motion_region).collect(),
             None => Vec::new(),
         };
+        self.motion_triggered = !motion_boxes.is_empty();
         let startup = std::mem::replace(&mut self.startup, false);
         let regions = build_regions(
             self.frame,
@@ -126,6 +129,11 @@ impl RegionStage {
             });
         }
         Ok(tensors)
+    }
+
+    #[must_use]
+    pub const fn motion_triggered(&self) -> bool {
+        self.motion_triggered
     }
 }
 

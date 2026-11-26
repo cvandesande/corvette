@@ -127,6 +127,10 @@ pub enum IndexWrite {
     Piece(PieceRow),
     Event(EventWrite),
     Review(ReviewActivity),
+    Motion {
+        camera: String,
+        second: i64,
+    },
     Sweep {
         now_ms: i64,
         alert_labels: HashMap<String, Vec<String>>,
@@ -659,6 +663,16 @@ impl Index {
         Ok(ranges)
     }
 
+    fn insert_motion(&self, camera: &str, second: i64) -> Result<(), IndexError> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO motion (camera, second) VALUES (?1, ?2)",
+                params![camera, second],
+            )
+            .map(|_| ())
+            .map_err(|source| query("motion tick", camera, source))
+    }
+
     /// Applies one event row write; a refresh or close for a row that is missing or already closed changes nothing.
     ///
     /// # Errors
@@ -956,6 +970,11 @@ fn apply_write(index: &mut Index, write: IndexWrite) {
                 eprintln!("corvette-media-bridge: review write failed: {source}");
             }
         }
+        IndexWrite::Motion { camera, second } => {
+            if let Err(source) = index.insert_motion(&camera, second) {
+                eprintln!("corvette-media-bridge: motion tick failed: {source}");
+            }
+        }
         IndexWrite::Sweep {
             now_ms,
             alert_labels,
@@ -1098,4 +1117,29 @@ pub fn spawn_writer_with_expiry(
         index
     });
     (sender, handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_repeated_motion_tick_writes_the_row_once() {
+        let root =
+            std::env::temp_dir().join(format!("corvette-index-motion-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("temp root created");
+        let index = Index::open(&root.join("index.sqlite"), &[("front".to_owned(), 4u32)])
+            .expect("index opens");
+        index
+            .insert_motion("front", 1_780_000_000)
+            .expect("the first tick lands");
+        index
+            .insert_motion("front", 1_780_000_000)
+            .expect("the repeated tick stays inert");
+        let rows: i64 = index
+            .conn
+            .query_row("SELECT COUNT(*) FROM motion", [], |row| row.get(0))
+            .expect("motion readable");
+        assert_eq!(rows, 1, "the (camera, second) key dedupes the tick");
+    }
 }

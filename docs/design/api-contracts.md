@@ -829,8 +829,8 @@ are as above; `media.clip` is computed from the index's pieces with the same hal
 overlap and the same padding.
 
 The `corvette` motion source is Corvette's own detection state: a second counts when the
-detection motion stage triggered in it, and the index holds one tick per camera per
-second. Buckets use the same 30 s arithmetic and bounds as above; a bucket's `level` is
+detection motion stage triggered in it, whether or not the camera uses motion to pick
+detection regions, and the index holds one tick per camera per second. Buckets use the same 30 s arithmetic and bounds as above; a bucket's `level` is
 the largest number of motion seconds any one camera holds in that bucket, and `cameras`
 lists each camera with a motion second in the bucket, sorted. Because this is a measured
 source and Frigate's `recordings.motion` counts are the backing's, the same interval can
