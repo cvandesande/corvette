@@ -121,9 +121,9 @@ async fn send_frames_over(listener: &tokio::net::UnixListener, frames: &[TrackFr
 fn a_label_outside_detection_labels_never_opens_a_row() {
     let mut writer = EventWriter::new(review_person_car());
     let bird = TrackFrame::Update(track("bird", "1", Some(100.0), 100.0));
-    assert!(writer.apply(&bird, BASE_EPOCH_MS).is_empty());
+    assert!(writer.apply(&bird, BASE_EPOCH_MS).0.is_empty());
     let person = TrackFrame::Update(track("person", "2", Some(100.0), 100.0));
-    assert_eq!(writer.apply(&person, BASE_EPOCH_MS).len(), 1);
+    assert_eq!(writer.apply(&person, BASE_EPOCH_MS).0.len(), 1);
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn a_never_moved_track_has_no_row_and_a_moved_track_has_one() {
         TrackFrame::Update(track("person", "mover", Some(1200.0), 1300.0)),
     ];
     for frame in frames {
-        for write in writer.apply(&frame, BASE_EPOCH_MS) {
+        for write in writer.apply(&frame, BASE_EPOCH_MS).0 {
             sender.send(IndexWrite::Event(write)).expect("write queued");
         }
     }
@@ -156,7 +156,7 @@ fn two_updates_inside_five_seconds_write_once_and_past_five_seconds_write_again(
     let mut writer = EventWriter::new(review_all());
     let mut write_at = |last_seen: f64, now_ms: i64| {
         let frame = TrackFrame::Update(track("person", "7", Some(0.0), last_seen));
-        for write in writer.apply(&frame, now_ms) {
+        for write in writer.apply(&frame, now_ms).0 {
             sender.send(IndexWrite::Event(write)).expect("queued");
         }
     };
@@ -182,19 +182,24 @@ fn two_updates_inside_five_seconds_write_once_and_past_five_seconds_write_again(
 fn an_end_line_sets_end_ts_on_the_open_row() {
     let (root, sender, handle) = rig("end");
     let mut writer = EventWriter::new(review_all());
-    for write in writer.apply(
-        &TrackFrame::Update(track("person", "7", Some(10.0), 10.0)),
-        BASE_EPOCH_MS,
-    ) {
+    for write in writer
+        .apply(
+            &TrackFrame::Update(track("person", "7", Some(10.0), 10.0)),
+            BASE_EPOCH_MS,
+        )
+        .0
+    {
         sender.send(IndexWrite::Event(write)).expect("open queued");
     }
-    let closes = writer.apply(
-        &TrackFrame::End {
-            camera: "front".to_owned(),
-            track_id: "7".to_owned(),
-        },
-        BASE_EPOCH_MS + 2_000,
-    );
+    let closes = writer
+        .apply(
+            &TrackFrame::End {
+                camera: "front".to_owned(),
+                track_id: "7".to_owned(),
+            },
+            BASE_EPOCH_MS + 2_000,
+        )
+        .0;
     assert_eq!(closes.len(), 1);
     for write in closes {
         sender.send(IndexWrite::Event(write)).expect("close queued");
@@ -508,27 +513,36 @@ async fn fixture_lines_over_a_socket_open_filter_and_close_events() {
 fn a_track_id_reused_after_its_close_gets_a_second_row() {
     let (root, sender, handle) = rig("reuse-closed");
     let mut writer = EventWriter::new(review_all());
-    for write in writer.apply(
-        &TrackFrame::Update(track("person", "7", Some(10.0), 10.0)),
-        BASE_EPOCH_MS,
-    ) {
+    for write in writer
+        .apply(
+            &TrackFrame::Update(track("person", "7", Some(10.0), 10.0)),
+            BASE_EPOCH_MS,
+        )
+        .0
+    {
         sender
             .send(IndexWrite::Event(write))
             .expect("first open queued");
     }
-    for write in writer.apply(
-        &TrackFrame::End {
-            camera: "front".to_owned(),
-            track_id: "7".to_owned(),
-        },
-        BASE_EPOCH_MS + 2_000,
-    ) {
+    for write in writer
+        .apply(
+            &TrackFrame::End {
+                camera: "front".to_owned(),
+                track_id: "7".to_owned(),
+            },
+            BASE_EPOCH_MS + 2_000,
+        )
+        .0
+    {
         sender.send(IndexWrite::Event(write)).expect("close queued");
     }
-    for write in writer.apply(
-        &TrackFrame::Update(track("person", "7", Some(90.0), 90.0)),
-        BASE_EPOCH_MS + 60_000,
-    ) {
+    for write in writer
+        .apply(
+            &TrackFrame::Update(track("person", "7", Some(90.0), 90.0)),
+            BASE_EPOCH_MS + 60_000,
+        )
+        .0
+    {
         sender
             .send(IndexWrite::Event(write))
             .expect("reused open queued");
@@ -554,18 +568,24 @@ fn a_track_id_reused_after_its_close_gets_a_second_row() {
 fn a_reused_track_id_opens_its_own_row_while_the_lost_end_row_waits_for_the_sweep() {
     let (root, sender, handle) = rig("reuse-open");
     let mut writer = EventWriter::new(review_all());
-    for write in writer.apply(
-        &TrackFrame::Update(track("person", "7", Some(10.0), 10.0)),
-        10_000,
-    ) {
+    for write in writer
+        .apply(
+            &TrackFrame::Update(track("person", "7", Some(10.0), 10.0)),
+            10_000,
+        )
+        .0
+    {
         sender
             .send(IndexWrite::Event(write))
             .expect("first open queued");
     }
-    for write in writer.apply(
-        &TrackFrame::Update(track("person", "7", Some(20.0), 20.0)),
-        45_000,
-    ) {
+    for write in writer
+        .apply(
+            &TrackFrame::Update(track("person", "7", Some(20.0), 20.0)),
+            45_000,
+        )
+        .0
+    {
         sender
             .send(IndexWrite::Event(write))
             .expect("the id reuse opened a second row");

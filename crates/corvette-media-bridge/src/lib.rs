@@ -13,6 +13,7 @@ pub mod record_role;
 pub mod recorder;
 pub mod recovery;
 pub mod restream_provider;
+pub mod reviews;
 pub mod rtp_clock;
 pub mod supervise;
 pub mod utc;

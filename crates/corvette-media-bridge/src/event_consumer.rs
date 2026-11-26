@@ -1,6 +1,6 @@
 //! Persists the detection service's track lifecycle lines into the recording index, dialed from an environment-named socket path and kept alive across disconnects with backoff.
 
-use crate::index::{EventWrite, IndexWrite};
+use crate::index::{EventWrite, IndexWrite, ReviewActivity};
 use crate::record_config::Review;
 use crate::supervise::log_event;
 use corvette_detect_proto::{TrackFrame, TrackInfo, decode_track_line};
@@ -35,6 +35,7 @@ fn opens_event(review: &Review, label: &str) -> bool {
 struct OpenTrack {
     start_ts: i64,
     last_write_ms: i64,
+    is_alert: bool,
 }
 
 #[derive(Debug)]
@@ -52,20 +53,31 @@ impl EventWriter {
         }
     }
 
-    /// The writes this line causes, timestamped at `now_ms` from the caller's clock; a line for an unseen or throttled track yields none.
-    pub fn apply(&mut self, frame: &TrackFrame, now_ms: i64) -> Vec<EventWrite> {
+    /// The event writes and the review activity this line causes at `now_ms` from the caller's clock; a line time ahead of that clock is used as that clock's time, and a line for an unseen or throttled track yields neither.
+    pub fn apply(
+        &mut self,
+        frame: &TrackFrame,
+        now_ms: i64,
+    ) -> (Vec<EventWrite>, Option<ReviewActivity>) {
         match frame {
             TrackFrame::Start(info) | TrackFrame::Update(info) => self.info(info, now_ms),
             TrackFrame::End { camera, track_id } => self
                 .last_write
                 .remove(&(camera.clone(), track_id.clone()))
-                .map_or_else(Vec::new, |open| {
-                    vec![EventWrite::Close {
-                        camera: camera.clone(),
-                        track_id: track_id.clone(),
-                        start_ts: open.start_ts,
-                        end_ts: now_ms,
-                    }]
+                .map_or((Vec::new(), None), |open| {
+                    (
+                        vec![EventWrite::Close {
+                            camera: camera.clone(),
+                            track_id: track_id.clone(),
+                            start_ts: open.start_ts,
+                            end_ts: now_ms,
+                        }],
+                        Some(ReviewActivity {
+                            camera: camera.clone(),
+                            activity_ts: now_ms,
+                            is_alert: open.is_alert,
+                        }),
+                    )
                 }),
         }
     }
@@ -83,14 +95,15 @@ impl EventWriter {
         }
     }
 
-    fn info(&mut self, info: &TrackInfo, now_ms: i64) -> Vec<EventWrite> {
+    fn info(&mut self, info: &TrackInfo, now_ms: i64) -> (Vec<EventWrite>, Option<ReviewActivity>) {
         let fallback = Review::default();
         let review = self.review.get(&info.camera).unwrap_or(&fallback);
+        let is_alert = review.alert_labels.contains(&info.label);
         if !opens_event(review, &info.label) {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         let Some(first_motion) = info.first_motion else {
-            return Vec::new();
+            return (Vec::new(), None);
         };
         if !(first_motion.is_finite() && info.last_seen.is_finite()) {
             log_event(
@@ -98,7 +111,7 @@ impl EventWriter {
                 "track-events-time",
                 "non-finite time; line skipped",
             );
-            return Vec::new();
+            return (Vec::new(), None);
         }
         let Ok(box_json) = serde_json::to_string(&info.bounds) else {
             log_event(
@@ -106,7 +119,7 @@ impl EventWriter {
                 "track-events-box",
                 "non-finite bounds; line skipped",
             );
-            return Vec::new();
+            return (Vec::new(), None);
         };
         let Ok(zones_json) = serde_json::to_string(&info.zones) else {
             log_event(
@@ -114,42 +127,57 @@ impl EventWriter {
                 "track-events-zones",
                 "zones did not encode; line skipped",
             );
-            return Vec::new();
+            return (Vec::new(), None);
         };
         let key = (info.camera.clone(), info.track_id.clone());
         let start_ts = millis(first_motion);
-        let last_motion_ts = millis(info.last_seen);
+        let last_motion_ts = millis(info.last_seen).min(now_ms);
         let open = OpenTrack {
             start_ts,
             last_write_ms: now_ms,
+            is_alert,
         };
         match self.last_write.get(&key).copied() {
             Some(previous) if previous.start_ts == start_ts => {
                 if now_ms - previous.last_write_ms < EVENT_ROW_REFRESH_MS {
-                    return Vec::new();
+                    return (Vec::new(), None);
                 }
                 self.last_write.insert(key, open);
-                vec![EventWrite::Refresh {
-                    camera: info.camera.clone(),
-                    track_id: info.track_id.clone(),
-                    start_ts,
-                    last_motion_ts,
-                    box_json,
-                    zones_json,
-                }]
+                (
+                    vec![EventWrite::Refresh {
+                        camera: info.camera.clone(),
+                        track_id: info.track_id.clone(),
+                        start_ts,
+                        last_motion_ts,
+                        box_json,
+                        zones_json,
+                    }],
+                    Some(ReviewActivity {
+                        camera: info.camera.clone(),
+                        activity_ts: last_motion_ts,
+                        is_alert,
+                    }),
+                )
             }
             Some(_) | None => {
                 self.last_write.insert(key, open);
-                vec![EventWrite::Open {
-                    camera: info.camera.clone(),
-                    track_id: info.track_id.clone(),
-                    label: info.label.clone(),
-                    start_ts,
-                    first_motion_ts: start_ts,
-                    last_motion_ts,
-                    box_json,
-                    zones_json,
-                }]
+                (
+                    vec![EventWrite::Open {
+                        camera: info.camera.clone(),
+                        track_id: info.track_id.clone(),
+                        label: info.label.clone(),
+                        start_ts,
+                        first_motion_ts: start_ts,
+                        last_motion_ts,
+                        box_json,
+                        zones_json,
+                    }],
+                    Some(ReviewActivity {
+                        camera: info.camera.clone(),
+                        activity_ts: last_motion_ts,
+                        is_alert,
+                    }),
+                )
             }
         }
     }
@@ -194,9 +222,13 @@ async fn pump(
                             match decode_track_line(&line[..line.len() - 1]) {
                                 Err(source) => log_event("events", "track-events-line", source),
                                 Ok(frame) => {
-                                    let line_writes = writer.apply(&frame, clock());
+                                    let (line_writes, review_activity) =
+                                        writer.apply(&frame, clock());
                                     for event in line_writes {
                                         forward(sender, IndexWrite::Event(event))?;
+                                    }
+                                    if let Some(activity) = review_activity {
+                                        forward(sender, IndexWrite::Review(activity))?;
                                     }
                                 }
                             }

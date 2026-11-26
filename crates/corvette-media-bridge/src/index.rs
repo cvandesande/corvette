@@ -1,5 +1,6 @@
 //! The recording index: the sole `SQLite` writer, the per-camera sequence counter, and the range queries playback asks.
 
+use crate::reviews;
 use crate::supervise::log_event;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::collections::HashMap;
@@ -43,6 +44,15 @@ CREATE TABLE IF NOT EXISTS events (
     zones_json TEXT NOT NULL,
     UNIQUE(camera, track_id, start_ts)
 );
+CREATE TABLE IF NOT EXISTS reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera TEXT NOT NULL,
+    severity TEXT NOT NULL CHECK (severity IN ('alert', 'detection')),
+    start_ts INTEGER NOT NULL,
+    end_ts INTEGER,
+    last_activity_ts INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS reviews_camera_end ON reviews(camera, end_ts);
 CREATE TABLE IF NOT EXISTS motion (
     camera TEXT NOT NULL,
     second INTEGER NOT NULL,
@@ -91,10 +101,18 @@ pub enum EventWrite {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct ReviewActivity {
+    pub camera: String,
+    pub activity_ts: i64,
+    pub is_alert: bool,
+}
+
 #[derive(Debug)]
 pub enum IndexWrite {
     Piece(PieceRow),
     Event(EventWrite),
+    Review(ReviewActivity),
     Sweep {
         now_ms: i64,
         alert_labels: HashMap<String, Vec<String>>,
@@ -233,6 +251,20 @@ fn int_column(
         operation,
         camera: camera.to_owned(),
     })
+}
+
+fn insert_review(
+    conn: &Connection,
+    camera: &str,
+    severity: &str,
+    at_ms: i64,
+) -> Result<(), IndexError> {
+    conn.execute(
+        "INSERT INTO reviews (camera, severity, start_ts, last_activity_ts) VALUES (?1, ?2, ?3, ?3)",
+        params![camera, severity, at_ms],
+    )
+    .map(|_| ())
+    .map_err(|source| query("review open", camera, source))
 }
 
 fn piece_seconds_key(camera: &str) -> String {
@@ -606,7 +638,7 @@ impl Index {
                 box_json,
                 zones_json,
             } => self.conn.execute(
-                "UPDATE events SET last_motion_ts = ?4, box_json = ?5, zones_json = ?6
+                "UPDATE events SET last_motion_ts = MAX(last_motion_ts, ?4), box_json = ?5, zones_json = ?6
                  WHERE camera = ?1 AND track_id = ?2 AND start_ts = ?3 AND end_ts IS NULL",
                 params![camera, track_id, start_ts, last_motion_ts, box_json, zones_json],
             ),
@@ -686,6 +718,106 @@ impl Index {
         Ok(closed)
     }
 
+    /// Applies one event activity to the camera's review aggregation: extend the open item, upgrade and extend, close it and open a new one, or open the first item.
+    ///
+    /// # Errors
+    pub fn apply_review_activity(&mut self, activity: &ReviewActivity) -> Result<(), IndexError> {
+        let open = self
+            .conn
+            .query_row(
+                "SELECT id, severity, last_activity_ts FROM reviews WHERE camera = ?1 AND end_ts IS NULL",
+                params![activity.camera],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
+            )
+            .optional()
+            .map_err(|source| query("review lookup", &activity.camera, source))?;
+        let severity = reviews::severity_for(activity.is_alert);
+        match open {
+            None => insert_review(&self.conn, &activity.camera, severity, activity.activity_ts),
+            Some((id, item_severity, last_activity_ts)) => {
+                let open_item = reviews::OpenReview {
+                    id,
+                    severity: item_severity,
+                    last_activity_ts,
+                };
+                match reviews::on_open(&open_item, activity.activity_ts, activity.is_alert) {
+                    reviews::AggregationAction::Extend { upgrade_to_alert } => {
+                        let statement = if upgrade_to_alert {
+                            "UPDATE reviews SET severity = 'alert', last_activity_ts = MAX(last_activity_ts, ?2) WHERE id = ?1 AND end_ts IS NULL"
+                        } else {
+                            "UPDATE reviews SET last_activity_ts = MAX(last_activity_ts, ?2) WHERE id = ?1 AND end_ts IS NULL"
+                        };
+                        self.conn
+                            .execute(statement, params![id, activity.activity_ts])
+                            .map(|_| ())
+                            .map_err(|source| query("review extend", &activity.camera, source))
+                    }
+                    reviews::AggregationAction::CloseThenOpen { closed_end_ts } => {
+                        let tx = self
+                            .conn
+                            .transaction()
+                            .map_err(|source| query("review split", &activity.camera, source))?;
+                        tx.execute(
+                            "UPDATE reviews SET end_ts = ?2 WHERE id = ?1 AND end_ts IS NULL",
+                            params![id, closed_end_ts],
+                        )
+                        .map_err(|source| query("review split", &activity.camera, source))?;
+                        insert_review(&tx, &activity.camera, severity, activity.activity_ts)?;
+                        tx.commit()
+                            .map_err(|source| query("review split", &activity.camera, source))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Closes open review items whose severity cutoff has strictly passed before `now_ms`, each at its own rule instant, and returns how many closed.
+    ///
+    /// # Errors
+    pub fn close_stale_reviews(&mut self, now_ms: i64) -> Result<usize, IndexError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id, severity, last_activity_ts FROM reviews WHERE end_ts IS NULL")
+            .map_err(|source| query("review sweep select", "", source))?;
+        let mut rows = statement
+            .query([])
+            .map_err(|source| query("review sweep select", "", source))?;
+        let mut closing = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|source| query("review sweep select", "", source))?
+        {
+            let id: i64 = row
+                .get(0)
+                .map_err(|source| query("review sweep select", "", source))?;
+            let severity: String = row
+                .get(1)
+                .map_err(|source| query("review sweep select", "", source))?;
+            let last_activity_ts: i64 = row
+                .get(2)
+                .map_err(|source| query("review sweep select", "", source))?;
+            let open_item = reviews::OpenReview {
+                id,
+                severity,
+                last_activity_ts,
+            };
+            if let Some(end_ts) = reviews::sweep_close_ts(&open_item, now_ms) {
+                closing.push((id, end_ts));
+            }
+        }
+        let mut closed = 0;
+        for (id, end_ts) in closing {
+            closed += self
+                .conn
+                .execute(
+                    "UPDATE reviews SET end_ts = ?2 WHERE id = ?1 AND end_ts IS NULL",
+                    params![id, end_ts],
+                )
+                .map_err(|source| query("review sweep close", "", source))?;
+        }
+        Ok(closed)
+    }
+
     /// The count of events still open, the restart recovery number.
     ///
     /// # Errors
@@ -761,14 +893,30 @@ fn apply_write(index: &mut Index, write: IndexWrite) {
                 eprintln!("corvette-media-bridge: event write failed: {source}");
             }
         }
+        IndexWrite::Review(activity) => {
+            if let Err(source) = index.apply_review_activity(&activity) {
+                eprintln!("corvette-media-bridge: review write failed: {source}");
+            }
+        }
         IndexWrite::Sweep {
             now_ms,
             alert_labels,
-        } => match index.close_stale_events(now_ms, &alert_labels) {
-            Err(source) => eprintln!("corvette-media-bridge: event cutoff sweep failed: {source}"),
-            Ok(0) => {}
-            Ok(closed) => log_event("events", "cutoff-close", format_args!("closed={closed}")),
-        },
+        } => {
+            match index.close_stale_events(now_ms, &alert_labels) {
+                Err(source) => {
+                    eprintln!("corvette-media-bridge: event cutoff sweep failed: {source}");
+                }
+                Ok(0) => {}
+                Ok(closed) => log_event("events", "cutoff-close", format_args!("closed={closed}")),
+            }
+            match index.close_stale_reviews(now_ms) {
+                Err(source) => {
+                    eprintln!("corvette-media-bridge: review cutoff sweep failed: {source}");
+                }
+                Ok(0) => {}
+                Ok(closed) => log_event("reviews", "cutoff-close", format_args!("closed={closed}")),
+            }
+        }
     }
 }
 
