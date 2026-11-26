@@ -38,6 +38,7 @@ impl CameraSpec {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub rtsp_bind_addr: SocketAddr,
     pub fmp4_ws_bind_addr: SocketAddr,
@@ -135,33 +136,29 @@ mod tests {
         assert_eq!(config.cameras[0].channel_capacity, None);
     }
 
-    // The deployed config secret still carries a `moq` section.
     #[test]
-    fn accepts_a_config_that_still_carries_the_old_moq_section() {
+    fn rejects_an_unknown_top_level_key() {
         let json = r#"{
             "rtsp_bind_addr": "127.0.0.1:8554",
             "fmp4_ws_bind_addr": "127.0.0.1:8555",
             "hls_bind_addr": "127.0.0.1:8556",
-            "moq": {
-                "relay_url": "https://127.0.0.1:4443/anon",
-                "tls_disable_verify": true
-            },
+            "retired_section": {},
             "cameras": [
-                {
-                    "name": "front_door",
-                    "host": "192.168.1.50",
-                    "port": 554,
-                    "path": "/a"
-                }
+                { "name": "front_door", "host": "192.168.1.50", "port": 554, "path": "/a" }
             ]
         }"#;
-        let name = format!("config-test-old-moq-{}", std::process::id());
-        let dir = std::env::temp_dir().join(name);
+        let dir =
+            std::env::temp_dir().join(format!("g1-config-test-unknown-{}", std::process::id()));
         std::fs::write(&dir, json).expect("write fixture");
-        let config = load_from_path(&dir).expect("old moq section loads");
+        let err = load_from_path(&dir).expect_err("unknown key must be rejected");
         std::fs::remove_file(&dir).ok();
 
-        assert_eq!(config.cameras.len(), 1);
+        match err {
+            ConfigError::Parse { source, .. } => {
+                assert!(source.to_string().contains("unknown field"));
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
     }
 
     #[test]
