@@ -1,6 +1,7 @@
 .PHONY: check check-cpp check-nginx-parity check-nix check-no-go2rtc check-no-mutation \
 	check-no-trailing-slash-hrefs check-oci-layout check-progress check-rust check-standards \
-	check-standards-range check-shell check-site-shape check-ui check-whitespace serve-ui
+	check-standards-range check-shell check-site-shape check-ui check-whitespace \
+	issue-staleness serve-ui
 
 check: check-rust check-cpp check-shell check-nix check-ui check-whitespace check-site-shape \
 	check-nginx-parity check-no-mutation check-no-go2rtc check-no-trailing-slash-hrefs \
@@ -71,6 +72,9 @@ check-oci-layout:
 
 check-whitespace:
 	git diff --check
+
+issue-staleness:
+	./scripts/issue_staleness.sh
 
 serve-ui:
 	./scripts/serve_ui.sh
