@@ -1,4 +1,4 @@
-use corvette_media_bridge::record_config::{self, CAMERA_TOML_PATH_ENV_VAR};
+use corvette_media_bridge::record_config::{self, CAMERA_TOML_PATH_ENV_VAR, RecordConfigError};
 use std::path::PathBuf;
 
 #[test]
@@ -172,4 +172,102 @@ fn load_from_path_reads_a_file_and_names_it_when_missing() {
         .expect_err("a missing file is an error")
         .to_string();
     assert!(error.contains(&missing.display().to_string()));
+}
+
+#[test]
+fn a_camera_without_a_review_section_gets_the_default_alert_labels() {
+    let text = "[[cameras]]\nname = \"front\"\n\n[cameras.source.main]\nhost = \"127.0.0.1\"\n\n[storage.block]\npath = \"/srv/corvette\"\n";
+    let config = record_config::parse(text).expect("defaults parse");
+
+    let front = &config.cameras[0];
+    assert_eq!(
+        front.review.alert_labels,
+        vec!["person".to_owned(), "car".to_owned()]
+    );
+    assert!(
+        front.review.detection_labels.is_none(),
+        "an absent detection_labels means every label opens events"
+    );
+}
+
+#[test]
+fn review_lists_parse_and_an_absent_detection_list_stays_absent() {
+    let text = r#"
+[[cameras]]
+name = "front"
+
+[cameras.source.main]
+host = "127.0.0.1"
+
+[cameras.review]
+alert_labels = ["person", "dog"]
+
+[[cameras]]
+name = "back"
+
+[cameras.review]
+detection_labels = ["cat"]
+
+[storage.block]
+path = "/srv/corvette"
+"#;
+    let config = record_config::parse(text).expect("review sections parse");
+
+    let front = &config.cameras[0];
+    assert_eq!(
+        front.review.alert_labels,
+        vec!["person".to_owned(), "dog".to_owned()]
+    );
+    assert!(front.review.detection_labels.is_none());
+    let back = &config.cameras[1];
+    assert_eq!(
+        back.review.alert_labels,
+        vec!["person".to_owned(), "car".to_owned()],
+        "the camera with only detection_labels keeps the alert defaults"
+    );
+    assert_eq!(back.review.detection_labels, Some(vec!["cat".to_owned()]));
+}
+
+#[test]
+fn bad_review_lists_are_refused_naming_camera_and_key() {
+    let refusals: &[(&str, &str, &str)] = &[
+        (
+            "[[cameras]]\nname = \"front\"\n[cameras.review]\nalert_labels = \"person\"\n",
+            "front",
+            "review.alert_labels",
+        ),
+        (
+            "[[cameras]]\nname = \"front\"\n[cameras.review]\nalert_labels = [\"person\", 3]\n",
+            "front",
+            "review.alert_labels",
+        ),
+        (
+            "[[cameras]]\nname = \"front\"\n[cameras.review]\nalert_labels = [\"\", \"person\"]\n",
+            "front",
+            "review.alert_labels",
+        ),
+        (
+            "[[cameras]]\nname = \"front\"\n[cameras.review]\ndetection_labels = [4]\n",
+            "front",
+            "review.detection_labels",
+        ),
+        (
+            "[[cameras]]\nname = \"front\"\n[cameras.review]\ndetection_labels = [\"\"]\n",
+            "front",
+            "review.detection_labels",
+        ),
+    ];
+    for (text, camera, key) in refusals {
+        let error = record_config::parse(text).expect_err("expected a refusal");
+        let RecordConfigError::Field {
+            camera: named_camera,
+            key: named_key,
+            ..
+        } = error
+        else {
+            panic!("expected a field refusal for {text}, got {error}");
+        };
+        assert_eq!(named_camera, *camera);
+        assert_eq!(named_key, *key);
+    }
 }

@@ -1,8 +1,9 @@
 //! Turns the camera TOML's recording intent into a running recorder.
 
+use crate::event_consumer::{self, EventWriter};
 use crate::expiry::{self, ExpiryError};
-use crate::index::{self, Index, IndexError, PIECE_CHANNEL_CAPACITY, PieceRow, SeqAllocator};
-use crate::record_config::RecordConfig;
+use crate::index::{self, Index, IndexError, IndexWrite, PIECE_CHANNEL_CAPACITY, SeqAllocator};
+use crate::record_config::{RecordConfig, Review};
 use crate::recorder::{PieceRecorder, RecorderSettings};
 use crate::recovery::{self, RecoveryError};
 use crate::supervise::{self, Supervised, log_event};
@@ -68,10 +69,31 @@ impl std::error::Error for RecordSetupError {
 #[derive(Debug)]
 pub struct RecordingRuntime {
     seqs: SeqAllocator,
-    rows: SyncSender<PieceRow>,
+    rows: SyncSender<IndexWrite>,
     writer: JoinHandle<Index>,
     root: PathBuf,
     piece_seconds: HashMap<String, u32>,
+    review: HashMap<String, Review>,
+    open_events: i64,
+}
+
+impl RecordingRuntime {
+    /// Starts the track-events consumer writing into this runtime's index writer; the contract comment lives on [`event_consumer::run`].
+    pub fn spawn_event_consumer(self: &Arc<Self>, socket: std::path::PathBuf) {
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            let writer = EventWriter::new(runtime.review.clone());
+            event_consumer::run(
+                socket,
+                runtime.rows.clone(),
+                writer,
+                runtime.open_events,
+                PieceRecorder::wall_clock_ms,
+                event_consumer::EVENT_RECONNECT_BACKOFF,
+            )
+            .await;
+        });
+    }
 }
 
 impl RecordingRuntime {
@@ -191,6 +213,14 @@ pub fn prepare(record: &RecordConfig) -> Result<Option<RecordingRuntime>, Record
         expiry_report.refused_cameras,
         expiry_report.step_failures.iter().sum::<usize>()
     );
+    let review: HashMap<String, Review> = record
+        .cameras
+        .iter()
+        .map(|camera| (camera.name.clone(), camera.review.clone()))
+        .collect();
+    let open_events = index
+        .open_event_count()
+        .map_err(|source| RecordSetupError::Index { source })?;
     let seqs = index.allocator();
     let (rows, writer) = index::spawn_writer_with_expiry(
         index,
@@ -210,6 +240,8 @@ pub fn prepare(record: &RecordConfig) -> Result<Option<RecordingRuntime>, Record
         writer,
         root,
         piece_seconds: cameras.into_iter().collect(),
+        review,
+        open_events,
     }))
 }
 

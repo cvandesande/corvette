@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 corvette-rtsp-client = { path = "../corvette-rtsp-client" }
+corvette-detect-proto = { path = "../corvette-detect-proto" }
 rtsp-restream = { path = "../rtsp-restream" }
 tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "sync", "time", "io-util", "macros", "signal"] }
 bytes = "1.12.1"

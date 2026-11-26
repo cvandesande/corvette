@@ -49,6 +49,7 @@ fn camera_record(name: &str, record_enabled: bool, piece_seconds: u32) -> Camera
             main: true,
             sub: false,
         },
+        review: corvette_media_bridge::record_config::Review::default(),
     }
 }
 

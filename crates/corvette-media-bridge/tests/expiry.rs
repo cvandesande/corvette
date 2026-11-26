@@ -515,7 +515,7 @@ fn the_writer_thread_runs_the_expiry_pass_when_the_clock_passes_the_hour() {
     let (sender, writer) = corvette_media_bridge::index::spawn_writer_with_expiry(index, 0, wiring);
 
     sender
-        .send(PieceRow {
+        .send(corvette_media_bridge::index::IndexWrite::Piece(PieceRow {
             camera: "front".to_owned(),
             seq: 4,
             start_ms: clock_start,
@@ -524,14 +524,14 @@ fn the_writer_thread_runs_the_expiry_pass_when_the_clock_passes_the_hour() {
             path: "recordings/front/not-a-file-yet.mp4".to_owned(),
             size_bytes: 0,
             codec: "h264".to_owned(),
-        })
+        }))
         .expect("the first wake row is accepted");
     clock.store(
         clock_start + 3 * corvette_media_bridge::index::EXPIRY_PASS_INTERVAL_MS,
         Ordering::SeqCst,
     );
     sender
-        .send(PieceRow {
+        .send(corvette_media_bridge::index::IndexWrite::Piece(PieceRow {
             camera: "front".to_owned(),
             seq: 5,
             start_ms: clock_start + DAY,
@@ -540,7 +540,7 @@ fn the_writer_thread_runs_the_expiry_pass_when_the_clock_passes_the_hour() {
             path: "recordings/front/not-a-file-either.mp4".to_owned(),
             size_bytes: 0,
             codec: "h264".to_owned(),
-        })
+        }))
         .expect("the second wake row is accepted");
 
     for _ in 0..400 {

@@ -1,4 +1,6 @@
-use corvette_media_bridge::index::{EXPIRY_PASS_INTERVAL_MS, ExpiryWiring, Index, PieceRow};
+use corvette_media_bridge::index::{
+    EXPIRY_PASS_INTERVAL_MS, ExpiryWiring, Index, IndexWrite, PieceRow,
+};
 use corvette_media_bridge::utc::utc_parts;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -69,8 +71,8 @@ fn seed_piece(
         .expect("row inserted");
 }
 
-fn wake_row(seq: u64) -> PieceRow {
-    PieceRow {
+fn wake_row(seq: u64) -> IndexWrite {
+    IndexWrite::Piece(PieceRow {
         camera: "front".to_owned(),
         seq,
         start_ms: START,
@@ -79,7 +81,7 @@ fn wake_row(seq: u64) -> PieceRow {
         path: format!("recordings/front/2026-10-01/00/wake-{seq}.mp4"),
         size_bytes: 0,
         codec: "h264".to_owned(),
-    }
+    })
 }
 
 fn file_present(root: &Path, start_ms: i64, seq: u64) -> bool {

@@ -1,7 +1,7 @@
 //! What the recorder owes the recording tree: `.part`-then-rename pieces with
 //! contiguous rows, and recovery-compatible cleanup when a piece never closes.
 
-use corvette_media_bridge::index::{Index, PieceRow};
+use corvette_media_bridge::index::{Index, IndexWrite, PieceRow};
 use corvette_media_bridge::piece_walk;
 use corvette_media_bridge::recorder::{PieceRecorder, RecorderSettings};
 use corvette_media_bridge::recovery;
@@ -46,7 +46,7 @@ fn rig(
     camera: &str,
     piece_seconds: u32,
     channel_capacity: usize,
-) -> (PathBuf, PieceRecorder, Receiver<PieceRow>) {
+) -> (PathBuf, PieceRecorder, Receiver<IndexWrite>) {
     let root =
         std::env::temp_dir().join(format!("corvette-recorder-{test}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -92,10 +92,12 @@ fn push_video(recorder: &mut PieceRecorder, video_frames: usize, keyframe_every:
     }
 }
 
-fn drain(rows: &Receiver<PieceRow>) -> Vec<PieceRow> {
+fn drain(rows: &Receiver<IndexWrite>) -> Vec<PieceRow> {
     let mut received = Vec::new();
-    while let Ok(row) = rows.try_recv() {
-        received.push(row);
+    while let Ok(write) = rows.try_recv() {
+        if let IndexWrite::Piece(row) = write {
+            received.push(row);
+        }
     }
     received
 }

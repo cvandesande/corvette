@@ -11,6 +11,14 @@ const DEFAULT_PIECE_SECONDS: u32 = 4;
 const DEFAULT_RETENTION_DAYS: u32 = 7;
 const MAX_PIECE_SECONDS: u32 = 60;
 const MAX_RETENTION_DAYS: u32 = 3650;
+pub const DEFAULT_ALERT_LABELS: [&str; 2] = ["person", "car"];
+
+fn default_alert_labels() -> Vec<String> {
+    DEFAULT_ALERT_LABELS
+        .iter()
+        .map(|label| (*label).to_owned())
+        .collect()
+}
 
 #[derive(Debug, Clone)]
 pub struct RecordConfig {
@@ -33,6 +41,23 @@ pub struct CameraRecord {
     pub piece_seconds: u32,
     pub retention_days: u32,
     pub streams: Streams,
+    pub review: Review,
+}
+
+/// Which labels a camera turns into events and which of those count as alerts.
+#[derive(Debug, Clone)]
+pub struct Review {
+    pub alert_labels: Vec<String>,
+    pub detection_labels: Option<Vec<String>>,
+}
+
+impl Default for Review {
+    fn default() -> Self {
+        Self {
+            alert_labels: default_alert_labels(),
+            detection_labels: None,
+        }
+    }
 }
 
 impl CameraRecord {
@@ -243,6 +268,9 @@ fn camera_from(
                 )
             })?,
     };
+    let alert_labels =
+        string_array_at(table, "review.alert_labels", &name)?.unwrap_or_else(default_alert_labels);
+    let detection_labels = string_array_at(table, "review.detection_labels", &name)?;
     Ok(CameraRecord {
         name,
         enabled,
@@ -252,6 +280,10 @@ fn camera_from(
         streams: Streams {
             main: has_stream(table, "main"),
             sub: has_stream(table, "sub"),
+        },
+        review: Review {
+            alert_labels,
+            detection_labels,
         },
     })
 }
@@ -301,6 +333,30 @@ fn int_at(table: &Table, path: &str, camera: &str) -> Result<Option<i64>, Record
             })?))
         }
     }
+}
+
+fn string_array_at(
+    table: &Table,
+    path: &str,
+    camera: &str,
+) -> Result<Option<Vec<String>>, RecordConfigError> {
+    let Some(item) = lookup(table, path, camera)? else {
+        return Ok(None);
+    };
+    let array = item
+        .as_array()
+        .ok_or_else(|| field(camera, path, "expected an array of strings"))?;
+    let mut values = Vec::with_capacity(array.len());
+    for value in array {
+        let value = value
+            .as_str()
+            .ok_or_else(|| field(camera, path, "expected an array of strings"))?;
+        if value.is_empty() {
+            return Err(field(camera, path, "expected non-empty strings"));
+        }
+        values.push(value.to_owned());
+    }
+    Ok(Some(values))
 }
 
 fn has_stream(camera: &Table, stream: &str) -> bool {

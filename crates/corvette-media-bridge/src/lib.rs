@@ -1,5 +1,6 @@
 pub mod config;
 pub mod disk_free;
+pub mod event_consumer;
 pub mod expiry;
 pub mod fmp4;
 pub mod hls;
@@ -118,6 +119,17 @@ pub async fn start_with_recording(
             hls_segment,
             record,
         });
+    }
+
+    if let Some(socket) = std::env::var_os(event_consumer::TRACK_EVENTS_SOCKET_ENV_VAR) {
+        match &recording {
+            Some(runtime) => runtime.spawn_event_consumer(std::path::PathBuf::from(socket)),
+            None => log_event(
+                "events",
+                "track-events-socket-unbacked",
+                "no recording index to write events to",
+            ),
+        }
     }
 
     let rtsp_server = rtsp_restream::RtspServer::bind(config.rtsp_bind_addr).await?;

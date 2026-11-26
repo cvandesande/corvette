@@ -1,7 +1,7 @@
 //! Turns one camera's frame stream into the stored-piece tree: fragments land in a `.part` file, and a closed piece is synced and renamed into the visible tree before its index row is offered.
 
 use crate::fmp4::{Fragmenter, InitSegmentTracker};
-use crate::index::{PieceRow, SeqAllocator};
+use crate::index::{IndexWrite, PieceRow, SeqAllocator};
 use crate::rtp_clock::VIDEO_CLOCK_RATE_HZ;
 use crate::supervise::log_event;
 use crate::utc::utc_parts;
@@ -38,7 +38,7 @@ const DISCONTINUOUS_TICKS: i64 = 2 * VIDEO_CLOCK_RATE_HZ as i64;
 pub struct PieceRecorder {
     settings: RecorderSettings,
     seqs: SeqAllocator,
-    rows: SyncSender<PieceRow>,
+    rows: SyncSender<IndexWrite>,
     clock: Box<dyn Fn() -> i64 + Send>,
     tracker: InitSegmentTracker,
     open: Option<OpenPiece>,
@@ -59,7 +59,7 @@ impl PieceRecorder {
     pub fn new(
         settings: RecorderSettings,
         seqs: SeqAllocator,
-        rows: SyncSender<PieceRow>,
+        rows: SyncSender<IndexWrite>,
         clock: Box<dyn Fn() -> i64 + Send>,
     ) -> Self {
         Self {
@@ -237,7 +237,7 @@ impl PieceRecorder {
                 .expect("a length this process could write fits u64"),
             codec: codec.to_owned(),
         };
-        if self.rows.try_send(row).is_err() {
+        if self.rows.try_send(IndexWrite::Piece(row)).is_err() {
             log_event(camera, "record-index-queue-full", "");
         }
     }

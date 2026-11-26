@@ -1,4 +1,4 @@
-use corvette_media_bridge::index::{self, Index, IndexError, PieceRow};
+use corvette_media_bridge::index::{self, Index, IndexError, IndexWrite, PieceRow};
 use std::path::{Path, PathBuf};
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -193,7 +193,7 @@ fn file_with_other_schema_version_is_refused() {
 
     let raw = rusqlite::Connection::open(&path).expect("raw open succeeds");
     raw.execute(
-        "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
+        "UPDATE meta SET value = '0' WHERE key = 'schema_version'",
         [],
     )
     .expect("schema version rewritten");
@@ -201,7 +201,7 @@ fn file_with_other_schema_version_is_refused() {
 
     let error = Index::open(&path, &front()).expect_err("foreign schema version refused");
     match error {
-        IndexError::Version { found } => assert_eq!(found, "2"),
+        IndexError::Version { found } => assert_eq!(found, "0"),
         other => panic!("expected a version refusal, got {other}"),
     }
 
@@ -219,10 +219,10 @@ fn writer_thread_inserts_rows_and_returns_the_index() {
 
     let (sender, handle) = index::spawn_writer(index, index::PIECE_CHANNEL_CAPACITY);
     sender
-        .send(piece("front", seq1, 0, 1000))
+        .send(IndexWrite::Piece(piece("front", seq1, 0, 1000)))
         .expect("first row sent");
     sender
-        .send(piece("front", seq2, 1000, 2000))
+        .send(IndexWrite::Piece(piece("front", seq2, 1000, 2000)))
         .expect("second row sent");
     drop(sender);
 

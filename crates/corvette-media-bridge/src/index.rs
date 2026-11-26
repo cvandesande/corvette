@@ -9,7 +9,11 @@ use std::time::Duration;
 
 pub const PIECE_CHANNEL_CAPACITY: usize = 64;
 
-const SCHEMA_VERSION: &str = "1";
+const SCHEMA_VERSION: &str = "2";
+const MIGRATABLE_SCHEMA_VERSION: &str = "1";
+
+pub const ALERT_EVENT_CUTOFF_MS: i64 = 40_000;
+pub const DETECTION_EVENT_CUTOFF_MS: i64 = 30_000;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS pieces (
@@ -26,6 +30,24 @@ CREATE TABLE IF NOT EXISTS pieces (
 );
 CREATE INDEX IF NOT EXISTS pieces_camera_start ON pieces(camera, start_ts);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera TEXT NOT NULL,
+    track_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    start_ts INTEGER NOT NULL,
+    end_ts INTEGER,
+    last_motion_ts INTEGER NOT NULL,
+    first_motion INTEGER,
+    box_json TEXT NOT NULL,
+    zones_json TEXT NOT NULL,
+    UNIQUE(camera, track_id, start_ts)
+);
+CREATE TABLE IF NOT EXISTS motion (
+    camera TEXT NOT NULL,
+    second INTEGER NOT NULL,
+    UNIQUE(camera, second)
+);
 ";
 
 #[derive(Debug, Clone)]
@@ -38,6 +60,56 @@ pub struct PieceRow {
     pub path: String,
     pub size_bytes: u64,
     pub codec: String,
+}
+
+/// One event row write, applied on the index writer's channel by the singleton writer task.
+#[derive(Debug, Clone)]
+pub enum EventWrite {
+    Open {
+        camera: String,
+        track_id: String,
+        label: String,
+        start_ts: i64,
+        first_motion_ts: i64,
+        last_motion_ts: i64,
+        box_json: String,
+        zones_json: String,
+    },
+    Refresh {
+        camera: String,
+        track_id: String,
+        start_ts: i64,
+        last_motion_ts: i64,
+        box_json: String,
+        zones_json: String,
+    },
+    Close {
+        camera: String,
+        track_id: String,
+        start_ts: i64,
+        end_ts: i64,
+    },
+}
+
+#[derive(Debug)]
+pub enum IndexWrite {
+    Piece(PieceRow),
+    Event(EventWrite),
+    Sweep {
+        now_ms: i64,
+        alert_labels: HashMap<String, Vec<String>>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct EventRow {
+    pub camera: String,
+    pub track_id: String,
+    pub label: String,
+    pub start_ts: i64,
+    pub end_ts: Option<i64>,
+    pub last_motion_ts: i64,
+    pub first_motion: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -247,8 +319,6 @@ pub struct SeqAllocator {
 }
 
 impl SeqAllocator {
-    /// Returns the next sequence number for `camera`, one higher than the last.
-    ///
     /// # Errors
     pub fn next(&self, camera: &str) -> Result<u64, IndexError> {
         let mut last_seq = self.last_seq.lock().unwrap_or_else(PoisonError::into_inner);
@@ -279,7 +349,7 @@ impl std::fmt::Debug for Index {
 
 impl Index {
     /// # Errors
-    /// Returns an error when the file cannot be opened or set up, a WAL or synchronous setting did not take effect, or its recorded schema version is not the one this build writes.
+    /// Returns an error when the file cannot be opened or set up, a WAL or synchronous setting did not take effect, or its recorded schema version is neither this build's version nor the version that upgrades to it.
     pub fn open(path: &Path, cameras: &[(String, u32)]) -> Result<Self, IndexError> {
         let conn = Connection::open(path).map_err(|source| IndexError::Open { source })?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
@@ -304,9 +374,17 @@ impl Index {
             .map_err(|source| setup("schema", source))?;
 
         let stored_version = read_meta(&conn, "schema_version", "schema version")?;
-        match stored_version {
-            Some(found) if found != SCHEMA_VERSION => return Err(IndexError::Version { found }),
-            Some(_) => {}
+        match stored_version.as_deref() {
+            Some(SCHEMA_VERSION) => {}
+            Some(MIGRATABLE_SCHEMA_VERSION) => {
+                // The new tables are additive, so the schema batch above already created whatever the stored version lacked.
+                upsert_meta(&conn, "schema_version", SCHEMA_VERSION, "schema version")?;
+            }
+            Some(found) => {
+                return Err(IndexError::Version {
+                    found: found.to_owned(),
+                });
+            }
             None => upsert_meta(&conn, "schema_version", SCHEMA_VERSION, "schema version")?,
         }
 
@@ -490,6 +568,208 @@ impl Index {
         }
         Ok(ranges)
     }
+
+    /// Applies one event row write; a refresh or close for a row that is missing or already closed changes nothing.
+    ///
+    /// # Errors
+    pub fn apply_event_write(&mut self, write: &EventWrite) -> Result<(), IndexError> {
+        let outcome = match write {
+            EventWrite::Open {
+                camera,
+                track_id,
+                label,
+                start_ts,
+                first_motion_ts,
+                last_motion_ts,
+                box_json,
+                zones_json,
+            } => self.conn.execute(
+                "INSERT INTO events (camera, track_id, label, start_ts, first_motion, last_motion_ts, box_json, zones_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(camera, track_id, start_ts) DO NOTHING",
+                params![
+                    camera,
+                    track_id,
+                    label,
+                    start_ts,
+                    first_motion_ts,
+                    last_motion_ts,
+                    box_json,
+                    zones_json
+                ],
+            ),
+            EventWrite::Refresh {
+                camera,
+                track_id,
+                start_ts,
+                last_motion_ts,
+                box_json,
+                zones_json,
+            } => self.conn.execute(
+                "UPDATE events SET last_motion_ts = ?4, box_json = ?5, zones_json = ?6
+                 WHERE camera = ?1 AND track_id = ?2 AND start_ts = ?3 AND end_ts IS NULL",
+                params![camera, track_id, start_ts, last_motion_ts, box_json, zones_json],
+            ),
+            EventWrite::Close {
+                camera,
+                track_id,
+                start_ts,
+                end_ts,
+            } => self.conn.execute(
+                "UPDATE events SET end_ts = ?4 WHERE camera = ?1 AND track_id = ?2 AND start_ts = ?3 AND end_ts IS NULL",
+                params![camera, track_id, start_ts, end_ts],
+            ),
+        };
+        outcome.map_err(|source| query("event write", "", source))?;
+        Ok(())
+    }
+
+    /// Closes open events whose last motion is older than their cutoff — the label cutoff for camera alert labels, the other cutoff otherwise — and returns how many closed.
+    ///
+    /// # Errors
+    pub fn close_stale_events(
+        &mut self,
+        now_ms: i64,
+        alert_labels: &HashMap<String, Vec<String>>,
+    ) -> Result<usize, IndexError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT camera, track_id, start_ts, label, last_motion_ts FROM events WHERE end_ts IS NULL",
+            )
+            .map_err(|source| query("sweep select", "", source))?;
+        let mut rows = statement
+            .query([])
+            .map_err(|source| query("sweep select", "", source))?;
+        let mut closing = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|source| query("sweep select", "", source))?
+        {
+            let camera: String = row
+                .get(0)
+                .map_err(|source| query("sweep select", "", source))?;
+            let track_id: String = row
+                .get(1)
+                .map_err(|source| query("sweep select", "", source))?;
+            let start_ts: i64 = row
+                .get(2)
+                .map_err(|source| query("sweep select", "", source))?;
+            let label: String = row
+                .get(3)
+                .map_err(|source| query("sweep select", "", source))?;
+            let last_motion_ts: i64 = row
+                .get(4)
+                .map_err(|source| query("sweep select", "", source))?;
+            let is_alert = alert_labels
+                .get(&camera)
+                .is_some_and(|labels| labels.contains(&label));
+            let cutoff = if is_alert {
+                ALERT_EVENT_CUTOFF_MS
+            } else {
+                DETECTION_EVENT_CUTOFF_MS
+            };
+            if now_ms - last_motion_ts > cutoff {
+                closing.push((camera, track_id, start_ts, last_motion_ts + cutoff));
+            }
+        }
+        let mut closed = 0;
+        for (camera, track_id, start_ts, end_ts) in closing {
+            self.conn
+                .execute(
+                    "UPDATE events SET end_ts = ?4 WHERE camera = ?1 AND track_id = ?2 AND start_ts = ?3 AND end_ts IS NULL",
+                    params![camera, track_id, start_ts, end_ts],
+                )
+                .map_err(|source| query("sweep close", &camera, source))?;
+            closed += 1;
+        }
+        Ok(closed)
+    }
+
+    /// The count of events still open, the restart recovery number.
+    ///
+    /// # Errors
+    pub fn open_event_count(&self) -> Result<i64, IndexError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE end_ts IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|source| query("open events", "", source))
+    }
+
+    /// The events of `camera`, oldest row first.
+    ///
+    /// # Errors
+    pub fn events(&self, camera: &str) -> Result<Vec<EventRow>, IndexError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT camera, track_id, label, start_ts, end_ts, last_motion_ts, first_motion
+                 FROM events WHERE camera = ?1 ORDER BY id",
+            )
+            .map_err(|source| query("events", camera, source))?;
+        let mut rows = statement
+            .query(params![camera])
+            .map_err(|source| query("events", camera, source))?;
+        let mut events = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|source| query("events", camera, source))?
+        {
+            events.push(EventRow {
+                camera: row
+                    .get(0)
+                    .map_err(|source| query("events", camera, source))?,
+                track_id: row
+                    .get(1)
+                    .map_err(|source| query("events", camera, source))?,
+                label: row
+                    .get(2)
+                    .map_err(|source| query("events", camera, source))?,
+                start_ts: row
+                    .get(3)
+                    .map_err(|source| query("events", camera, source))?,
+                end_ts: row
+                    .get(4)
+                    .map_err(|source| query("events", camera, source))?,
+                last_motion_ts: row
+                    .get(5)
+                    .map_err(|source| query("events", camera, source))?,
+                first_motion: row
+                    .get(6)
+                    .map_err(|source| query("events", camera, source))?,
+            });
+        }
+        Ok(events)
+    }
+}
+
+fn apply_write(index: &mut Index, write: IndexWrite) {
+    match write {
+        IndexWrite::Piece(row) => {
+            if index.insert(&row).is_err() {
+                eprintln!(
+                    "corvette-media-bridge: index insert failed camera={} seq={}",
+                    row.camera, row.seq
+                );
+            }
+        }
+        IndexWrite::Event(event) => {
+            if let Err(source) = index.apply_event_write(&event) {
+                eprintln!("corvette-media-bridge: event write failed: {source}");
+            }
+        }
+        IndexWrite::Sweep {
+            now_ms,
+            alert_labels,
+        } => match index.close_stale_events(now_ms, &alert_labels) {
+            Err(source) => eprintln!("corvette-media-bridge: event cutoff sweep failed: {source}"),
+            Ok(0) => {}
+            Ok(closed) => log_event("events", "cutoff-close", format_args!("closed={closed}")),
+        },
+    }
 }
 
 /// Hands the index to a writer thread fed by the returned sender; it returns the index once the sender is dropped and the channel drains.
@@ -497,19 +777,14 @@ pub fn spawn_writer(
     index: Index,
     capacity: usize,
 ) -> (
-    std::sync::mpsc::SyncSender<PieceRow>,
+    std::sync::mpsc::SyncSender<IndexWrite>,
     std::thread::JoinHandle<Index>,
 ) {
     let (sender, receiver) = std::sync::mpsc::sync_channel(capacity);
     let handle = std::thread::spawn(move || {
         let mut index = index;
-        while let Ok(row) = receiver.recv() {
-            if index.insert(&row).is_err() {
-                eprintln!(
-                    "corvette-media-bridge: index insert failed camera={} seq={}",
-                    row.camera, row.seq
-                );
-            }
+        while let Ok(write) = receiver.recv() {
+            apply_write(&mut index, write);
         }
         index
     });
@@ -551,7 +826,7 @@ pub fn spawn_writer_with_expiry(
     capacity: usize,
     wiring: ExpiryWiring,
 ) -> (
-    std::sync::mpsc::SyncSender<PieceRow>,
+    std::sync::mpsc::SyncSender<IndexWrite>,
     std::thread::JoinHandle<Index>,
 ) {
     let (sender, receiver) = std::sync::mpsc::sync_channel(capacity);
@@ -562,14 +837,7 @@ pub fn spawn_writer_with_expiry(
         let mut free_unreadable = false;
         loop {
             match receiver.recv_timeout(EXPIRY_TICK) {
-                Ok(row) => {
-                    if index.insert(&row).is_err() {
-                        eprintln!(
-                            "corvette-media-bridge: index insert failed camera={} seq={}",
-                            row.camera, row.seq
-                        );
-                    }
-                }
+                Ok(write) => apply_write(&mut index, write),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
