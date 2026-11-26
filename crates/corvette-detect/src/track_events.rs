@@ -22,6 +22,8 @@ pub const TRACK_EVENTS_QUEUE_LINES: usize = 256;
 const TRACK_EVENTS_MAX_QUEUED_LINES: usize = 4_096;
 const _: () = assert!(TRACK_EVENTS_MAX_QUEUED_LINES > TRACK_EVENTS_QUEUE_LINES);
 pub const TRACK_EVENTS_MAX_SUBSCRIBERS: usize = 16;
+// Concurrent GET /events streams counted after the head parses; over the limit answers 503.
+const MAX_EVENT_STREAMS: usize = 16;
 pub const TRACK_EVENTS_ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 const CLOCK_SECONDS_MAX: f64 = 4_000_000_000.0;
 
@@ -132,6 +134,121 @@ impl Subscriber {
     }
 }
 
+/// One HTTP event stream: the queue registered by [`EventFeed::admit_stream`], drained until the queue closes and freed by [`EventFeed::release_stream`].
+pub struct EventStream {
+    subscriber: Arc<Subscriber>,
+}
+
+impl std::fmt::Debug for EventStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventStream").finish_non_exhaustive()
+    }
+}
+
+impl EventStream {
+    /// The next line in queue order; `None` once the queue closed.
+    pub async fn next_line(&self) -> Option<Arc<[u8]>> {
+        self.subscriber.next_bytes().await
+    }
+
+    /// Completes when the queue closed, the hard bound having reached it.
+    pub async fn closed(&self) {
+        self.subscriber.closing.notified().await;
+    }
+}
+
+/// One shared track-line feed: per-camera publishers write each encoded line to every subscriber of both transports, the track-events socket and the HTTP event streams.
+pub struct EventFeed {
+    sockets: Subscribers,
+    streams: Subscribers,
+    ids: AtomicU64,
+}
+
+impl std::fmt::Debug for EventFeed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventFeed").finish_non_exhaustive()
+    }
+}
+
+impl Default for EventFeed {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EventFeed {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            sockets: Arc::new(Mutex::new(Vec::new())),
+            streams: Arc::new(Mutex::new(Vec::new())),
+            ids: AtomicU64::new(1),
+        }
+    }
+
+    /// Spawns one publisher task per camera; each publishes that camera's frames until its objects sender is dropped. Call inside the runtime that should own the tasks.
+    pub fn spawn_publishers(
+        self: &Arc<Self>,
+        cameras: Vec<(String, watch::Receiver<Option<FrameObjects>>)>,
+    ) {
+        for (camera, objects) in cameras {
+            tokio::spawn(publish(camera, objects, Arc::clone(self)));
+        }
+    }
+
+    fn push(&self, frame: &TrackFrame) {
+        broadcast(&self.sockets, frame);
+        broadcast(&self.streams, frame);
+    }
+
+    fn admit_socket(&self) -> Result<Arc<Subscriber>, u64> {
+        let id = self.ids.fetch_add(1, Ordering::Relaxed);
+        let subscriber = {
+            let mut sockets = self
+                .sockets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if sockets.len() >= TRACK_EVENTS_MAX_SUBSCRIBERS {
+                return Err(id);
+            }
+            let subscriber = Arc::new(Subscriber::new(id));
+            sockets.push(Arc::clone(&subscriber));
+            subscriber
+        };
+        Ok(subscriber)
+    }
+
+    fn release_socket(&self, subscriber: &Subscriber) {
+        self.sockets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|kept| kept.id != subscriber.id);
+    }
+
+    pub(crate) fn admit_stream(&self) -> Option<EventStream> {
+        let subscriber = {
+            let mut streams = self
+                .streams
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if streams.len() >= MAX_EVENT_STREAMS {
+                return None;
+            }
+            let subscriber = Arc::new(Subscriber::new(self.ids.fetch_add(1, Ordering::Relaxed)));
+            streams.push(Arc::clone(&subscriber));
+            subscriber
+        };
+        Some(EventStream { subscriber })
+    }
+
+    pub(crate) fn release_stream(&self, stream: &EventStream) {
+        self.streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|kept| kept.id != stream.subscriber.id);
+    }
+}
+
 fn broadcast(subscribers: &Subscribers, frame: &TrackFrame) {
     let droppable = matches!(frame, TrackFrame::Update(_) | TrackFrame::Motion { .. });
     let bytes: Arc<[u8]> = Arc::from(encode_track_line(frame).into_boxed_slice());
@@ -177,43 +294,30 @@ impl TrackAccept for UnixListener {
 
 /// Serves track frames to subscriber connections until the task is stopped.
 ///
+/// Lines come from the feed's publishers; the feed and its publishers are created and spawned with [`EventFeed::spawn_publishers`].
 /// Each accepted connection is a subscriber until it closes and receives only pushed lines.
 /// A subscriber whose socket stalls drops queued `update` and `motion` lines, counted in a log line, and keeps every `start` and `end` line; a queue that reaches `TRACK_EVENTS_MAX_QUEUED_LINES` closes that subscriber so its consumer reconnects and recovers.
 /// Publishing never blocks on a subscriber.
 /// Connections beyond `TRACK_EVENTS_MAX_SUBSCRIBERS` are closed immediately; a failed `accept` is logged and retried after `TRACK_EVENTS_ACCEPT_BACKOFF`.
 pub async fn serve_track_events<L: TrackAccept + Send + 'static>(
     listener: L,
-    cameras: Vec<(String, watch::Receiver<Option<FrameObjects>>)>,
+    feed: Arc<EventFeed>,
 ) {
-    let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
-    for (camera, objects) in cameras {
-        tokio::spawn(publish(camera, objects, Arc::clone(&subscribers)));
-    }
-    let ids = AtomicU64::new(1);
     loop {
         match listener.accept().await {
             Ok((stream, _peer)) => {
-                let id = ids.fetch_add(1, Ordering::Relaxed);
-                let subscriber = Arc::new(Subscriber::new(id));
-                let admitted = {
-                    let mut guard = subscribers
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let admitted = guard.len() < TRACK_EVENTS_MAX_SUBSCRIBERS;
-                    if admitted {
-                        guard.push(Arc::clone(&subscriber));
+                let subscriber = match feed.admit_socket() {
+                    Ok(subscriber) => subscriber,
+                    Err(id) => {
+                        log_event(
+                            "track-events",
+                            "subscriber-limit",
+                            format!("refused subscriber {id} at {TRACK_EVENTS_MAX_SUBSCRIBERS}"),
+                        );
+                        continue;
                     }
-                    admitted
                 };
-                if !admitted {
-                    log_event(
-                        "track-events",
-                        "subscriber-limit",
-                        format!("refused subscriber {id} at {TRACK_EVENTS_MAX_SUBSCRIBERS}"),
-                    );
-                    continue;
-                }
-                tokio::spawn(pump(stream, subscriber, Arc::clone(&subscribers)));
+                tokio::spawn(pump(stream, subscriber, Arc::clone(&feed)));
             }
             Err(error) => {
                 log_event("track-events", "accept-failed", error);
@@ -226,7 +330,7 @@ pub async fn serve_track_events<L: TrackAccept + Send + 'static>(
 async fn publish(
     camera: String,
     mut objects: watch::Receiver<Option<FrameObjects>>,
-    subscribers: Subscribers,
+    feed: Arc<EventFeed>,
 ) {
     let mut lines: HashMap<String, LineState> = HashMap::new();
     let mut tick_second: Option<u64> = None;
@@ -243,24 +347,18 @@ async fn publish(
             let second = Duration::from_secs_f64(bounded).as_secs();
             if tick_second.is_none_or(|sent| second > sent) {
                 tick_second = Some(second);
-                broadcast(
-                    &subscribers,
-                    &TrackFrame::Motion {
-                        camera: camera.clone(),
-                        second,
-                    },
-                );
+                feed.push(&TrackFrame::Motion {
+                    camera: camera.clone(),
+                    second,
+                });
             }
         }
         for ended in &known.ended {
             if lines.remove(ended).is_some() {
-                broadcast(
-                    &subscribers,
-                    &TrackFrame::End {
-                        camera: camera.clone(),
-                        track_id: ended.clone(),
-                    },
-                );
+                feed.push(&TrackFrame::End {
+                    camera: camera.clone(),
+                    track_id: ended.clone(),
+                });
             }
         }
         for object in &known.objects {
@@ -297,12 +395,12 @@ async fn publish(
             } else {
                 TrackFrame::Start(info)
             };
-            broadcast(&subscribers, &frame);
+            feed.push(&frame);
         }
     }
 }
 
-async fn pump(mut stream: UnixStream, subscriber: Arc<Subscriber>, subscribers: Subscribers) {
+async fn pump(mut stream: UnixStream, subscriber: Arc<Subscriber>, feed: Arc<EventFeed>) {
     loop {
         let Some(bytes) = subscriber.next_bytes().await else {
             break;
@@ -321,10 +419,7 @@ async fn pump(mut stream: UnixStream, subscriber: Arc<Subscriber>, subscribers: 
             }
         }
     }
-    subscribers
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .retain(|kept| kept.id != subscriber.id);
+    feed.release_socket(&subscriber);
 }
 
 #[cfg(test)]
@@ -376,9 +471,10 @@ mod tests {
     #[tokio::test]
     async fn triggered_frames_emit_at_most_one_motion_tick_per_camera_per_second() {
         let subscriber = Arc::new(Subscriber::new(61));
-        let subscribers: Subscribers = Arc::new(Mutex::new(vec![Arc::clone(&subscriber)]));
+        let feed = Arc::new(EventFeed::new());
+        feed.sockets.lock().unwrap().push(Arc::clone(&subscriber));
         let (sender, receiver) = watch::channel(None);
-        tokio::spawn(publish("front".to_owned(), receiver, subscribers));
+        tokio::spawn(publish("front".to_owned(), receiver, feed));
         for time in [100.5, 100.9, 101.2] {
             sender
                 .send(Some(motion_frame(time, true)))
@@ -395,9 +491,10 @@ mod tests {
     #[tokio::test]
     async fn frames_without_a_motion_trigger_emit_no_tick_line() {
         let subscriber = Arc::new(Subscriber::new(62));
-        let subscribers: Subscribers = Arc::new(Mutex::new(vec![Arc::clone(&subscriber)]));
+        let feed = Arc::new(EventFeed::new());
+        feed.sockets.lock().unwrap().push(Arc::clone(&subscriber));
         let (sender, receiver) = watch::channel(None);
-        tokio::spawn(publish("front".to_owned(), receiver, subscribers));
+        tokio::spawn(publish("front".to_owned(), receiver, feed));
         for time in [100.5, 101.2] {
             sender
                 .send(Some(motion_frame(time, false)))

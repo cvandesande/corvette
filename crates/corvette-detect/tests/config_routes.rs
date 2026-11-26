@@ -66,7 +66,12 @@ fn start(test: &str, config: Option<PathBuf>) -> PathBuf {
     if let Some(path) = config {
         state = state.with_config_path(path);
     }
-    tokio::spawn(serve_with_timeout(listener, Arc::new(state), READ_TIMEOUT));
+    tokio::spawn(serve_with_timeout(
+        listener,
+        Arc::new(state),
+        READ_TIMEOUT,
+        None,
+    ));
     socket
 }
 

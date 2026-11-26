@@ -12,9 +12,11 @@ use crate::camera_runner::CameraHandle;
 use crate::object_stage::FrameObjects;
 use crate::service_bodies::{ObjectsAnswer, WorkerReport, objects_answer, off_entry, status_entry};
 use crate::supervised::Status;
+use crate::track_events::{EventFeed, EventStream};
 
 const MAX_HEAD_BYTES: usize = 8192;
 const STATUS_PATH: &str = "/corvette/api/v1/detection/status";
+const EVENTS_PATH: &str = "/corvette/api/v1/events";
 const CONFIG_PATH: &str = "/corvette/api/v1/detection/config";
 const VALIDATE_PATH: &str = "/corvette/api/v1/detection/config/validate";
 const SCHEMA_PATH: &str = "/corvette/api/v1/detection/config/schema";
@@ -73,11 +75,17 @@ impl ServiceState {
     }
 }
 
-/// Accept connections until one `accept` fails; each connection is answered by its own task and closed after one request.
+/// Accept connections until one `accept` fails; each connection is answered by its own task, closed after one request except an event stream, which pumps until it ends.
+///
+/// When `events` is `Some`, this listener serves `GET /corvette/api/v1/events` from that feed; a `None` listener answers it `404`.
 /// # Errors
 /// Returns `Err` when `accept` fails.
-pub async fn serve(listener: UnixListener, state: Arc<ServiceState>) -> std::io::Result<()> {
-    serve_with_timeout(listener, state, DEFAULT_READ_TIMEOUT).await
+pub async fn serve(
+    listener: UnixListener,
+    state: Arc<ServiceState>,
+    events: Option<Arc<EventFeed>>,
+) -> std::io::Result<()> {
+    serve_with_timeout(listener, state, DEFAULT_READ_TIMEOUT, events).await
 }
 
 /// # Errors
@@ -86,12 +94,14 @@ pub async fn serve_with_timeout(
     listener: UnixListener,
     state: Arc<ServiceState>,
     read_timeout: Duration,
+    events: Option<Arc<EventFeed>>,
 ) -> std::io::Result<()> {
     loop {
         let (stream, _peer) = listener.accept().await?;
         let state = Arc::clone(&state);
+        let events = events.clone();
         tokio::spawn(async move {
-            answer_one(stream, &state, read_timeout).await;
+            answer_one(stream, &state, events.as_ref(), read_timeout).await;
         });
     }
 }
@@ -134,12 +144,27 @@ async fn read_head(stream: &mut UnixStream) -> Result<(Vec<u8>, Vec<u8>), HeadRe
     }
 }
 
-async fn answer_one(mut stream: UnixStream, state: &ServiceState, read_timeout: Duration) {
-    let Some(response) = answer(&mut stream, state, read_timeout).await else {
+enum Answered {
+    Response(String),
+    Stream(Arc<EventFeed>),
+}
+
+async fn answer_one(
+    mut stream: UnixStream,
+    state: &ServiceState,
+    events: Option<&Arc<EventFeed>>,
+    read_timeout: Duration,
+) {
+    let Some(answered) = answer(&mut stream, state, events, read_timeout).await else {
         return;
     };
-    if let Err(err) = write_response(&mut stream, &response).await {
-        crate::log_event("service", "response-write-error", err);
+    match answered {
+        Answered::Response(response) => {
+            if let Err(err) = write_response(&mut stream, &response).await {
+                crate::log_event("service", "response-write-error", err);
+            }
+        }
+        Answered::Stream(feed) => stream_events(&mut stream, &feed).await,
     }
 }
 
@@ -147,8 +172,9 @@ async fn answer_one(mut stream: UnixStream, state: &ServiceState, read_timeout: 
 async fn answer(
     stream: &mut UnixStream,
     state: &ServiceState,
+    events: Option<&Arc<EventFeed>>,
     read_timeout: Duration,
-) -> Option<String> {
+) -> Option<Answered> {
     let (head, prefix) = match tokio::time::timeout(read_timeout, read_head(stream)).await {
         Err(_elapsed) => {
             crate::log_event(
@@ -160,37 +186,46 @@ async fn answer(
         }
         Ok(Err(HeadRead::TooLarge)) => {
             drain_buffered(stream);
-            return Some(http_response(
+            return Some(Answered::Response(http_response(
                 431,
                 "Request Header Fields Too Large",
                 "{\"reason\":\"head_too_large\"}",
                 None,
-            ));
+            )));
         }
         Ok(Err(HeadRead::Closed)) => return None,
         Ok(Ok(head_and_prefix)) => head_and_prefix,
     };
     let Some((method, target)) = parse_request_line(&head) else {
-        return Some(http_response(
+        return Some(Answered::Response(http_response(
             400,
             "Bad Request",
             "{\"reason\":\"bad_request\"}",
             None,
-        ));
+        )));
     };
-    match route(state, method, target, &head) {
-        RouteAnswer::Done(response) => Some(response),
+    match route(state, method, target, &head, events) {
+        RouteAnswer::Done(response) => Some(Answered::Response(response)),
+        RouteAnswer::EventStream(feed) => Some(Answered::Stream(feed)),
         RouteAnswer::ValidateBody { length } => {
             match read_body(stream, length, &prefix, read_timeout).await {
-                BodyRead::Complete(body) => Some(state.validate_answer(target, &body)),
-                BodyRead::Missing => Some(ServiceState::missing_body_answer(target)),
+                BodyRead::Complete(body) => {
+                    Some(Answered::Response(state.validate_answer(target, &body)))
+                }
+                BodyRead::Missing => Some(Answered::Response(ServiceState::missing_body_answer(
+                    target,
+                ))),
                 BodyRead::Broken => None,
             }
         }
         RouteAnswer::ApplyBody { length } => {
             match read_body(stream, length, &prefix, read_timeout).await {
-                BodyRead::Complete(body) => Some(state.apply_answer(target, &head, &body)),
-                BodyRead::Missing => Some(ServiceState::missing_body_answer(target)),
+                BodyRead::Complete(body) => {
+                    Some(Answered::Response(state.apply_answer(target, &head, &body)))
+                }
+                BodyRead::Missing => Some(Answered::Response(ServiceState::missing_body_answer(
+                    target,
+                ))),
                 BodyRead::Broken => None,
             }
         }
@@ -252,14 +287,30 @@ fn parse_request_line(head: &[u8]) -> Option<(&str, &str)> {
 
 enum RouteAnswer {
     Done(String),
+    EventStream(Arc<EventFeed>),
     ValidateBody { length: usize },
     ApplyBody { length: usize },
 }
 
-fn route(state: &ServiceState, method: &str, target: &str, head: &[u8]) -> RouteAnswer {
+fn route(
+    state: &ServiceState,
+    method: &str,
+    target: &str,
+    head: &[u8],
+    events: Option<&Arc<EventFeed>>,
+) -> RouteAnswer {
     use RouteAnswer::Done;
     if target.contains(['?', '#']) {
         return Done(not_found());
+    }
+    if target == EVENTS_PATH {
+        if method != "GET" {
+            return Done(method_not_allowed("GET"));
+        }
+        return events.map_or_else(
+            || Done(not_found()),
+            |feed| RouteAnswer::EventStream(Arc::clone(feed)),
+        );
     }
     if target == STATUS_PATH {
         if method != "GET" {
@@ -414,4 +465,80 @@ async fn write_response(stream: &mut UnixStream, response: &str) -> std::io::Res
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
     stream.shutdown().await
+}
+
+const EVENT_STREAM_HEAD: &[u8] = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\n\r\n";
+
+/// Streams `GET /corvette/api/v1/events` from the feed: register a subscriber after the head parsed, answer 200 chunked, then pump until the queue closes, the client's read half closes, or a write fails; the slot is held for the whole stream and released here.
+async fn stream_events(stream: &mut UnixStream, feed: &EventFeed) {
+    let Some(lines) = feed.admit_stream() else {
+        crate::log_event("service", "event-stream-limit", "every stream slot is held");
+        let refusal = http_response(
+            503,
+            "Service Unavailable",
+            "{\"reason\":\"event_streams_full\"}",
+            None,
+        );
+        if let Err(err) = write_response(stream, &refusal).await {
+            crate::log_event("service", "refusal-write-error", err);
+        }
+        return;
+    };
+    if let Err(err) = pump_events(stream, &lines).await {
+        crate::log_event("service", "event-stream-write", err);
+    }
+    feed.release_stream(&lines);
+}
+
+async fn pump_events(stream: &mut UnixStream, lines: &EventStream) -> std::io::Result<()> {
+    stream.write_all(EVENT_STREAM_HEAD).await?;
+    let mut watch_half = [0_u8; 1];
+    loop {
+        tokio::select! {
+            () = lines.closed() => break,
+            line = lines.next_line() => {
+                let Some(line) = line else { break };
+                stream.write_all(&chunk_frame(&line)).await?;
+            }
+            read = stream.read(&mut watch_half) => {
+                if read? != 0 {
+                    continue;
+                }
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Wraps one track line as exactly one chunk: hex length, the line's bytes untouched, terminator.
+fn chunk_frame(line: &[u8]) -> Vec<u8> {
+    let mut framed = format!("{:x}\r\n", line.len()).into_bytes();
+    framed.extend_from_slice(line);
+    framed.extend_from_slice(b"\r\n");
+    framed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chunk_frame;
+
+    #[test]
+    fn a_line_shaped_like_a_chunk_header_frames_as_one_chunk_of_its_own_length() {
+        let line = b"3\r\nfoo\r\n";
+        let framed = chunk_frame(line);
+        let size_end = framed.windows(2).position(|w| w == b"\r\n").unwrap();
+        let size =
+            usize::from_str_radix(std::str::from_utf8(&framed[..size_end]).unwrap(), 16).unwrap();
+        let body = &framed[size_end + 2..size_end + 2 + size];
+        assert_eq!(
+            body, line,
+            "the chunk holds the whole line, chunk-shaped bytes included"
+        );
+        assert_eq!(
+            &framed[size_end + 2 + size..],
+            b"\r\n",
+            "one chunk terminator, nothing after"
+        );
+    }
 }

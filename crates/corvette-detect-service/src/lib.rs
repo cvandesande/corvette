@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use corvette_detect::{
     CameraEntry, CameraPlan, CameraThreadSettings, CameraThreads, Config, DEFAULT_POLICY,
-    FrameObjects, JoinReport, ServiceState, SharedLink, StreamAddress, Supervised, ThreadEnd,
-    WorkerLink, revision, serve, serve_track_events, stream_address,
+    EventFeed, FrameObjects, JoinReport, ServiceState, SharedLink, StreamAddress, Supervised,
+    ThreadEnd, WorkerLink, revision, serve, serve_track_events, stream_address,
 };
 use tokio::process::Command;
 use tokio::runtime::Runtime;
@@ -452,10 +452,7 @@ pub fn run(
             .with_worker(worker.subscribe())
             .with_config_path(options.config.clone()),
     );
-    let bound = start_ipc(&runtime, &options, &state)
-        .and_then(|()| bind_socket(&options.socket))
-        .and_then(|listener| start_track_events(&runtime, &options, &started).map(|()| listener));
-    let listener = match bound {
+    let listener = match bind_all(&runtime, &options, &state, &started) {
         Ok(listener) => listener,
         Err((event, reason)) => {
             log_event("service", event, reason);
@@ -500,7 +497,7 @@ async fn serve_or_signal(
     interrupt: &mut Signal,
 ) -> Ended {
     tokio::select! {
-        served = serve(listener, state) => Ended::Served(served),
+        served = serve(listener, state, None) => Ended::Served(served),
         Some(()) = terminate.recv() => Ended::Signaled("SIGTERM"),
         Some(()) = interrupt.recv() => Ended::Signaled("SIGINT"),
     }
@@ -709,6 +706,25 @@ fn read_config(path: &Path) -> Result<(Config, Vec<u8>), String> {
     Ok((config, bytes))
 }
 
+// Bind the ipc socket first, then the status socket and the track-event socket; one feed feeds both event transports, and its publishers read each camera's frame channel until that camera stops.
+fn bind_all(
+    runtime: &Runtime,
+    options: &Options,
+    state: &Arc<ServiceState>,
+    started: &[(String, CameraThreads)],
+) -> Result<tokio::net::UnixListener, (&'static str, String)> {
+    let feed = Arc::new(EventFeed::new());
+    let camera_frames: Vec<(String, watch::Receiver<Option<FrameObjects>>)> = started
+        .iter()
+        .map(|(name, threads)| (name.clone(), threads.handle().objects))
+        .collect();
+    feed.spawn_publishers(camera_frames);
+    start_ipc(runtime, options, state, &feed)?;
+    let listener = bind_socket(&options.socket)?;
+    start_track_events(runtime, options, &feed)?;
+    Ok(listener)
+}
+
 fn worker_command(
     launch: &WorkerLaunch,
     worker_socket: &Path,
@@ -759,6 +775,7 @@ fn start_ipc(
     runtime: &Runtime,
     options: &Options,
     state: &Arc<ServiceState>,
+    feed: &Arc<EventFeed>,
 ) -> Result<(), (&'static str, String)> {
     let path = &options.ipc_socket;
     // One path twice would let the legacy claim steal the ipc socket and rebind it at 0666.
@@ -769,7 +786,7 @@ fn start_ipc(
         ));
     }
     let listener = bind_ipc_socket(path).map_err(|reason| ("ipc-socket-refused", reason))?;
-    runtime.spawn(serve(listener, Arc::clone(state)));
+    runtime.spawn(serve(listener, Arc::clone(state), Some(Arc::clone(feed))));
     Ok(())
 }
 
@@ -777,17 +794,13 @@ fn start_ipc(
 fn start_track_events(
     runtime: &Runtime,
     options: &Options,
-    started: &[(String, CameraThreads)],
+    feed: &Arc<EventFeed>,
 ) -> Result<(), (&'static str, String)> {
     let Some(path) = &options.track_events_socket else {
         return Ok(());
     };
     let listener = bind_socket(path)?;
-    let streams: Vec<(String, watch::Receiver<Option<FrameObjects>>)> = started
-        .iter()
-        .map(|(name, threads)| (name.clone(), threads.handle().objects))
-        .collect();
-    runtime.spawn(serve_track_events(listener, streams));
+    runtime.spawn(serve_track_events(listener, Arc::clone(feed)));
     Ok(())
 }
 

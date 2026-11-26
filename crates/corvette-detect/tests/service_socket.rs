@@ -27,7 +27,7 @@ fn start(test: &str, cameras: Vec<(String, CameraEntry)>) -> PathBuf {
     let socket = socket_path(test);
     let listener = UnixListener::bind(&socket).expect("bind");
     let state = Arc::new(ServiceState::new(cameras));
-    tokio::spawn(serve_with_timeout(listener, state, READ_TIMEOUT));
+    tokio::spawn(serve_with_timeout(listener, state, READ_TIMEOUT, None));
     socket
 }
 
@@ -39,7 +39,7 @@ fn start_with_worker(
     let socket = socket_path(test);
     let listener = UnixListener::bind(&socket).expect("bind");
     let state = Arc::new(ServiceState::new(cameras).with_worker(worker));
-    tokio::spawn(serve_with_timeout(listener, state, READ_TIMEOUT));
+    tokio::spawn(serve_with_timeout(listener, state, READ_TIMEOUT, None));
     socket
 }
 

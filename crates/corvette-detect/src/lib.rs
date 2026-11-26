@@ -78,8 +78,8 @@ pub use source::{FrameSource, STREAM_QUEUE_CAPACITY, SourceError};
 pub use source_url::{StreamAddressError, StreamKind, resolve_stream_url};
 pub use supervised::{Status, Supervised};
 pub use track_events::{
-    TRACK_EVENTS_ACCEPT_BACKOFF, TRACK_EVENTS_MAX_SUBSCRIBERS, TRACK_EVENTS_QUEUE_LINES,
-    TrackAccept, serve_track_events,
+    EventFeed, EventStream, TRACK_EVENTS_ACCEPT_BACKOFF, TRACK_EVENTS_MAX_SUBSCRIBERS,
+    TRACK_EVENTS_QUEUE_LINES, TrackAccept, serve_track_events,
 };
 pub use worker_link::{LinkState, WorkerLink};
 

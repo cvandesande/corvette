@@ -1,6 +1,6 @@
 use corvette_detect::{
-    CameraEntry, CameraRunner, CandidateStage, Decode, Frame, FrameObjects, FrameSpec, Infer,
-    Labels, LivePipeline, ObjectStage, ServiceState, StepEnd, TRACK_EVENTS_ACCEPT_BACKOFF,
+    CameraEntry, CameraRunner, CandidateStage, Decode, EventFeed, Frame, FrameObjects, FrameSpec,
+    Infer, Labels, LivePipeline, ObjectStage, ServiceState, StepEnd, TRACK_EVENTS_ACCEPT_BACKOFF,
     TRACK_EVENTS_MAX_SUBSCRIBERS, TrackAccept, TrackedObject, frame_slot, objects_answer, serve,
     serve_track_events,
 };
@@ -102,8 +102,10 @@ const MOVE: [i32; 4] = [300, 140, 400, 340];
 async fn serve_bound(tag: &str, receiver: watch::Receiver<Option<FrameObjects>>) -> PathBuf {
     let path = temp_socket(tag);
     let listener = UnixListener::bind(&path).unwrap();
+    let feed = Arc::new(EventFeed::new());
+    feed.spawn_publishers(vec![("front".to_owned(), receiver)]);
     tokio::spawn(async move {
-        let () = serve_track_events(listener, vec![("front".to_owned(), receiver)]).await;
+        let () = serve_track_events(listener, feed).await;
     });
     tokio::time::sleep(TICK).await;
     path
@@ -393,8 +395,10 @@ async fn with_no_subscriber_the_status_and_objects_answers_stay_the_pipeline_val
     let objects_rx = handle.objects.clone();
     let events_path = temp_socket("none");
     let events_listener = UnixListener::bind(&events_path).unwrap();
+    let events_feed = Arc::new(EventFeed::new());
+    events_feed.spawn_publishers(vec![("front".to_owned(), objects_rx)]);
     tokio::spawn(async move {
-        let () = serve_track_events(events_listener, vec![("front".to_owned(), objects_rx)]).await;
+        let () = serve_track_events(events_listener, events_feed).await;
     });
 
     let service_state = ServiceState::new(vec![(
@@ -404,7 +408,7 @@ async fn with_no_subscriber_the_status_and_objects_answers_stay_the_pipeline_val
     let status_path = temp_socket("none-status");
     let status_listener = UnixListener::bind(&status_path).unwrap();
     tokio::spawn(async move {
-        let _ = serve(status_listener, Arc::new(service_state)).await;
+        let _ = serve(status_listener, Arc::new(service_state), None).await;
     });
     tokio::time::sleep(TICK).await;
 
@@ -554,10 +558,9 @@ async fn a_failed_accept_is_logged_retried_and_acceptance_keeps_working() {
         accepted: Arc::new(Mutex::new(Vec::new())),
     };
     let accepted = Arc::clone(&fake.accepted);
-    tokio::spawn(serve_track_events(
-        fake,
-        vec![("front".to_owned(), receiver)],
-    ));
+    let feed = Arc::new(EventFeed::new());
+    feed.spawn_publishers(vec![("front".to_owned(), receiver)]);
+    tokio::spawn(serve_track_events(fake, feed));
     tokio::time::sleep(TRACK_EVENTS_ACCEPT_BACKOFF * 3).await;
     let mut client = accepted
         .lock()

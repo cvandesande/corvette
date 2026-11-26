@@ -1154,3 +1154,78 @@ fn ipc_socket_naming_the_status_socket_exits_three() {
         "expected one plain refusal line"
     );
 }
+
+fn events_stream(socket: &Path) -> (u16, String, UnixStream) {
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream
+        .write_all(b"GET /corvette/api/v1/events HTTP/1.1\r\nHost: ipc\r\n\r\n")
+        .unwrap();
+    let mut head = Vec::new();
+    let mut byte = [0_u8; 1];
+    loop {
+        let read = stream.read(&mut byte).unwrap();
+        assert_ne!(read, 0, "the event head ended early");
+        head.push(byte[0]);
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        assert!(head.len() < 4096, "the event head ran long");
+    }
+    let text = String::from_utf8_lossy(&head).into_owned();
+    let code: u16 = text
+        .split_whitespace()
+        .nth(1)
+        .expect("a status code")
+        .parse()
+        .expect("a numeric status code");
+    (code, text, stream)
+}
+
+#[test]
+fn the_events_route_streams_on_ipc_and_is_absent_on_the_status_socket() {
+    let (service, ipc) = start_with_ipc("events-route");
+    let (code, head, stream) = events_stream(&ipc);
+    assert_eq!(code, 200, "head: {head}");
+    assert!(head.contains("Transfer-Encoding: chunked"), "head: {head}");
+    assert!(head.contains("Content-Type: text/plain"), "head: {head}");
+    assert!(head.contains("Cache-Control: no-store"), "head: {head}");
+    assert!(!head.contains("Connection: close"), "head: {head}");
+    drop(stream);
+    let (code, body) = try_get(&service.socket, "/corvette/api/v1/events")
+        .expect("an answer on the status socket");
+    assert_eq!(code, 404);
+    assert_eq!(body, "{\"reason\":\"not_found\"}");
+}
+
+#[test]
+fn the_seventeenth_events_stream_gets_503_and_a_closed_write_half_frees_its_slot() {
+    let (_service, ipc) = start_with_ipc("events-limit");
+    let mut held_streams = Vec::new();
+    for _ in 0..16 {
+        let (code, head, stream) = events_stream(&ipc);
+        assert_eq!(code, 200, "head: {head}");
+        held_streams.push(stream);
+    }
+    let (code, head, refused) = events_stream(&ipc);
+    assert_eq!(code, 503, "head: {head}");
+    drop(refused);
+    held_streams
+        .remove(0)
+        .shutdown(std::net::Shutdown::Write)
+        .unwrap();
+    let mut freed = false;
+    for _ in 0..100 {
+        let (code, _head, next) = events_stream(&ipc);
+        let accepted = code == 200;
+        drop(next);
+        if accepted {
+            freed = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(freed, "the closed stream's slot was never freed");
+}
