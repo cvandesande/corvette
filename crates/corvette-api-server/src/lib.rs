@@ -19,6 +19,7 @@ pub mod database;
 pub mod detection;
 pub mod detection_config;
 pub mod download;
+pub mod events;
 pub mod playlist;
 pub mod rebase;
 pub mod recordings;
@@ -593,17 +594,19 @@ pub enum Route {
     Cameras,
     ClipLink,
     DetectionStatus,
+    Events,
     Health,
     Recordings,
 }
 
 impl Route {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Activity,
         Self::CameraStatus,
         Self::Cameras,
         Self::ClipLink,
         Self::DetectionStatus,
+        Self::Events,
         Self::Health,
         Self::Recordings,
     ];
@@ -616,6 +619,7 @@ impl Route {
             Self::Cameras => format!("{API_PREFIX}cameras"),
             Self::ClipLink => format!("{API_PREFIX}clip-link"),
             Self::DetectionStatus => format!("{API_PREFIX}detection/status"),
+            Self::Events => format!("{API_PREFIX}events"),
             Self::Health => format!("{API_PREFIX}health"),
             Self::Recordings => format!("{API_PREFIX}recordings"),
         }
@@ -652,6 +656,9 @@ async fn route(request: &Request, context: &ConnectionContext) -> Response {
     if let Some(media) = playlist::media_parts(&request.path) {
         return playlist::handle(request, config, index_path, media).await;
     }
+    if let Some(segment) = events::review_id_segment(&request.path) {
+        return event_detail(request, config, index_path, segment, clock).await;
+    }
     let Some(route) = Route::ALL
         .into_iter()
         .find(|candidate| candidate.path() == request.path)
@@ -673,6 +680,7 @@ async fn route(request: &Request, context: &ConnectionContext) -> Response {
         Route::Cameras => cameras(config, &request.remote_role).await,
         Route::ClipLink => clip_link(request, config, db_path, clock).await,
         Route::DetectionStatus => detection::status(config, &request.remote_role, detection).await,
+        Route::Events => events_list(request, config, index_path, clock).await,
         Route::Health => health(config, db_path).await,
         Route::Recordings => recordings(request, config, index_path).await,
     }
@@ -753,6 +761,72 @@ async fn recordings(request: &Request, config: &ConfigSource, index_path: &Path)
         .await;
     match read {
         Ok(Ok(ranges)) => Response::json("200 OK", recordings::ranges_body(&query.camera, &ranges)),
+        Ok(Err(_)) | Err(_) => recording_unavailable(),
+    }
+}
+
+async fn events_list(
+    request: &Request,
+    config: &ConfigSource,
+    index_path: &Path,
+    clock: &Clock,
+) -> Response {
+    let query = match events::EventsQuery::parse(&request.query) {
+        Ok(query) => query,
+        Err(reason) => return bad_request(&reason),
+    };
+    let mut cameras = match config.allowed_camera_names(&request.remote_role).await {
+        Ok(cameras) => cameras,
+        Err(err) => return config_unavailable(&err),
+    };
+    if let Some(requested) = &query.cameras {
+        cameras.retain(|name| requested.contains(name));
+    }
+    if cameras.is_empty() {
+        return Response::json("200 OK", events::empty_list_body());
+    }
+    let now = clock();
+    // rusqlite is synchronous: the index read moves off the async worker.
+    let index_path = index_path.to_path_buf();
+    let read = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<u8>> {
+        let connection = database::open_read_only(&index_path)?;
+        events::list_body(&connection, &query, &cameras, now)
+    })
+    .await;
+    match read {
+        Ok(Ok(body)) => Response::json("200 OK", body),
+        Ok(Err(_)) | Err(_) => recording_unavailable(),
+    }
+}
+
+async fn event_detail(
+    request: &Request,
+    config: &ConfigSource,
+    index_path: &Path,
+    segment: &str,
+    clock: &Clock,
+) -> Response {
+    if let Err(reason) = activity::parse_parameters(&request.query, &[]) {
+        return bad_request(&reason);
+    }
+    let Ok(id) = segment.parse::<i64>() else {
+        return review_not_found();
+    };
+    let cameras = match config.allowed_camera_names(&request.remote_role).await {
+        Ok(cameras) => cameras,
+        Err(err) => return config_unavailable(&err),
+    };
+    let now = clock();
+    // rusqlite is synchronous: the index read moves off the async worker.
+    let index_path = index_path.to_path_buf();
+    let read = tokio::task::spawn_blocking(move || -> rusqlite::Result<Option<Vec<u8>>> {
+        let connection = database::open_read_only(&index_path)?;
+        events::detail_body(&connection, id, &cameras, now)
+    })
+    .await;
+    match read {
+        Ok(Ok(Some(body))) => Response::json("200 OK", body),
+        Ok(Ok(None)) => review_not_found(),
         Ok(Err(_)) | Err(_) => recording_unavailable(),
     }
 }
@@ -987,6 +1061,10 @@ fn no_footage() -> Response {
 
 fn camera_not_found() -> Response {
     error_response("404 Not Found", "not_found", "No such camera.")
+}
+
+fn review_not_found() -> Response {
+    error_response("404 Not Found", "not_found", "No such review.")
 }
 
 fn no_picture() -> Response {

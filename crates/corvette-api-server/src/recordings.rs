@@ -85,7 +85,7 @@ pub(crate) fn to_millis(seconds: f64) -> i64 {
 }
 
 /// The index's milliseconds as the exact Unix-seconds JSON number the response carries.
-fn seconds_number(millis: i64) -> Value {
+pub(crate) fn seconds_number(millis: i64) -> Value {
     let text = format!("{}.{:03}", millis.div_euclid(1000), millis.rem_euclid(1000));
     Value::Number(
         text.parse::<Number>()

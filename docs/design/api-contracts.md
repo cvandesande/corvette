@@ -695,8 +695,8 @@ where `code` is a stable machine value to branch on and `message` describes the 
   has no usable Frigate configuration.
 - `database_unavailable` (`503`): the activity or range-link route could not read Frigate's
   database. The underlying error is logged, not returned.
-- `recording_unavailable` (`503`): the recordings route could not read Corvette's recording
-  index, because the file is absent, unreadable or corrupt. No answer or log line carries
+- `recording_unavailable` (`503`): the recordings route or the events routes could not read
+  Corvette's recording index, because the file is absent, unreadable or corrupt. No answer or log line carries
   the underlying error or names the index path. A read-only mount of the index cannot be
   served between recorder runs, after the recorder closes it cleanly, until the recorder
   reopens it; that case answers this code. The status route answers the same failure
@@ -1123,6 +1123,98 @@ recordings summary routes; this contract replaces them.
 
 The route accepts `GET` only, with the identity rules "Corvette's own API lives
 under `/corvette/api/v1/`" states for every route.
+
+## Reviews list through `/corvette/api/v1/events`
+
+Two routes together answer Corvette's own review timeline: the list answers
+which reviews happened in a window, and the detail answers one review with the
+events inside it. Frigate's `/api/events` set is the current backing these
+routes replace; the response shapes stand on their own.
+
+An event is one camera track that moved. Its first-motion time is the first
+frame whose box centre lies more than 0.04 of the frame away from the track's
+first centre; a track that never moved opens no event. A review is a camera's
+time range holding one or more overlapping events; it ends after a per-severity
+inactivity cutoff, 40 s for `alert` and 30 s for `detection`, and its severity
+is `alert` when any event it holds carries one of the camera's alert labels,
+`detection` otherwise. A review may upgrade to `alert` and never downgrades.
+
+`GET /corvette/api/v1/events?after=&before=&cameras=&severity=` answers
+`{"reviews":[{"id","camera","severity","start","end","media.clip"}, ...]}`:
+
+- `after` and `before` are required Unix seconds under the activity route's
+  rules: decimal fractions allowed, finite and not negative, `after < before`,
+  and at most 31 days apart.
+- `cameras` is an optional comma-separated list of camera names, narrowed and
+  dropped exactly as the activity route narrows its camera set: a name that is
+  unknown or not allowed for the role is dropped without an error, and an empty
+  `cameras` value names no camera and answers an empty list.
+- `severity` is an optional comma-separated subset of `alert,detection`; absent
+  means both, and any other value answers `400` `bad_request`. Parameter
+  validation follows the activity route: an unknown, repeated or value-less
+  parameter, an empty segment (`&&` or a trailing `&`), a malformed escape or
+  one that decodes to invalid UTF-8 answers `400` with a message naming the
+  reason, checked before the configuration is fetched.
+- `id` identifies a review in Corvette's index and is stable for one review.
+  `start` and `end` are Unix seconds with millisecond precision, `end` null
+  while the review is still open.
+- Reviews are ordered by `start`, then `id`, the order the activity route
+  gives its reviews, so one client reading both answers sees one order.
+
+A review belongs to the window when it overlaps it, exactly as "Ranges use
+half-open overlap" states: it starts before `before`, and it is ongoing, ends
+after `after`, or starts at or after `after`. A review crossing a window edge
+appears once in that window; two adjacent windows list an exactly-touching pair
+with one review each, and a review crossing the shared boundary keeps its `id`
+in both so clients deduplicate by `id`.
+
+`media.clip` follows "Media availability is explicit": it is present as
+`{"url": ...}` when recorded footage of the review's camera overlaps the
+review's half-open `[start, end)` — an open review uses the moment of the
+request in place of its end, and the link's range ends there — and `null`
+otherwise. The answer is computed from the recording index at query time, never
+from a stored flag, so footage deleted after the review was recorded shows no
+clip. The URL is the playlist address "A recorded range plays through one
+playlist route" defines, with the four-second padding that section states.
+
+The camera set follows the role rule "Corvette's own API lives under
+`/corvette/api/v1/`" states for the cameras route; a role that may see no
+cameras answers `200` with an empty list without reading the index. An
+unreadable index answers `503` `recording_unavailable` on the one condition the
+recordings route states: the file is absent, unreadable or corrupt. The index
+is opened read-only and never written.
+
+## A review answers with its events
+
+`GET /corvette/api/v1/events/<id>` answers the review's own fields — `id`,
+`camera`, `severity`, `start`, `end`, `media` as the list route states them —
+plus `"events": [{"label","box","zones","first_motion"}, ...]`, the events on
+the review's camera whose active span overlaps the review's half-open window,
+ordered by their start then their id:
+
+- `label` is the detection class of the track.
+- `box` is the track's latest bounding box in detect-frame coordinates.
+- `zones` lists the zones the track entered.
+- `first_motion` is the event's first-motion time, null when it was never set.
+
+Both spans are half-open, and an event is a member when its active span
+overlaps the review's window: `event.start < review_end` and
+`event_end > review_start`. An event's end is its stored end, or its
+last-motion time while it is open; if that end equals its start — one frame —
+the span counts as `[start, start + 1 ms)`, so a single-frame event inside the
+window still belongs. A review's end is its stored end, or its last-activity
+time while it is open, so an open review's window runs to its last activity.
+An event ending exactly at the review's start does not overlap and is absent;
+an event active across two adjacent reviews answers under both. Membership is
+computed from the times at query time, never from a stored link between an
+event and a review, so neither answer can go stale as a review extends.
+
+`<id>` is a decimal integer and the route takes no query parameters; any
+parameter answers `400` `bad_request`. An unknown `id` answers `404` `not_found`
+with the message `No such review.`; a review on a camera the caller's role may
+not see answers the same, so the route reveals nothing about cameras the caller
+cannot see. An unreadable index answers `503` `recording_unavailable` like the
+list route.
 
 ## The server serves a camera's current picture
 
