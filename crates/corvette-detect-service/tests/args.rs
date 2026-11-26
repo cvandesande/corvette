@@ -1,4 +1,4 @@
-use corvette_detect_service::{Invocation, Options, parse};
+use corvette_detect_service::{DEFAULT_IPC_SOCKET, Invocation, Options, parse};
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -8,7 +8,7 @@ fn owned(args: &[&str]) -> Vec<OsString> {
 }
 
 fn options(args: &[&str], env: Option<&str>) -> Options {
-    match parse(&owned(args), env.map(OsStr::new)) {
+    match parse(&owned(args), env.map(OsStr::new), None) {
         Ok(Invocation::Serve(options)) => *options,
         Ok(other) => panic!("non-serve invocation: {other:?}"),
         Err(message) => panic!("unexpected usage error: {message}"),
@@ -16,7 +16,7 @@ fn options(args: &[&str], env: Option<&str>) -> Options {
 }
 
 fn refused(args: &[&str]) -> String {
-    match parse(&owned(args), None) {
+    match parse(&owned(args), None, None) {
         Ok(other) => panic!("unexpected success: {other:?}"),
         Err(message) => message,
     }
@@ -129,7 +129,10 @@ fn each_required_flag_is_demanded_when_absent() {
 #[test]
 fn help_wins_over_everything_else() {
     for args in [&["--help"][..], &["--help", "--bogus"][..]] {
-        assert!(matches!(parse(&owned(args), None), Ok(Invocation::Help)));
+        assert!(matches!(
+            parse(&owned(args), None, None),
+            Ok(Invocation::Help)
+        ));
     }
 }
 
@@ -147,7 +150,7 @@ fn unknown_flag_names_itself() {
 }
 
 fn probe_socket(args: &[&str], env: Option<&str>) -> PathBuf {
-    match parse(&owned(args), env.map(OsStr::new)) {
+    match parse(&owned(args), env.map(OsStr::new), None) {
         Ok(Invocation::Probe { socket }) => socket,
         Ok(other) => panic!("unexpected success: {other:?}"),
         Err(message) => panic!("unexpected usage error: {message}"),
@@ -394,4 +397,138 @@ fn track_events_socket_is_refused_with_probe() {
         ]),
         "flag --track-events-socket is not allowed with --probe"
     );
+}
+
+#[test]
+fn ipc_socket_defaults_when_no_flag_or_environment_is_given() {
+    let opts = options(&with(&base(), &["--socket", "/s.sock"]), None);
+    assert_eq!(opts.ipc_socket, PathBuf::from(DEFAULT_IPC_SOCKET));
+}
+
+#[test]
+fn ipc_socket_flag_is_kept() {
+    let with = options(
+        &with(&base(), &["--socket", "/s.sock", "--ipc-socket", "/i.sock"]),
+        None,
+    );
+    assert_eq!(with.ipc_socket, PathBuf::from("/i.sock"));
+}
+
+#[test]
+fn ipc_socket_comes_from_environment_when_flag_absent() {
+    let invocation = parse(
+        &owned(&with(&base(), &["--socket", "/s.sock"])),
+        None,
+        Some(OsStr::new("/env.sock")),
+    );
+    let Ok(Invocation::Serve(options)) = invocation else {
+        panic!("unexpected invocation: {invocation:?}");
+    };
+    assert_eq!(options.ipc_socket, PathBuf::from("/env.sock"));
+}
+
+#[test]
+fn ipc_socket_flag_overrides_environment() {
+    let invocation = parse(
+        &owned(&with(
+            &base(),
+            &["--socket", "/s.sock", "--ipc-socket", "/i.sock"],
+        )),
+        None,
+        Some(OsStr::new("/env.sock")),
+    );
+    let Ok(Invocation::Serve(options)) = invocation else {
+        panic!("unexpected invocation: {invocation:?}");
+    };
+    assert_eq!(options.ipc_socket, PathBuf::from("/i.sock"));
+}
+
+#[test]
+fn ipc_socket_given_twice_is_a_usage_error() {
+    assert_eq!(
+        refused(&with(
+            &base(),
+            &[
+                "--socket",
+                "/s.sock",
+                "--ipc-socket",
+                "/i.sock",
+                "--ipc-socket",
+                "/i-dup.sock",
+            ],
+        )),
+        "flag --ipc-socket given twice"
+    );
+}
+
+#[test]
+fn ipc_socket_is_refused_with_probe() {
+    assert_eq!(
+        refused(&["--probe", "--socket", "/p.sock", "--ipc-socket", "/i.sock",]),
+        "flag --ipc-socket is not allowed with --probe"
+    );
+}
+
+fn refused_env(args: &[&str], env_socket: Option<&str>, env_ipc: Option<&str>) -> String {
+    match parse(
+        &owned(args),
+        env_socket.map(OsStr::new),
+        env_ipc.map(OsStr::new),
+    ) {
+        Ok(other) => panic!("unexpected success: {other:?}"),
+        Err(message) => message,
+    }
+}
+
+#[test]
+fn relative_socket_flag_names_the_flag_as_usage_error() {
+    assert_eq!(
+        refused(&with(&base(), &["--socket", "s.sock"])),
+        "flag --socket has value s.sock, expected an absolute path"
+    );
+}
+
+#[test]
+fn relative_ipc_socket_flag_names_the_flag_as_usage_error() {
+    assert_eq!(
+        refused(&with(
+            &base(),
+            &["--socket", "/s.sock", "--ipc-socket", "i.sock"]
+        )),
+        "flag --ipc-socket has value i.sock, expected an absolute path"
+    );
+}
+
+#[test]
+fn relative_probe_socket_names_the_flag_as_usage_error() {
+    assert_eq!(
+        refused(&["--probe", "--socket", "p.sock"]),
+        "flag --socket has value p.sock, expected an absolute path"
+    );
+}
+
+#[test]
+fn relative_socket_environment_names_it_as_usage_error() {
+    assert_eq!(
+        refused_env(&base(), Some("env.sock"), None),
+        "environment variable CORVETTE_DETECTION_SOCKET has value env.sock, expected an absolute path"
+    );
+}
+
+#[test]
+fn relative_ipc_socket_environment_names_it_as_usage_error() {
+    assert_eq!(
+        refused_env(
+            &with(&base(), &["--socket", "/s.sock"]),
+            None,
+            Some("i.sock")
+        ),
+        "environment variable CORVETTE_IPC_SOCKET has value i.sock, expected an absolute path"
+    );
+}
+
+#[test]
+fn absolute_socket_environment_is_accepted() {
+    let opts = options(&base(), Some("/env.sock"));
+    assert_eq!(opts.socket, PathBuf::from("/env.sock"));
 }

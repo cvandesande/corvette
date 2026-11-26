@@ -1,12 +1,14 @@
-//! The detection service process: argument parsing, startup order and the serve loop over the status socket.
+//! The detection service process: argument parsing, startup order and the serve loops over the status socket and the ipc socket.
 #![forbid(unsafe_code)]
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read as _, Write as _};
-use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
+use std::os::unix::fs::{
+    DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, PermissionsExt as _,
+};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, absolute};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,10 +27,11 @@ const USAGE: &str = "\
 usage: corvette-detect-service --config PATH --ffmpeg PROGRAM
            --worker PROGRAM --worker-param PATH --worker-bin PATH
            --worker-max-deadline-ms N
-           [--socket PATH] [--track-events-socket PATH]
+           [--socket PATH] [--ipc-socket PATH] [--track-events-socket PATH]
            [--restream-address HOST:PORT] [--worker-device VALUE]
            [--frame-timeout-ms N] [--stop-timeout-ms N]
        corvette-detect-service --probe [--socket PATH]
+       --ipc-socket defaults to /run/corvette-detect/ipc/ipc.sock
        corvette-detect-service --help
        --restream-address is required when any camera has no source table
 exit codes:
@@ -47,6 +50,7 @@ const MAX_FRAME_TIMEOUT_MS: u64 = 600_000;
 // Proposal until a measured camera stop time replaces this total shutdown budget.
 const DEFAULT_STOP_TIMEOUT_MS: u64 = 15_000;
 const MAX_STOP_TIMEOUT_MS: u64 = 600_000;
+pub const DEFAULT_IPC_SOCKET: &str = "/run/corvette-detect/ipc/ipc.sock";
 const PROBE_IO_TIMEOUT: Duration = Duration::from_secs(3);
 const PROBE_REQUEST: &str = "GET /corvette/api/v1/detection/status HTTP/1.1\r\nHost: corvette-detect\r\nConnection: close\r\n\r\n";
 // A peer that streams without a newline cannot grow the probe past this read cap.
@@ -63,6 +67,7 @@ pub enum Invocation {
 pub struct Options {
     pub config: PathBuf,
     pub socket: PathBuf,
+    pub ipc_socket: PathBuf,
     pub track_events_socket: Option<PathBuf>,
     pub ffmpeg: PathBuf,
     pub restream_address: Option<String>,
@@ -84,6 +89,7 @@ pub struct WorkerLaunch {
 struct FlagSlots {
     config: Option<PathBuf>,
     socket: Option<PathBuf>,
+    ipc_socket: Option<PathBuf>,
     track_events_socket: Option<PathBuf>,
     ffmpeg: Option<PathBuf>,
     restream_address: Option<String>,
@@ -101,6 +107,7 @@ impl FlagSlots {
     fn extra_with_probe(&self) -> Option<&'static str> {
         [
             self.config.as_ref().map(|_| "config"),
+            self.ipc_socket.as_ref().map(|_| "ipc-socket"),
             self.track_events_socket
                 .as_ref()
                 .map(|_| "track-events-socket"),
@@ -122,11 +129,15 @@ impl FlagSlots {
     }
 }
 
-/// Parses one command line; `env_socket` is the environment socket default used when no `--socket` flag is given.
+/// Parses one command line; `env_socket` and `env_ipc_socket` are the environment defaults used when the matching socket flag is absent.
 ///
 /// # Errors
 /// Usage text naming the unknown flag, the repeated flag, the missing value, the missing required flag or the refused value.
-pub fn parse(args: &[OsString], env_socket: Option<&OsStr>) -> Result<Invocation, String> {
+pub fn parse(
+    args: &[OsString],
+    env_socket: Option<&OsStr>,
+    env_ipc_socket: Option<&OsStr>,
+) -> Result<Invocation, String> {
     if args.iter().any(|arg| arg.as_os_str() == "--help") {
         return Ok(Invocation::Help);
     }
@@ -180,6 +191,7 @@ pub fn parse(args: &[OsString], env_socket: Option<&OsStr>) -> Result<Invocation
                 let slot = match name {
                     "--config" => &mut slots.config,
                     "--socket" => &mut slots.socket,
+                    "--ipc-socket" => &mut slots.ipc_socket,
                     "--track-events-socket" => &mut slots.track_events_socket,
                     "--ffmpeg" => &mut slots.ffmpeg,
                     "--worker" => &mut slots.worker,
@@ -201,14 +213,21 @@ pub fn parse(args: &[OsString], env_socket: Option<&OsStr>) -> Result<Invocation
         });
     }
     Ok(Invocation::Serve(Box::new(serve_options(
-        slots, env_socket,
+        slots,
+        env_socket,
+        env_ipc_socket,
     )?)))
 }
 
-fn serve_options(slots: FlagSlots, env_socket: Option<&OsStr>) -> Result<Options, String> {
+fn serve_options(
+    slots: FlagSlots,
+    env_socket: Option<&OsStr>,
+    env_ipc_socket: Option<&OsStr>,
+) -> Result<Options, String> {
     Ok(Options {
         config: take_path(slots.config, "config")?,
         socket: take_socket(slots.socket, env_socket)?,
+        ipc_socket: take_ipc_socket(slots.ipc_socket, env_ipc_socket)?,
         track_events_socket: slots.track_events_socket,
         ffmpeg: take_path(slots.ffmpeg, "ffmpeg")?,
         restream_address: slots.restream_address,
@@ -311,9 +330,35 @@ fn take_path(slot: Option<PathBuf>, name: &str) -> Result<PathBuf, String> {
 
 fn take_socket(slot: Option<PathBuf>, env_socket: Option<&OsStr>) -> Result<PathBuf, String> {
     match (slot, env_socket) {
-        (Some(path), _) => Ok(path),
-        (None, Some(value)) => Ok(PathBuf::from(value)),
+        (Some(path), _) => require_absolute(path, "flag --socket"),
+        (None, Some(value)) => require_absolute(
+            PathBuf::from(value),
+            "environment variable CORVETTE_DETECTION_SOCKET",
+        ),
         (None, None) => Err("missing required flag --socket".to_string()),
+    }
+}
+
+fn take_ipc_socket(slot: Option<PathBuf>, env_ipc: Option<&OsStr>) -> Result<PathBuf, String> {
+    match (slot, env_ipc) {
+        (Some(path), _) => require_absolute(path, "flag --ipc-socket"),
+        (None, Some(value)) => require_absolute(
+            PathBuf::from(value),
+            "environment variable CORVETTE_IPC_SOCKET",
+        ),
+        (None, None) => Ok(PathBuf::from(DEFAULT_IPC_SOCKET)),
+    }
+}
+
+// The identity check folds `..` lexically when the parent does not exist yet; a relative path would dodge that fold.
+fn require_absolute(path: PathBuf, source: &str) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(format!(
+            "{source} has value {}, expected an absolute path",
+            path.display()
+        ))
     }
 }
 
@@ -336,9 +381,10 @@ fn text(value: &OsStr) -> String {
 pub fn run(
     args: &[OsString],
     env_socket: Option<&OsStr>,
+    env_ipc_socket: Option<&OsStr>,
     secret_lookup: impl Fn(&str) -> Option<String>,
 ) -> ExitCode {
-    let options = match parse(args, env_socket) {
+    let options = match parse(args, env_socket, env_ipc_socket) {
         Err(message) => return usage_error(&message),
         Ok(Invocation::Help) => {
             let _ = std::io::stdout().write_all(USAGE.as_bytes());
@@ -401,7 +447,13 @@ pub fn run(
         .iter()
         .map(|(name, threads)| (name.clone(), CameraEntry::Live(threads.handle())))
         .collect();
-    let bound = bind_socket(&options.socket)
+    let state = Arc::new(
+        ServiceState::new(entries)
+            .with_worker(worker.subscribe())
+            .with_config_path(options.config.clone()),
+    );
+    let bound = start_ipc(&runtime, &options, &state)
+        .and_then(|()| bind_socket(&options.socket))
         .and_then(|listener| start_track_events(&runtime, &options, &started).map(|()| listener));
     let listener = match bound {
         Ok(listener) => listener,
@@ -410,11 +462,6 @@ pub fn run(
             return ExitCode::from(EXIT_STARTUP);
         }
     };
-    let state = Arc::new(
-        ServiceState::new(entries)
-            .with_worker(worker.subscribe())
-            .with_config_path(options.config.clone()),
-    );
     match runtime.block_on(serve_or_signal(
         listener,
         state,
@@ -484,6 +531,7 @@ fn remove_socket(path: &Path) {
 
 fn remove_all_sockets(options: &Options) {
     remove_socket(&options.socket);
+    remove_socket(&options.ipc_socket);
     if let Some(path) = &options.track_events_socket {
         remove_socket(path);
     }
@@ -685,6 +733,46 @@ fn worker_command(
     }
 }
 
+// One path can reach one socket under several spellings; the parent's own resolution folds symlinks and `..` that text comparison would miss.
+fn socket_identity(path: &Path) -> PathBuf {
+    let resolved = match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => fs::canonicalize(parent)
+            .unwrap_or_else(|_| absolute(parent).unwrap_or_else(|_| parent.to_path_buf()))
+            .join(name),
+        _ => path.to_path_buf(),
+    };
+    let mut folded = PathBuf::new();
+    for part in resolved.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                folded.pop();
+            }
+            other => folded.push(other),
+        }
+    }
+    folded
+}
+
+// Binds and serves the ipc socket at the flag, environment or default path; the error names the event the caller logs.
+fn start_ipc(
+    runtime: &Runtime,
+    options: &Options,
+    state: &Arc<ServiceState>,
+) -> Result<(), (&'static str, String)> {
+    let path = &options.ipc_socket;
+    // One path twice would let the legacy claim steal the ipc socket and rebind it at 0666.
+    if socket_identity(path) == socket_identity(&options.socket) {
+        return Err((
+            "ipc-socket-refused",
+            format!("{} names both sockets", path.display()),
+        ));
+    }
+    let listener = bind_ipc_socket(path).map_err(|reason| ("ipc-socket-refused", reason))?;
+    runtime.spawn(serve(listener, Arc::clone(state)));
+    Ok(())
+}
+
 // Binds and serves the track-event socket when the flag named a path; the error names the event the caller logs.
 fn start_track_events(
     runtime: &Runtime,
@@ -751,6 +839,67 @@ fn claim_socket(path: &Path) -> Result<UnixListener, String> {
         return Err(format!("{} could not be removed: {error}", path.display()));
     }
     UnixListener::bind(path).map_err(|error| format!("{} bind failed: {error}", path.display()))
+}
+
+// Binds the ipc socket at 0600 inside its checked directory; the returned reason is the one line the caller logs.
+fn bind_ipc_socket(path: &Path) -> Result<tokio::net::UnixListener, String> {
+    let dir = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    prepare_ipc_dir(dir)?;
+    let std_listener = claim_socket(path)?;
+    let listener = std_listener
+        .set_nonblocking(true)
+        .and_then(|()| tokio::net::UnixListener::from_std(std_listener))
+        .map_err(|error| format!("{} could not enter the runtime: {error}", path.display()))?;
+    // Chmod after bind as the status socket does: the 0700 directory already excludes every other holder.
+    if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+        remove_socket(path);
+        return Err(format!("{}: {error}", path.display()));
+    }
+    log_event(
+        "service",
+        "socket-bound",
+        format!("ipc path={}", path.display()),
+    );
+    Ok(listener)
+}
+
+// The ipc directory holds the pod's internal socket: a real directory owned by this process at 0700, created here when absent.
+fn prepare_ipc_dir(dir: &Path) -> Result<(), String> {
+    let own = own_uid()?;
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(format!(
+            "{} is a symlink, expected a directory",
+            dir.display()
+        )),
+        Ok(meta) if !meta.is_dir() => Err(format!("{} is not a directory", dir.display())),
+        Ok(meta) if meta.uid() != own => Err(format!(
+            "{} is owned by uid {}, expected this process's uid {own}",
+            dir.display(),
+            meta.uid()
+        )),
+        Ok(meta) if meta.permissions().mode() & 0o777 != 0o700 => Err(format!(
+            "{} has mode {:04o}, expected 0700",
+            dir.display(),
+            meta.permissions().mode() & 0o777
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::DirBuilder::new()
+            .mode(0o700)
+            .create(dir)
+            .and_then(|()| fs::set_permissions(dir, fs::Permissions::from_mode(0o700)))
+            .map_err(|error| format!("{} could not be created: {error}", dir.display())),
+        Err(error) => Err(format!("{} could not be inspected: {error}", dir.display())),
+    }
+}
+
+// std exposes no getuid; on Linux the kernel owns /proc/self with this process's own uid.
+fn own_uid() -> Result<u32, String> {
+    fs::metadata("/proc/self")
+        .map(|meta| meta.uid())
+        .map_err(|error| format!("this process's uid could not be read: {error}"))
 }
 
 fn log_event(unit: &str, event: &str, detail: impl std::fmt::Display) {

@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -56,6 +56,7 @@ fn service_command_with_ffmpeg(
     let mut command = Command::new(BIN);
     command
         .env_remove("CORVETTE_DETECTION_SOCKET")
+        .env_remove("CORVETTE_IPC_SOCKET")
         .arg("--config")
         .arg(dir.join("config.toml"))
         .arg("--socket")
@@ -127,6 +128,8 @@ fn start(tag: &str) -> Running {
     // A worker that exits at once, the same status answer /bin/true gives on hosts that have it.
     let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
     let child = service_command(&dir, &worker, "127.0.0.1:8554")
+        .arg("--ipc-socket")
+        .arg(dir.join("ipc").join("ipc.sock"))
         .spawn()
         .unwrap();
     let socket = dir.join("service.sock");
@@ -223,6 +226,8 @@ fn stale_socket_file_is_replaced_and_the_service_answers() {
     // A dropped std listener leaves its socket file behind: the stale case to replace.
     drop(UnixListener::bind(&socket).unwrap());
     let child = service_command(&dir, Path::new("/bin/true"), "127.0.0.1:8554")
+        .arg("--ipc-socket")
+        .arg(dir.join("ipc").join("ipc.sock"))
         .spawn()
         .unwrap();
     let service = Running { child, socket };
@@ -258,11 +263,12 @@ fn socket_file_mode_is_0666_under_a_restrictive_umask() {
     // The file's helpers cannot set a umask without unsafe, so sh sets it before exec.
     let quote = |p: &Path| format!("'{}'", p.display());
     let script = format!(
-        "umask 077 && exec {BIN} --config {config} --socket {socket} --ffmpeg {ffmpeg} \
+        "umask 077 && exec {BIN} --config {config} --socket {socket} --ipc-socket {ipc} --ffmpeg {ffmpeg} \
          --restream-address 127.0.0.1:8554 --worker {worker} --worker-param {param} \
          --worker-bin {bindir} --worker-max-deadline-ms 5000",
         config = quote(&dir.join("config.toml")),
         socket = quote(&socket),
+        ipc = quote(&dir.join("ipc").join("ipc.sock")),
         ffmpeg = quote(&ffmpeg),
         worker = quote(&worker),
         param = quote(&dir.join("param")),
@@ -469,7 +475,11 @@ fn start_stopping(tag: &str, extra: &[&str]) -> Stopping {
         ),
     );
     let mut command = service_command_with_ffmpeg(&dir, &worker, "127.0.0.1:8554", &ffmpeg);
-    command.args(extra).stderr(Stdio::piped());
+    command
+        .args(extra)
+        .arg("--ipc-socket")
+        .arg(dir.join("ipc").join("ipc.sock"))
+        .stderr(Stdio::piped());
     let mut child = command.spawn().unwrap();
     let socket = dir.join("service.sock");
     wait_until("the service socket", || socket.exists());
@@ -614,6 +624,8 @@ fn service_command_without_restream(dir: &Path, worker: &Path, ffmpeg: &Path) ->
         .arg(dir.join("config.toml"))
         .arg("--socket")
         .arg(dir.join("service.sock"))
+        .arg("--ipc-socket")
+        .arg(dir.join("ipc").join("ipc.sock"))
         .arg("--ffmpeg")
         .arg(ffmpeg)
         .arg("--worker")
@@ -828,6 +840,8 @@ fn track_events_socket_listens_alongside_the_status_socket_and_answers_nothing_u
     let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
     let mut command = service_command(&dir, &worker, "127.0.0.1:8554");
     command
+        .arg("--ipc-socket")
+        .arg(dir.join("ipc").join("ipc.sock"))
         .arg("--track-events-socket")
         .arg(dir.join("track.sock"));
     let child = command.spawn().unwrap();
@@ -856,4 +870,287 @@ fn track_events_socket_listens_alongside_the_status_socket_and_answers_nothing_u
                 || error.kind() == std::io::ErrorKind::TimedOut => {}
         Err(error) => panic!("the track subscriber read failed: {error}"),
     }
+}
+
+const CONFIG: &str = "/corvette/api/v1/detection/config";
+const SCHEMA: &str = "/corvette/api/v1/detection/config/schema";
+const IPC_REFUSAL: &str = "ipc-socket-refused";
+
+fn start_with_ipc(tag: &str) -> (Running, PathBuf) {
+    let dir = temp_dir(tag);
+    write_labels(&dir);
+    write_config(&dir);
+    let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
+    let ipc = dir.join("ipc").join("ipc.sock");
+    let mut command = service_command(&dir, &worker, "127.0.0.1:8554");
+    command.arg("--ipc-socket").arg(&ipc);
+    let child = command.spawn().unwrap();
+    let socket = dir.join("service.sock");
+    wait_until("both socket files", || socket.exists() && ipc.exists());
+    (Running { child, socket }, ipc)
+}
+
+fn refusal_lines(stderr: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .filter(|line| line.contains(IPC_REFUSAL))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn ipc_socket_answers_the_status_socket_routes_identically() {
+    let (service, ipc) = start_with_ipc("ipc-parity");
+    wait_until("a status of 200 on the status socket", || {
+        try_get(&service.socket, STATUS).is_some_and(|found| found.0 == 200)
+    });
+    wait_until("a status of 200 on the ipc socket", || {
+        try_get(&ipc, STATUS).is_some_and(|found| found.0 == 200)
+    });
+    for target in [CONFIG, SCHEMA, OBJECTS] {
+        let status_socket_answer =
+            try_get(&service.socket, target).expect("an answer on the status socket");
+        let ipc_answer = try_get(&ipc, target).expect("an answer on the ipc socket");
+        assert_eq!(
+            ipc_answer, status_socket_answer,
+            "the sockets disagree on GET {target}"
+        );
+    }
+}
+
+#[test]
+fn ipc_socket_lives_in_a_directory_0700_as_a_socket_0600() {
+    let (_service, ipc) = start_with_ipc("ipc-modes");
+    wait_until("a status of 200 on the ipc socket", || {
+        try_get(&ipc, STATUS).is_some_and(|found| found.0 == 200)
+    });
+    let directory = ipc.parent().expect("the ipc path has a directory");
+    let directory_meta = fs::symlink_metadata(directory).unwrap();
+    assert!(
+        directory_meta.file_type().is_dir(),
+        "the ipc directory is not a directory"
+    );
+    assert_eq!(directory_meta.permissions().mode() & 0o777, 0o700);
+    let socket_meta = fs::symlink_metadata(&ipc).unwrap();
+    assert!(socket_meta.file_type().is_socket());
+    assert_eq!(socket_meta.permissions().mode() & 0o777, 0o600);
+}
+
+#[test]
+fn ipc_path_whose_parent_is_a_regular_file_exits_three() {
+    let dir = temp_dir("ipc-file-parent");
+    write_labels(&dir);
+    write_config(&dir);
+    let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
+    let blocker = dir.join("not-a-dir");
+    fs::write(&blocker, "block\n").unwrap();
+    let mut command = service_command(&dir, &worker, "127.0.0.1:8554");
+    command
+        .arg("--ipc-socket")
+        .arg(blocker.join("ipc.sock"))
+        .stderr(Stdio::piped());
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        refusal_lines(&output.stderr).len(),
+        1,
+        "expected one plain refusal line"
+    );
+}
+
+#[test]
+fn ipc_socket_naming_the_status_socket_through_a_second_spelling_exits_three() {
+    let dir = temp_dir("ipc-same-spelling");
+    write_labels(&dir);
+    write_config(&dir);
+    let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
+    // 0700 keeps the directory guard from refusing the second spelling before the identity check acts.
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = dir.join("service.sock");
+    let spelling = dir
+        .join("..")
+        .join(dir.file_name().expect("the temp dir has a name"))
+        .join("service.sock");
+    assert_ne!(
+        spelling.as_os_str(),
+        socket.as_os_str(),
+        "the test must not degenerate into text equality"
+    );
+    let mut command = service_command(&dir, &worker, "127.0.0.1:8554");
+    command
+        .arg("--ipc-socket")
+        .arg(&spelling)
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let started = Instant::now();
+    let status = loop {
+        if let Some(found) = child.try_wait().unwrap() {
+            break found;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the service kept serving one path bound under two names"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    let mut pipe = child.stderr.take().unwrap();
+    let mut err = Vec::new();
+    pipe.read_to_end(&mut err).unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(status.code(), Some(3));
+    assert_eq!(
+        refusal_lines(&err),
+        vec![format!(
+            "corvette-detect unit=\"service\" event=ipc-socket-refused detail=\"{} names both sockets\"",
+            spelling.display()
+        )],
+        "expected the equal-path refusal before any bind"
+    );
+    assert!(!socket.exists(), "one path was bound before the refusal");
+}
+
+#[test]
+fn ipc_socket_spelled_through_a_not_yet_existing_parent_dir_exits_three() {
+    let dir = temp_dir("ipc-fold-spelling");
+    write_labels(&dir);
+    write_config(&dir);
+    let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = dir.join("service.sock");
+    // The fold branch: canonicalize fails on the absent parent, so only the lexical fold can match.
+    let spelling = dir.join("not-yet").join("..").join("service.sock");
+    let mut command = service_command(&dir, &worker, "127.0.0.1:8554");
+    command
+        .arg("--ipc-socket")
+        .arg(&spelling)
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let started = Instant::now();
+    let status = loop {
+        if let Some(found) = child.try_wait().unwrap() {
+            break found;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the service kept serving one path bound under two names"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    let mut pipe = child.stderr.take().unwrap();
+    let mut err = Vec::new();
+    pipe.read_to_end(&mut err).unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(status.code(), Some(3));
+    assert_eq!(
+        refusal_lines(&err),
+        vec![format!(
+            "corvette-detect unit=\"service\" event=ipc-socket-refused detail=\"{} names both sockets\"",
+            spelling.display()
+        )],
+        "expected the equal-path refusal before any bind"
+    );
+    assert!(!socket.exists(), "one path was bound before the refusal");
+}
+
+#[test]
+fn ipc_directory_with_the_wrong_mode_exits_three() {
+    let dir = temp_dir("ipc-bad-mode");
+    write_labels(&dir);
+    write_config(&dir);
+    let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
+    let directory = dir.join("ipc");
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+    let ipc = directory.join("ipc.sock");
+    let mut command = service_command(&dir, &worker, "127.0.0.1:8554");
+    command.arg("--ipc-socket").arg(&ipc).stderr(Stdio::piped());
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert!(!ipc.exists());
+    assert_eq!(
+        refusal_lines(&output.stderr).len(),
+        1,
+        "expected one plain refusal line"
+    );
+}
+
+#[test]
+fn ipc_directory_that_is_a_symlink_exits_three() {
+    let dir = temp_dir("ipc-symlink");
+    write_labels(&dir);
+    write_config(&dir);
+    let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
+    let target = dir.join("real-dir");
+    fs::create_dir(&target).unwrap();
+    let directory = dir.join("ipc");
+    std::os::unix::fs::symlink(&target, &directory).unwrap();
+    let ipc = directory.join("ipc.sock");
+    let output = service_command(&dir, &worker, "127.0.0.1:8554")
+        .arg("--ipc-socket")
+        .arg(&ipc)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert!(
+        fs::symlink_metadata(&directory)
+            .expect("the symlink survived")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_dir(&target).unwrap().count(),
+        0,
+        "a bind followed the symlink"
+    );
+}
+
+#[test]
+fn ipc_directory_owned_by_another_uid_exits_three() {
+    let dir = temp_dir("ipc-other-owner");
+    write_labels(&dir);
+    write_config(&dir);
+    let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
+    let directory = dir.join("ipc");
+    fs::create_dir(&directory).unwrap();
+    let taken = Command::new("chown")
+        .arg("12345")
+        .arg(&directory)
+        .status()
+        .expect("the chown program ran");
+    if !taken.success() {
+        // Changing ownership needs privileges this test user does not have.
+        println!("skipped: chown to another uid is refused to this user");
+        return;
+    }
+    let ipc = directory.join("ipc.sock");
+    let output = service_command(&dir, &worker, "127.0.0.1:8554")
+        .arg("--ipc-socket")
+        .arg(&ipc)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+}
+
+#[test]
+fn ipc_socket_naming_the_status_socket_exits_three() {
+    let dir = temp_dir("ipc-same-path");
+    write_labels(&dir);
+    write_config(&dir);
+    let worker = executable(&dir, "fake-worker", "#!/bin/sh\nexit 0\n");
+    let socket = dir.join("service.sock");
+    let mut command = service_command(&dir, &worker, "127.0.0.1:8554");
+    command
+        .arg("--ipc-socket")
+        .arg(&socket)
+        .stderr(Stdio::piped());
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert!(!socket.exists(), "one path was bound before the refusal");
+    assert_eq!(
+        refusal_lines(&output.stderr).len(),
+        1,
+        "expected one plain refusal line"
+    );
 }
