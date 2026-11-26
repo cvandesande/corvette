@@ -85,19 +85,17 @@ The detection service starts without waiting for the worker and reports
 stateDiagram-v2
     direction LR
     [*] --> Starting
-    Starting --> Serving: model loaded, sockets claimed
+    Starting --> Serving: model loaded, serving socket claimed
     Starting --> Exited: startup failure
     Serving --> Exited: device lost
     Serving --> Exited: serving socket fails
     Serving --> Exited: deadline overrun
-    Serving --> Exited: liveness probe fails
     Serving --> Exited: service shutdown
     Exited --> Starting: service restarts the worker with back-off
     Exited --> Starting: kubelet restart
 ```
 
-- **Startup order.** Device, model, serving socket, health socket, then a ready
-  line. An answering health socket therefore means the model is loaded.
+- **Startup order.** Device, model, serving socket, then a ready line.
 - **Socket files.** Any socket file at a socket path is replaced, so a file left
   by an earlier run does not block a restart. Any other kind of file at a socket
   path stops startup and stays untouched.
@@ -107,21 +105,19 @@ stateDiagram-v2
   that trait is the only call of process exit. The crate's tests record the code
   through a recording `Terminator`, and the end-to-end tests of the binary
   observe the real exit. Every other end of the process returns a status from
-  `main`: help, probe, usage, startup failure and a failed serving socket.
+  `main`: help, usage, startup failure and a failed serving socket.
 - **Deadlines.** Each inference request carries a deadline. The operator-set cap
   bounds it, and a watchdog thread enforces the result. A health request carries
   a deadline field that the worker does not use.
 - **Liveness.** The container's probes run the service's probe mode:
   `corvette-detect-service --probe --socket PATH` exits `0` on HTTP `200` for
-  the status route. The worker keeps its own probe mode,
-  `corvette-detect-worker --probe --health-socket PATH`, for direct checks
-  against the health socket. Worker liveness rests on process exit plus the
-  watchdog: the service consults the worker's health socket nowhere in its
-  probes. A worker hung outside an engine call makes each camera's inference
-  request time out, and the status body then shows `inference_unavailable`
-  (`worker_link.rs:65`, `camera_runner.rs:163-165`); nothing restarts that
-  worker and the probe still answers `200`. A hung engine call ends in the
-  watchdog's exit, so health stays a plain "is it answering" check.
+  the status route. Worker liveness rests on process exit plus the watchdog:
+  the supervisor sees a worker exit as a child exit and restarts it. A worker
+  hung inside an engine call ends in the watchdog's exit. A worker hung
+  outside an engine call makes each camera's inference request time out, and
+  the status body then shows `inference_unavailable`
+  (`camera_runner.rs:187-189`); nothing restarts that worker and the probe
+  still answers `200`.
 - **Restart.** The detection service spawns the worker under `Supervised` and
   restarts it with the `DEFAULT_POLICY` back-off after an exit; the container
   keeps running across the worker's restart. The status body reports
@@ -197,9 +193,8 @@ delegation, except a decision that names its own date and adopter.
 | Model input geometry | `corvette-yolo` (crate root constants) |
 | Model output geometry, score gate, NMS threshold, maximum rows | `corvette-yolo` (`decode.rs` constants) |
 | Fatal reasons and their exit codes | `FatalReason` and the `EXIT_*` constants in `corvette-detect-worker/src/fatal.rs` |
-| Flags, probe mode, startup and usage exit codes | the `USAGE` text and the `EXIT_*` constants in `corvette-detect-worker/src/main.rs`; `tests/cli.rs` checks the behaviour |
+| Flags, startup and usage exit codes | the `USAGE` text and the `EXIT_*` constants in `corvette-detect-worker/src/main.rs`; `tests/cli.rs` checks the behaviour |
 | Request deadline rule and cap | `serve` in `corvette-detect-worker/src/serve.rs` and its deadline tests |
-| Health listener behaviour | `serve_health` in `corvette-detect-worker/src/health.rs` |
 | ncnn option settings | `configure_options` in `corvette-ncnn/src/net.rs` |
 | Service flags, probe mode and exit codes | the `USAGE` text and `EXIT_*` constants in `corvette-detect-service/src/lib.rs`; `tests/args.rs` and `tests/service.rs` check the behaviour |
 | Worker restart back-off | `DEFAULT_POLICY` in `corvette-detect/src/backoff.rs` |

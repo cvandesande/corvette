@@ -24,7 +24,7 @@ use tokio::sync::watch;
 const USAGE: &str = "\
 usage: corvette-detect-service --config PATH --ffmpeg PROGRAM
            --worker PROGRAM --worker-param PATH --worker-bin PATH
-           --worker-max-deadline-ms N --worker-health-socket PATH
+           --worker-max-deadline-ms N
            [--socket PATH] [--track-events-socket PATH]
            [--restream-address HOST:PORT] [--worker-device VALUE]
            [--frame-timeout-ms N] [--stop-timeout-ms N]
@@ -77,7 +77,6 @@ pub struct WorkerLaunch {
     pub param: PathBuf,
     pub bin: PathBuf,
     pub max_deadline_ms: u32,
-    pub health_socket: PathBuf,
     pub device: Option<String>,
 }
 
@@ -92,7 +91,6 @@ struct FlagSlots {
     worker_param: Option<PathBuf>,
     worker_bin: Option<PathBuf>,
     worker_max_deadline_ms: Option<u32>,
-    worker_health_socket: Option<PathBuf>,
     worker_device: Option<String>,
     frame_timeout_ms: Option<u64>,
     stop_timeout_ms: Option<u64>,
@@ -114,9 +112,6 @@ impl FlagSlots {
             self.worker_max_deadline_ms
                 .as_ref()
                 .map(|_| "worker-max-deadline-ms"),
-            self.worker_health_socket
-                .as_ref()
-                .map(|_| "worker-health-socket"),
             self.worker_device.as_ref().map(|_| "worker-device"),
             self.frame_timeout_ms.as_ref().map(|_| "frame-timeout-ms"),
             self.stop_timeout_ms.as_ref().map(|_| "stop-timeout-ms"),
@@ -190,7 +185,6 @@ pub fn parse(args: &[OsString], env_socket: Option<&OsStr>) -> Result<Invocation
                     "--worker" => &mut slots.worker,
                     "--worker-param" => &mut slots.worker_param,
                     "--worker-bin" => &mut slots.worker_bin,
-                    "--worker-health-socket" => &mut slots.worker_health_socket,
                     other => return Err(format!("unknown argument {other}")),
                 };
                 set_path(slot, &name[2..], argument(args, index, &flag)?)?;
@@ -225,7 +219,6 @@ fn serve_options(slots: FlagSlots, env_socket: Option<&OsStr>) -> Result<Options
             max_deadline_ms: slots
                 .worker_max_deadline_ms
                 .ok_or("missing required flag --worker-max-deadline-ms")?,
-            health_socket: take_path(slots.worker_health_socket, "worker-health-socket")?,
             device: slots.worker_device,
         },
         frame_timeout: Duration::from_millis(
@@ -683,8 +676,6 @@ fn worker_command(
             .arg(&launch.bin)
             .arg("--socket")
             .arg(&worker_socket)
-            .arg("--health-socket")
-            .arg(&launch.health_socket)
             .arg("--max-deadline-ms")
             .arg(launch.max_deadline_ms.to_string());
         if let Some(device) = &launch.device {

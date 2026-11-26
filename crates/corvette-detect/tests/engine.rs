@@ -203,7 +203,7 @@ fn an_error_reply_becomes_worker_with_the_code_message() {
 #[test]
 fn health_and_raw_replies_to_an_infer_are_unexpected() {
     let dir = temp_dir("kinds");
-    let health_socket = dir.join("health.sock");
+    let health_socket = dir.join("health-reply.sock");
     let raw_socket = dir.join("raw.sock");
     let health_listener = UnixListener::bind(&health_socket).expect("bind");
     let raw_listener = UnixListener::bind(&raw_socket).expect("bind");

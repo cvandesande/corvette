@@ -1,46 +1,36 @@
-//! The worker binary: command line, probe mode and serve mode.
+//! The worker binary: command line and serve mode.
 #![forbid(unsafe_code)]
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::unix::fs::FileTypeExt as _;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
 use std::time::Duration;
 
-use corvette_detect_proto::{HEADER_LEN, ID_LEN, Reply, Request};
-use corvette_detect_worker::{NcnnEngine, ProcessExit, ServeEnd, serve, serve_health};
+use corvette_detect_worker::{NcnnEngine, ProcessExit, ServeEnd, serve};
 use corvette_ncnn::Device;
 
 const USAGE: &str = "\
-usage: corvette-detect-worker --param PATH --bin PATH --socket PATH --health-socket PATH --max-deadline-ms N [--device VALUE]
-       corvette-detect-worker --probe --health-socket PATH
+usage: corvette-detect-worker --param PATH --bin PATH --socket PATH
+       --max-deadline-ms N [--device VALUE]
        corvette-detect-worker --help
 exit codes:
      0  help
-     1  probe failed
      2  usage error
      3  startup or runtime failure (device selection, model load, socket path refused or bind failed, the serve loop's I/O error)
     20  device lost
     21  request outlived its deadline
 ";
 
-const HEALTH_IO_TIMEOUT: Duration = Duration::from_secs(1);
-const PROBE_ID: u64 = 0x434f_5256_4554_5445;
-const PROBE_DEADLINE_MS: u32 = 1_000;
-const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
-
-const EXIT_PROBE_FAILED: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 const EXIT_STARTUP: u8 = 3;
 
 enum Command {
     Help,
-    Probe { health_socket: PathBuf },
     Serve(ServeConfig),
 }
 
@@ -48,7 +38,6 @@ struct ServeConfig {
     param: PathBuf,
     bin: PathBuf,
     socket: PathBuf,
-    health_socket: PathBuf,
     max_deadline_ms: u32,
     device: Option<String>,
 }
@@ -58,7 +47,6 @@ struct FlagSlots {
     param: Option<PathBuf>,
     bin: Option<PathBuf>,
     socket: Option<PathBuf>,
-    health_socket: Option<PathBuf>,
     max_deadline_ms: Option<u32>,
     device: Option<String>,
 }
@@ -69,7 +57,7 @@ impl FlagSlots {
             "param" => self.param.replace(PathBuf::from(value)),
             "bin" => self.bin.replace(PathBuf::from(value)),
             "socket" => self.socket.replace(PathBuf::from(value)),
-            _ => self.health_socket.replace(PathBuf::from(value)),
+            other => unreachable!("set_path has no {other} slot"),
         };
         Self::reject(name, previous.as_ref())
     }
@@ -110,23 +98,10 @@ impl FlagSlots {
             "param" => &self.param,
             "bin" => &self.bin,
             "socket" => &self.socket,
-            _ => &self.health_socket,
+            other => unreachable!("required_path has no {other} slot"),
         };
         slot.clone()
             .ok_or_else(|| format!("missing required flag --{name}"))
-    }
-
-    fn extra_with_probe(&self) -> Option<&'static str> {
-        [
-            self.param.as_ref().map(|_| "param"),
-            self.bin.as_ref().map(|_| "bin"),
-            self.socket.as_ref().map(|_| "socket"),
-            self.max_deadline_ms.as_ref().map(|_| "max-deadline-ms"),
-            self.device.as_ref().map(|_| "device"),
-        ]
-        .into_iter()
-        .flatten()
-        .next()
     }
 }
 
@@ -138,7 +113,6 @@ fn main() -> ExitCode {
             let _ = std::io::stdout().write_all(USAGE.as_bytes());
             ExitCode::SUCCESS
         }
-        Ok(Command::Probe { health_socket }) => run_probe(&health_socket),
         Ok(Command::Serve(config)) => run_serve(&config),
     }
 }
@@ -154,18 +128,10 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
         return Ok(Command::Help);
     }
     let mut slots = FlagSlots::default();
-    let mut saw_probe = false;
     let mut index = 0;
     while index < args.len() {
         let flag = text(&args[index]);
         match flag.as_str() {
-            "--probe" => {
-                if saw_probe {
-                    return Err("flag --probe given twice".to_string());
-                }
-                saw_probe = true;
-                index += 1;
-            }
             "--param" => {
                 slots.set_path("param", argument(args, index, &flag)?)?;
                 index += 2;
@@ -176,10 +142,6 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
             }
             "--socket" => {
                 slots.set_path("socket", argument(args, index, &flag)?)?;
-                index += 2;
-            }
-            "--health-socket" => {
-                slots.set_path("health-socket", argument(args, index, &flag)?)?;
                 index += 2;
             }
             "--max-deadline-ms" => {
@@ -193,19 +155,10 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    if saw_probe {
-        if let Some(name) = slots.extra_with_probe() {
-            return Err(format!("flag --{name} is not allowed with --probe"));
-        }
-        return Ok(Command::Probe {
-            health_socket: slots.required_path("health-socket")?,
-        });
-    }
     Ok(Command::Serve(ServeConfig {
         param: slots.required_path("param")?,
         bin: slots.required_path("bin")?,
         socket: slots.required_path("socket")?,
-        health_socket: slots.required_path("health-socket")?,
         max_deadline_ms: slots
             .max_deadline_ms
             .ok_or("missing required flag --max-deadline-ms")?,
@@ -221,47 +174,6 @@ fn argument<'a>(args: &'a [OsString], at: usize, flag: &str) -> Result<&'a OsStr
 
 fn text(value: &OsStr) -> String {
     value.to_string_lossy().into_owned()
-}
-
-fn run_probe(health_socket: &Path) -> ExitCode {
-    if probe(health_socket) {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(EXIT_PROBE_FAILED)
-    }
-}
-
-fn probe(path: &Path) -> bool {
-    match probe_answer(path) {
-        Ok(()) => true,
-        Err(error) => {
-            eprintln!("corvette-detect-worker: probe failed: {error}");
-            false
-        }
-    }
-}
-
-fn probe_answer(path: &Path) -> Result<(), std::io::Error> {
-    let mut stream = UnixStream::connect(path)?;
-    stream.set_read_timeout(Some(PROBE_TIMEOUT))?;
-    stream.set_write_timeout(Some(PROBE_TIMEOUT))?;
-    let request = Request::HealthRequest {
-        id: PROBE_ID,
-        deadline_ms: PROBE_DEADLINE_MS,
-    }
-    .encode();
-    stream.write_all(&request)?;
-    let mut frame = [0u8; HEADER_LEN + ID_LEN];
-    stream.read_exact(&mut frame)?;
-    match Reply::decode(&frame) {
-        Ok(Reply::Health { id }) if id == PROBE_ID => Ok(()),
-        Ok(other) => Err(std::io::Error::other(format!(
-            "unexpected answer {other:?}"
-        ))),
-        Err(error) => Err(std::io::Error::other(format!(
-            "undecodable answer: {error}"
-        ))),
-    }
 }
 
 fn run_serve(config: &ServeConfig) -> ExitCode {
@@ -286,44 +198,20 @@ fn run_serve(config: &ServeConfig) -> ExitCode {
             return ExitCode::from(EXIT_STARTUP);
         }
     };
-    let health_listener = match claim_socket(&config.health_socket) {
-        Ok(listener) => listener,
-        Err(reason) => {
-            eprintln!("corvette-detect-worker: health socket refused: {reason}");
-            return ExitCode::from(EXIT_STARTUP);
-        }
-    };
     eprintln!(
-        "corvette-detect-worker: ready {} {} {} ms",
+        "corvette-detect-worker: ready {} {} ms",
         config.socket.display(),
-        config.health_socket.display(),
         config.max_deadline_ms
     );
     let stop = AtomicBool::new(false);
-    let outcome = thread::scope(|scope| {
-        let health = match thread::Builder::new()
-            .name("corvette-detect-health".to_string())
-            .spawn_scoped(scope, || {
-                if let Err(error) = serve_health(&health_listener, &stop, HEALTH_IO_TIMEOUT) {
-                    eprintln!("corvette-detect-worker: health loop failed: {error}");
-                }
-            }) {
-            Ok(health) => health,
-            Err(error) => return Err(std::io::Error::other(error)),
-        };
-        let _guard = StopOnDrop(&stop);
-        let end = serve(
-            &listener,
-            &mut engine,
-            &ProcessExit,
-            &stop,
-            Duration::from_millis(u64::from(config.max_deadline_ms)),
-        )?;
-        health
-            .join()
-            .map_err(|_| std::io::Error::other("the health thread panicked"))?;
-        Ok(end)
-    });
+    let _guard = StopOnDrop(&stop);
+    let outcome = serve(
+        &listener,
+        &mut engine,
+        &ProcessExit,
+        &stop,
+        Duration::from_millis(u64::from(config.max_deadline_ms)),
+    );
     match outcome {
         Ok(ServeEnd::Fatal(reason)) => exit_from_i32(reason.exit_code()),
         Ok(ServeEnd::Stopped) => ExitCode::SUCCESS,

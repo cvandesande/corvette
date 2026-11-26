@@ -38,8 +38,6 @@ fn base() -> Vec<&'static str> {
         "/w.bin",
         "--worker-max-deadline-ms",
         "5000",
-        "--worker-health-socket",
-        "/health.sock",
     ]
 }
 
@@ -60,7 +58,6 @@ fn full_command_line_parses_with_defaults() {
     assert_eq!(opts.worker.param.to_str(), Some("/w.param"));
     assert_eq!(opts.worker.bin.to_str(), Some("/w.bin"));
     assert_eq!(opts.worker.max_deadline_ms, 5000);
-    assert_eq!(opts.worker.health_socket.to_str(), Some("/health.sock"));
     assert_eq!(opts.worker.device, None);
     assert_eq!(opts.frame_timeout, Duration::from_secs(10));
 }
@@ -113,7 +110,6 @@ fn each_required_flag_is_demanded_when_absent() {
         "--worker-param",
         "--worker-bin",
         "--worker-max-deadline-ms",
-        "--worker-health-socket",
     ] {
         let index = all.iter().position(|arg| *arg == missing).unwrap();
         let stripped: Vec<&str> = all
@@ -144,6 +140,10 @@ fn unknown_flag_names_itself() {
         "unknown argument --status"
     );
     assert_eq!(refused(&["--bogus"]), "unknown argument --bogus");
+    assert_eq!(
+        refused(&["--worker-health-socket"]),
+        "unknown argument --worker-health-socket"
+    );
 }
 
 fn probe_socket(args: &[&str], env: Option<&str>) -> PathBuf {
@@ -187,7 +187,6 @@ fn probe_refuses_every_serve_flag() {
         ("--worker-param", "x", "worker-param"),
         ("--worker-bin", "x", "worker-bin"),
         ("--worker-max-deadline-ms", "5", "worker-max-deadline-ms"),
-        ("--worker-health-socket", "x", "worker-health-socket"),
         ("--worker-device", "x", "worker-device"),
         ("--frame-timeout-ms", "5", "frame-timeout-ms"),
         ("--stop-timeout-ms", "5", "stop-timeout-ms"),

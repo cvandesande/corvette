@@ -58,7 +58,7 @@ fn socket_path(tag: &str) -> PathBuf {
     path
 }
 
-fn start(tag: &str, param: &str, max_deadline_ms: &str, socket: &Path, health: &Path) -> Worker {
+fn start(tag: &str, param: &str, deadline_ms: &str, socket: &Path) -> Worker {
     let (param_path, bin_path) = write_net(&format!("net-{tag}"), param);
     let child = ProcessCommand::new(env!("CARGO_BIN_EXE_corvette-detect-worker"))
         .arg("--param")
@@ -67,10 +67,8 @@ fn start(tag: &str, param: &str, max_deadline_ms: &str, socket: &Path, health: &
         .arg(&bin_path)
         .arg("--socket")
         .arg(socket)
-        .arg("--health-socket")
-        .arg(health)
         .arg("--max-deadline-ms")
-        .arg(max_deadline_ms)
+        .arg(deadline_ms)
         .arg("--device")
         .arg("cpu")
         .stdin(Stdio::null())
@@ -81,28 +79,17 @@ fn start(tag: &str, param: &str, max_deadline_ms: &str, socket: &Path, health: &
     Worker(child)
 }
 
-fn probe_exit(health: &Path) -> Option<i32> {
-    ProcessCommand::new(env!("CARGO_BIN_EXE_corvette-detect-worker"))
-        .arg("--probe")
-        .arg("--health-socket")
-        .arg(health)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .expect("the probe runs")
-        .status
-        .code()
-}
-
-fn wait_ready(health: &Path) {
+fn wait_ready(socket: &Path) {
     for _ in 0..100 {
-        if probe_exit(health) == Some(0) {
+        if try_connect(socket).is_some() {
             return;
         }
         thread::sleep(Duration::from_millis(100));
     }
-    panic!("no ready probe within 10 s on {}", health.display());
+    panic!(
+        "no connectable serving socket within 10 s on {}",
+        socket.display()
+    );
 }
 
 fn wait_exit(worker: &mut Worker, seconds: u64) -> Option<i32> {
@@ -152,11 +139,10 @@ fn send(stream: &mut UnixStream, request: &Request) {
 }
 
 #[test]
-fn the_worker_serves_a_request_and_answers_the_probe_while_the_connection_stays_open() {
+fn the_worker_serves_requests_while_the_connection_stays_open() {
     let socket = socket_path("bin-serve-s");
-    let health = socket_path("bin-serve-h");
-    let mut worker = start("serve", PARAM, "10000", &socket, &health);
-    wait_ready(&health);
+    let _worker = start("serve", PARAM, "10000", &socket);
+    wait_ready(&socket);
     let mut stream = connect(&socket);
     send(
         &mut stream,
@@ -176,11 +162,6 @@ fn the_worker_serves_a_request_and_answers_the_probe_while_the_connection_stays_
         values.iter().all(|value| *value == 0.0),
         "a zero tensor yields zero values"
     );
-    assert_eq!(
-        probe_exit(&health),
-        Some(0),
-        "the probe answers while the serving connection stays open"
-    );
     send(
         &mut stream,
         &Request::InferRequest {
@@ -195,22 +176,13 @@ fn the_worker_serves_a_request_and_answers_the_probe_while_the_connection_stays_
     };
     assert_eq!(id, 8);
     assert!(rows.is_empty(), "a zero tensor yields no rows: {rows:?}");
-    assert_eq!(probe_exit(&health), Some(0));
-    worker.0.kill().expect("kill");
-    worker.0.wait().expect("wait");
-    assert_eq!(
-        probe_exit(&health),
-        Some(1),
-        "the socket files remain but nothing listens"
-    );
 }
 
 #[test]
 fn a_failing_engine_ends_the_process_with_exit_code_20() {
     let socket = socket_path("bin-wrong-s");
-    let health = socket_path("bin-wrong-h");
-    let mut worker = start("wrong", WRONG_PARAM, "10000", &socket, &health);
-    wait_ready(&health);
+    let mut worker = start("wrong", WRONG_PARAM, "10000", &socket);
+    wait_ready(&socket);
     let mut stream = connect(&socket);
     send(
         &mut stream,
@@ -234,9 +206,8 @@ fn a_failing_engine_ends_the_process_with_exit_code_20() {
 #[test]
 fn a_request_that_outlives_the_cap_ends_the_process_with_exit_code_21() {
     let socket = socket_path("bin-cap-s");
-    let health = socket_path("bin-cap-h");
-    let mut worker = start("cap", PARAM, "1", &socket, &health);
-    wait_ready(&health);
+    let mut worker = start("cap", PARAM, "1", &socket);
+    wait_ready(&socket);
     for _ in 0..50 {
         if worker.0.try_wait().expect("wait works").is_some() {
             break;
@@ -260,11 +231,9 @@ fn a_request_that_outlives_the_cap_ends_the_process_with_exit_code_21() {
 #[test]
 fn a_stale_socket_file_is_replaced() {
     let socket = socket_path("bin-stale-s");
-    let health = socket_path("bin-stale-h");
     drop(UnixListener::bind(&socket).expect("stale serving socket"));
-    drop(UnixListener::bind(&health).expect("stale health socket"));
-    let _worker = start("stale", PARAM, "10000", &socket, &health);
-    wait_ready(&health);
+    let _worker = start("stale", PARAM, "10000", &socket);
+    wait_ready(&socket);
     let mut stream = connect(&socket);
     send(
         &mut stream,
@@ -285,22 +254,11 @@ fn a_stale_socket_file_is_replaced() {
 #[test]
 fn a_regular_file_at_a_socket_path_is_refused_and_left_alone() {
     let socket = socket_path("bin-refuse-a-s");
-    let health = socket_path("bin-refuse-a-h");
     fs::write(&socket, b"keep").expect("regular file at the serving path");
-    let mut worker = start("refuse-a", PARAM, "10000", &socket, &health);
+    let mut worker = start("refuse-a", PARAM, "10000", &socket);
     assert_eq!(wait_exit(&mut worker, 10), Some(3));
     assert_eq!(
         fs::read(&socket).expect("serving path readable"),
-        b"keep",
-        "the file is left alone"
-    );
-    let socket = socket_path("bin-refuse-b-s");
-    let health = socket_path("bin-refuse-b-h");
-    fs::write(&health, b"keep").expect("regular file at the health path");
-    let mut worker = start("refuse-b", PARAM, "10000", &socket, &health);
-    assert_eq!(wait_exit(&mut worker, 10), Some(3));
-    assert_eq!(
-        fs::read(&health).expect("health path readable"),
         b"keep",
         "the file is left alone"
     );

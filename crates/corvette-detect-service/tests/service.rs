@@ -72,8 +72,6 @@ fn service_command_with_ffmpeg(
         .arg(dir.join("bin"))
         .arg("--worker-max-deadline-ms")
         .arg("5000")
-        .arg("--worker-health-socket")
-        .arg(dir.join("health.sock"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -262,14 +260,13 @@ fn socket_file_mode_is_0666_under_a_restrictive_umask() {
     let script = format!(
         "umask 077 && exec {BIN} --config {config} --socket {socket} --ffmpeg {ffmpeg} \
          --restream-address 127.0.0.1:8554 --worker {worker} --worker-param {param} \
-         --worker-bin {bindir} --worker-max-deadline-ms 5000 --worker-health-socket {health}",
+         --worker-bin {bindir} --worker-max-deadline-ms 5000",
         config = quote(&dir.join("config.toml")),
         socket = quote(&socket),
         ffmpeg = quote(&ffmpeg),
         worker = quote(&worker),
         param = quote(&dir.join("param")),
         bindir = quote(&dir.join("bin")),
-        health = quote(&dir.join("health.sock")),
     );
     let child = Command::new("sh")
         .arg("-c")
@@ -627,8 +624,6 @@ fn service_command_without_restream(dir: &Path, worker: &Path, ffmpeg: &Path) ->
         .arg(dir.join("bin"))
         .arg("--worker-max-deadline-ms")
         .arg("5000")
-        .arg("--worker-health-socket")
-        .arg(dir.join("health.sock"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

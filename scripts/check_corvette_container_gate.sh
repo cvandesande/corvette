@@ -111,8 +111,8 @@ printf '#!/bin/sh\nexec sleep 3600\n' > /run/c/stay
 chmod +x /run/c/stay
 corvette-detect-service --config /run/c/config.toml --socket /run/c/status.sock \
   --ffmpeg /run/c/stay --restream-address 127.0.0.1:8554 --worker /run/c/stay \
-  --worker-param /run/c/param --worker-bin /run/c/bin --worker-max-deadline-ms 5000 \
-  --worker-health-socket /run/c/health.sock &
+  --worker-param /run/c/param --worker-bin /run/c/bin \
+  --worker-max-deadline-ms 5000 &
 srv=$!
 i=0
 until [ -S /run/c/status.sock ] || [ "$i" -ge 50 ]; do i=$((i + 1)); sleep 0.2; done
@@ -153,8 +153,8 @@ FF_STUB
 chmod +x /run/c/ffmpeg
 corvette-detect-service --config /run/c/config.toml --socket /run/c/status.sock \
   --ffmpeg /run/c/ffmpeg --worker /run/c/stay \
-  --worker-param /run/c/param --worker-bin /run/c/bin --worker-max-deadline-ms 5000 \
-  --worker-health-socket /run/c/health.sock > /run/c/service.log 2>&1 &
+  --worker-param /run/c/param --worker-bin /run/c/bin \
+  --worker-max-deadline-ms 5000 > /run/c/service.log 2>&1 &
 srv=$!
 i=0
 until [ -S /run/c/status.sock ] && [ -s /run/c/ffmpeg-argv ] || [ "$i" -ge 50 ]; do i=$((i + 1)); sleep 0.2; done
