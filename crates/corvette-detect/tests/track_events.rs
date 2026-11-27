@@ -13,8 +13,8 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::SocketAddr;
 use tokio::net::{UnixListener, UnixStream};
@@ -24,14 +24,30 @@ use tokio::time::timeout;
 const TICK: Duration = Duration::from_millis(20);
 const DRAIN: Duration = Duration::from_millis(200);
 
-fn temp_socket(tag: &str) -> PathBuf {
+static SOCKET_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Fresh temp directory holding one socket, removed when the owning test ends.
+struct SocketDir(PathBuf);
+
+impl Drop for SocketDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Unique even across two tests using the same tag in one process and across pid reuse.
+fn temp_socket(tag: &str) -> (PathBuf, SocketDir) {
+    let nonce = SOCKET_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let dir = std::env::temp_dir().join(format!(
-        "corvette-track-events-{tag}-{}",
+        "corvette-track-events-{tag}-{}-{nonce}-{nanos}",
         std::process::id()
     ));
-    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir.join("events.sock")
+    (dir.join("events.sock"), SocketDir(dir))
 }
 
 async fn read_lines(stream: &mut UnixStream) -> Vec<Vec<u8>> {
@@ -99,8 +115,8 @@ fn person(score: f64, edges: [i32; 4]) -> FrameDetection {
 const STAY: [i32; 4] = [100, 140, 200, 340];
 const MOVE: [i32; 4] = [300, 140, 400, 340];
 
-async fn serve_bound(tag: &str, receiver: watch::Receiver<CameraObjects>) -> PathBuf {
-    let path = temp_socket(tag);
+async fn serve_bound(tag: &str, receiver: watch::Receiver<CameraObjects>) -> (PathBuf, SocketDir) {
+    let (path, dir) = temp_socket(tag);
     let listener = UnixListener::bind(&path).unwrap();
     let feed = Arc::new(EventFeed::new());
     feed.spawn_publishers(vec![("front".to_owned(), receiver)]);
@@ -108,7 +124,7 @@ async fn serve_bound(tag: &str, receiver: watch::Receiver<CameraObjects>) -> Pat
         let () = serve_track_events(listener, feed).await;
     });
     tokio::time::sleep(TICK).await;
-    path
+    (path, dir)
 }
 
 async fn connect(path: &Path) -> UnixStream {
@@ -128,7 +144,7 @@ async fn a_track_gets_start_update_end_lines_and_first_motion_flips_after_it_mov
     )
     .unwrap();
     let (sender, receiver) = watch::channel(CameraObjects::Cleared);
-    let path = serve_bound("lifecycle", receiver).await;
+    let (path, _dir) = serve_bound("lifecycle", receiver).await;
     let mut client = connect(&path).await;
 
     let steps: [(f64, Vec<FrameDetection>); 6] = [
@@ -205,7 +221,7 @@ async fn two_subscribers_receive_identical_lines() {
     )
     .unwrap();
     let (sender, receiver) = watch::channel(CameraObjects::Cleared);
-    let path = serve_bound("two", receiver).await;
+    let (path, _dir) = serve_bound("two", receiver).await;
     let mut first = connect(&path).await;
     let mut second = connect(&path).await;
 
@@ -272,7 +288,7 @@ fn count_newlines(stream: &UnixStream) -> usize {
 #[tokio::test]
 async fn a_stalled_subscriber_drops_updates_keeps_boundaries_and_the_loop_keeps_publishing() {
     let (sender, receiver) = watch::channel(CameraObjects::Cleared);
-    let path = serve_bound("stalled", receiver).await;
+    let (path, _dir) = serve_bound("stalled", receiver).await;
     let mut stalled = connect(&path).await;
     let live = connect(&path).await;
 
@@ -401,9 +417,9 @@ fn running_camera() -> (CameraHandle, Option<FrameObjects>) {
     (handle, published)
 }
 
-async fn serve_front_state(handle: &CameraHandle) -> (PathBuf, PathBuf) {
+async fn serve_front_state(handle: &CameraHandle) -> (PathBuf, PathBuf, [SocketDir; 2]) {
     let objects_rx = handle.objects.clone();
-    let events_path = temp_socket("none");
+    let (events_path, events_dir) = temp_socket("none");
     let events_listener = UnixListener::bind(&events_path).unwrap();
     let events_feed = Arc::new(EventFeed::new());
     events_feed.spawn_publishers(vec![("front".to_owned(), objects_rx)]);
@@ -414,13 +430,13 @@ async fn serve_front_state(handle: &CameraHandle) -> (PathBuf, PathBuf) {
         "front".to_owned(),
         CameraEntry::Live(handle.clone()),
     )]);
-    let status_path = temp_socket("none-status");
+    let (status_path, status_dir) = temp_socket("none-status");
     let status_listener = UnixListener::bind(&status_path).unwrap();
     tokio::spawn(async move {
         let _ = serve(status_listener, Arc::new(service_state), None, None).await;
     });
     tokio::time::sleep(TICK).await;
-    (status_path, events_path)
+    (status_path, events_path, [status_dir, events_dir])
 }
 
 async fn ask_status(status_path: &Path) -> String {
@@ -454,7 +470,7 @@ async fn ask_objects(status_path: &Path) -> (String, String) {
 #[tokio::test]
 async fn with_no_subscriber_the_status_answer_stays_the_pipeline_value() {
     let (handle, _published) = running_camera();
-    let (status_path, _events) = serve_front_state(&handle).await;
+    let (status_path, _events, _dirs) = serve_front_state(&handle).await;
     let text = ask_status(&status_path).await;
     assert!(
         text.starts_with("HTTP/1.1 200") && text.contains("\"camera\":\"front\""),
@@ -465,7 +481,7 @@ async fn with_no_subscriber_the_status_answer_stays_the_pipeline_value() {
 #[tokio::test]
 async fn with_no_subscriber_the_objects_answer_stays_the_pipeline_value() {
     let (handle, published) = running_camera();
-    let (status_path, _events) = serve_front_state(&handle).await;
+    let (status_path, _events, _dirs) = serve_front_state(&handle).await;
     let (head, body) = ask_objects(&status_path).await;
     assert!(
         head.starts_with("HTTP/1.1 200"),
@@ -493,7 +509,7 @@ async fn a_track_moving_from_its_first_frame_gets_first_motion_on_the_moving_fra
     )
     .unwrap();
     let (sender, receiver) = watch::channel(CameraObjects::Cleared);
-    let path = serve_bound("moves-first", receiver).await;
+    let (path, _dir) = serve_bound("moves-first", receiver).await;
     let mut client = connect(&path).await;
     for (time, detections) in [
         (0.0, vec![person(0.9, STAY)]),
@@ -524,7 +540,7 @@ async fn a_track_moving_from_its_first_frame_gets_first_motion_on_the_moving_fra
 #[tokio::test]
 async fn connections_beyond_the_subscriber_bound_are_closed() {
     let (sender, receiver) = watch::channel(CameraObjects::Cleared);
-    let path = serve_bound("count", receiver).await;
+    let (path, _dir) = serve_bound("count", receiver).await;
     let mut bound = Vec::new();
     for _ in 0..TRACK_EVENTS_MAX_SUBSCRIBERS {
         bound.push(connect(&path).await);

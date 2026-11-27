@@ -320,16 +320,7 @@ fn a_silent_child_stops_both_threads_and_dies() {
         build_live,
     )
     .expect("the camera threads start");
-    wait_until(
-        "the child to record its pid",
-        Duration::from_secs(5),
-        || pid_file.exists(),
-    );
-    let pid: u32 = fs::read_to_string(&pid_file)
-        .expect("pid file")
-        .trim()
-        .parse()
-        .expect("pid parses");
+    let pid = wait_for_pid_file(&pid_file, Duration::from_secs(5));
     threads.stop();
     let report = threads.join(Duration::from_secs(5));
     assert_eq!(

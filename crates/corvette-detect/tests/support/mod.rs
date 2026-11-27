@@ -26,3 +26,30 @@ fn the_stream_stub_gives_up_when_its_reader_closes() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
+
+fn wait_for_pid_file(path: &std::path::Path, within: std::time::Duration) -> u32 {
+    // A stub's redirect creates the empty file before the pid lands in it.
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        if let Some(pid) = std::fs::read_to_string(path).ok().and_then(|t| t.trim().parse::<u32>().ok()) {
+            return pid;
+        }
+        assert!(std::time::Instant::now() < deadline, "no pid appeared in {}", path.display());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn the_pid_wait_ignores_a_file_written_in_two_steps() {
+    let path = std::env::temp_dir().join(format!("corvette-pid-wait-{}.pid", std::process::id()));
+    std::fs::write(&path, "").expect("empty pid file");
+    let filler_path = path.clone();
+    let filler = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(&filler_path, "4242\n").expect("fill the pid file");
+    });
+    let pid = wait_for_pid_file(&path, std::time::Duration::from_secs(5));
+    filler.join().expect("filler thread finished");
+    std::fs::remove_file(&path).expect("remove test pid file");
+    assert_eq!(4242, pid, "the wait must not stop at the empty file");
+}
