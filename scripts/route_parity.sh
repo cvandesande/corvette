@@ -1,43 +1,4 @@
 #!/usr/bin/env bash
-# Checks a declarative table of routes against a running nginx -- deployed
-# Frigate in --mode pod, or a local fixture in --mode local -- and reports any
-# route whose status, content type, or body shape does not match what the
-# table says it should be.
-#
-# Two known routes in this system return HTTP 200 with the wrong body when
-# something is broken: a client route shadowed by a filesystem autoindex, and
-# an iframe that loads this site's own shell into itself. A check that only
-# reads the status code cannot see either failure -- both look like success.
-# So every row states a content type AND a body-shape predicate, and this
-# script refuses to run any table where a row is missing one: that refusal is
-# the actual enforcement, not the checks that run once it passes.
-#
-# Usage:
-#   route_parity.sh --table FILE --mode local --base-url URL [--json-out FILE]
-#   route_parity.sh --table FILE --mode pod --namespace NS --pod POD \
-#     --base-url URL [--json-out FILE]
-#
-#   --table     the expectations file (format below).
-#   --mode      local: fetch URL directly with curl, for a fixture on this
-#               machine. pod: fetch by running curl *inside* --pod via
-#               `kubectl exec`, so nothing here needs a port-forward and
-#               nothing on this machine ends up serving the checked routes.
-#   --base-url  origin to fetch from -- http://127.0.0.1:PORT in both modes;
-#               in --mode pod this is resolved inside the pod's own network
-#               namespace, not this machine's.
-#   --json-out  write one JSON object per row (path, expected/actual status,
-#               expected/actual content type, whether it passed) to FILE.
-#
-# Table format: one route per line, four '|'-separated fields:
-#   PATH | EXPECTED-STATUS | EXPECTED-CONTENT-TYPE | BODY-PREDICATE
-# Blank lines and lines starting with '#' are skipped. BODY-PREDICATE is one
-# or more ';'-separated predicates, each PREFIX:VALUE:
-#   contains:TEXT     the body contains TEXT as a literal substring
-#   absent:TEXT       the body does not contain TEXT
-#   starts_with:TEXT  the body's first bytes are exactly TEXT
-#   magic:HEX         the body's first len(HEX)/2 bytes equal HEX
-# EXPECTED-CONTENT-TYPE matches by prefix, so a row can state "text/html"
-# without also pinning a charset the server happens to append.
 set -euo pipefail
 
 SCRIPT_NAME="route_parity"
@@ -97,23 +58,11 @@ esac
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
 
-# A boundary that cannot appear by accident in a route's body: unique to this
-# process and run, so two invocations racing in the same /tmp cannot collide,
-# and long enough that a coincidental match inside binary media (JPEG, MP4,
-# WebP bytes) is not a realistic risk. It marks where curl's own -w output
-# starts, appended immediately after the body with no separator of curl's
-# choosing -- searching for this exact literal is what lets one curl call
-# return body, status, and content type without a second round trip to parse
-# headers separately.
+# Unique per run: curl appends -w text straight after the body; this literal splits them apart in one call.
 boundary="___route_parity_${BASHPID}_${RANDOM}___"
 
-# Phase 1: validate the table before making a single request. A row missing a
-# content type or a body predicate would otherwise pass silently -- reduce it
-# to a status check the moment the table is read, so nothing downstream ever
-# sees a row like that.
 declare -a row_paths=() row_statuses=() row_types=() row_predicates=()
 
-# Trims leading/trailing whitespace off one field without a subprocess.
 trim() {
   local s="$1"
   s="${s#"${s%%[![:space:]]*}"}"
@@ -127,10 +76,6 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   trimmed="$(trim "$line")"
   [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
 
-  # `read` with fewer IFS-delimited fields than variables leaves the missing
-  # ones empty rather than unset, so a row with too few '|' separators is not
-  # a distinct case to detect here -- it surfaces below as an empty content
-  # type or predicate, exactly like a row that spelled out the field as blank.
   IFS='|' read -r f_path f_status f_type f_predicate <<<"$line"
   f_path="$(trim "$f_path")"
   f_status="$(trim "${f_status:-}")"
@@ -186,12 +131,6 @@ if [[ "$rows_in" -eq 0 ]]; then
   exit 1
 fi
 
-# Phase 2: fetch one row. Body, status, and content type all come back from a
-# single request -- curl's -w text is appended straight onto the response
-# body, so the boundary above is what separates them again once the bytes are
-# on disk. Redirecting straight to a file (never through a shell variable)
-# is what keeps a NUL byte in a JPEG or a wasm binary from being silently
-# dropped, which a command substitution would do.
 fetch_row() {
   local path=$1 raw_file=$2
   local url="$base_url$path"
@@ -204,16 +143,7 @@ fetch_row() {
   esac
 }
 
-# Splits a fetch_row raw file into a body file and prints "STATUS<TAB>TYPE".
-# Returns non-zero if the boundary never arrived -- a request that never
-# completed (a dropped connection, a pod curl invocation that itself failed)
-# leaves no trailer to find, and that is reported as this row's own distinct
-# failure rather than as a body/type mismatch it never actually measured.
-#
-# The boundary appears twice in a well-formed response -- once opening the
-# trailer, once closing it -- so the FIRST match is what marks the end of the
-# body; taking the last would count the trailer's own closing copy as part of
-# the body.
+# The boundary appears twice; the FIRST match ends the body -- the last is the trailer's own closing copy.
 split_response() {
   local raw_file=$1 body_file=$2
   local offset
@@ -224,9 +154,7 @@ split_response() {
   head -c "$offset" "$raw_file" >"$body_file"
   local trailer
   trailer="$(tail -c +"$((offset + 1))" "$raw_file")"
-  # trailer is "<boundary>:STATUS:TYPE<boundary>"; TYPE itself never contains
-  # ':', so splitting on the first two colons after the opening boundary is
-  # exact, not merely the common case.
+  # TYPE never contains ':', so splitting on the first two colons after the boundary is exact.
   trailer="${trailer#"$boundary":}"
   trailer="${trailer%"$boundary"}"
   local status="${trailer%%:*}"
@@ -234,9 +162,6 @@ split_response() {
   printf '%s\t%s\n' "$status" "$content_type"
 }
 
-# Evaluates one predicate against a body file. magic compares hex-encoded
-# bytes rather than a literal string match, so a predicate can pin bytes a
-# shell string cannot hold (a wasm module's leading NUL).
 check_predicate() {
   local predicate=$1 body_file=$2
   local kind="${predicate%%:*}" value="${predicate#*:}"
@@ -259,10 +184,6 @@ check_predicate() {
   esac
 }
 
-# Phase 3: run every row. checks_run only ever grows by exactly one per row,
-# so it is also the row-count-out this script's own completeness bar
-# requires: a row this loop does not reach is a row that was silently
-# dropped, and that is a bug in this script, not an acceptable outcome.
 checks_run=0
 checks_failed=0
 json_rows=()
