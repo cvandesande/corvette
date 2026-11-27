@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use corvette_media_bridge::supervise::spawn_supervised_with;
 use corvette_media_bridge::ws_repackager::{
-    Fmp4WsServer, MultiCameraFmp4Store, run_fmp4_repackage,
+    Fmp4Camera, Fmp4WsServer, MultiCameraFmp4Store, run_fmp4_repackage,
 };
 use corvette_rtsp_client::client::{CameraConfig, Client};
 use corvette_rtsp_client::depacketize::{Codec, Frame as ClientFrame};
@@ -76,9 +76,9 @@ fn box_len(bytes: &[u8], offset: usize) -> usize {
 async fn g2_end_to_end_against_a_mock_camera_and_a_synthetic_decodable_one() {
     const FRAGMENT_COUNT: usize = 5;
 
-    let mut store = MultiCameraFmp4Store::default();
-    store.register("cam-mock");
-    store.register("cam-synth");
+    let (store, handles) = MultiCameraFmp4Store::new(["cam-mock", "cam-synth"]);
+    let [mock_handle, synth_handle]: [Fmp4Camera; 2] =
+        handles.try_into().expect("one handle per constructed name");
     let store = Arc::new(store);
 
     let mock_camera = MockCamera::spawn(MockCameraConfig::new())
@@ -87,34 +87,22 @@ async fn g2_end_to_end_against_a_mock_camera_and_a_synthetic_decodable_one() {
     let mock_client = Arc::new(Client::new(mock_camera_config(mock_camera.addr())));
     let mock_repackage = spawn_supervised_with("cam-mock/fmp4-repackage".to_string(), {
         let client = Arc::clone(&mock_client);
-        let store = Arc::clone(&store);
-        move || {
-            run_fmp4_repackage(
-                "cam-mock".to_string(),
-                client.subscribe(),
-                Arc::clone(&store),
-            )
-        }
+        let camera = mock_handle.clone();
+        move || run_fmp4_repackage(camera.clone(), client.subscribe())
     });
 
     let (synth_sender, _first_receiver) = broadcast::channel::<ClientFrame>(64);
     let synth_feeder = tokio::spawn(feed_synthetic_h264(synth_sender.clone()));
     let synth_repackage = spawn_supervised_with("cam-synth/fmp4-repackage".to_string(), {
         let sender = synth_sender.clone();
-        let store = Arc::clone(&store);
-        move || {
-            run_fmp4_repackage(
-                "cam-synth".to_string(),
-                sender.subscribe(),
-                Arc::clone(&store),
-            )
-        }
+        let camera = synth_handle.clone();
+        move || run_fmp4_repackage(camera.clone(), sender.subscribe())
     });
 
     let server = Fmp4WsServer::bind("127.0.0.1:0".parse().unwrap())
         .await
         .expect("binds the whole-process fMP4-WS server");
-    let addr = server.local_addr().unwrap();
+    let addr = server.local_addr();
     tokio::spawn(server.serve(Arc::clone(&store)));
 
     tokio::time::sleep(Duration::from_millis(200)).await;

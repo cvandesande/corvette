@@ -51,31 +51,22 @@ async fn feed(sender: broadcast::Sender<ClientFrame>) {
 
 #[tokio::main]
 async fn main() {
-    let mut store = MultiCameraFmp4Store::default();
-    store.register(CAMERA_NAME);
+    let (store, handles) = MultiCameraFmp4Store::new([CAMERA_NAME.to_string()]);
+    let camera = handles[0].clone();
     let store = Arc::new(store);
 
     let (sender, _first_receiver) = broadcast::channel::<ClientFrame>(64);
     tokio::spawn(feed(sender.clone()));
     let _repackage = spawn_supervised_with(format!("{CAMERA_NAME}/fmp4-repackage"), {
         let sender = sender.clone();
-        let store = Arc::clone(&store);
-        move || {
-            run_fmp4_repackage(
-                CAMERA_NAME.to_string(),
-                sender.subscribe(),
-                Arc::clone(&store),
-            )
-        }
+        let camera = camera.clone();
+        move || run_fmp4_repackage(camera.clone(), sender.subscribe())
     });
 
     let server = Fmp4WsServer::bind("127.0.0.1:0".parse().unwrap())
         .await
         .expect("binds the fMP4-WS listener");
-    let port = server
-        .local_addr()
-        .expect("a bound listener has a local address")
-        .port();
+    let port = server.local_addr().port();
 
     // The driving script reads this line to get the bound port for its ws:// URL.
     println!("LISTENING {port}");

@@ -26,7 +26,7 @@ use hls::MultiCameraHlsStore;
 use restream_provider::MultiCameraProvider;
 use std::sync::Arc;
 use supervise::{Supervised, log_event};
-use ws_repackager::MultiCameraFmp4Store;
+use ws_repackager::{Fmp4Camera, MultiCameraFmp4Store};
 
 #[derive(Debug)]
 pub struct RecordUnit {
@@ -45,7 +45,6 @@ pub struct RunningCamera {
 
 struct CameraRoles<'a> {
     provider: &'a Arc<MultiCameraProvider>,
-    fmp4_store: &'a Arc<MultiCameraFmp4Store>,
     hls_store: &'a Arc<MultiCameraHlsStore>,
     recording: Option<&'a Arc<record_role::RecordingRuntime>>,
     stop: &'a shutdown::Shutdown,
@@ -56,6 +55,7 @@ fn spawn_camera_roles(
     camera: &CameraSpec,
     client: &Arc<Client>,
     roles: &CameraRoles<'_>,
+    fmp4_camera: &Fmp4Camera,
 ) -> RunningCamera {
     let name = camera.name.clone();
 
@@ -75,17 +75,10 @@ fn spawn_camera_roles(
     };
 
     let fmp4_repackage = {
-        let name = name.clone();
         let client = Arc::clone(client);
-        let fmp4_store = Arc::clone(roles.fmp4_store);
+        let camera = fmp4_camera.clone();
         supervise::spawn_supervised_with(format!("{name}/fmp4-repackage"), {
-            move || {
-                ws_repackager::run_fmp4_repackage(
-                    name.clone(),
-                    client.subscribe(),
-                    Arc::clone(&fmp4_store),
-                )
-            }
+            move || ws_repackager::run_fmp4_repackage(camera.clone(), client.subscribe())
         })
     };
 
@@ -144,28 +137,27 @@ pub async fn start_with_recording(
         runtime.warn_unknown_cameras(config.cameras.iter().map(|camera| camera.name.as_str()));
     }
     let mut provider = MultiCameraProvider::default();
-    let mut fmp4_store = MultiCameraFmp4Store::default();
     let mut hls_store = MultiCameraHlsStore::default();
     for camera in &config.cameras {
         provider.register(&camera.name);
-        fmp4_store.register(&camera.name);
         hls_store.register(&camera.name);
     }
     let provider = Arc::new(provider);
-    let fmp4_store = Arc::new(fmp4_store);
     let hls_store = Arc::new(hls_store);
+    let (fmp4_store, fmp4_handles) =
+        MultiCameraFmp4Store::new(config.cameras.iter().map(|camera| camera.name.clone()));
+    let fmp4_store = Arc::new(fmp4_store);
 
     let roles = CameraRoles {
         provider: &provider,
-        fmp4_store: &fmp4_store,
         hls_store: &hls_store,
         recording: recording.as_ref(),
         stop: &stop,
     };
     let mut running = Vec::with_capacity(config.cameras.len());
-    for camera in &config.cameras {
+    for (camera, fmp4_camera) in config.cameras.iter().zip(fmp4_handles) {
         let client = Arc::new(Client::new(camera.to_camera_config()));
-        running.push(spawn_camera_roles(camera, &client, &roles));
+        running.push(spawn_camera_roles(camera, &client, &roles, &fmp4_camera));
     }
 
     let mut events: Option<tokio::task::JoinHandle<()>> = None;
