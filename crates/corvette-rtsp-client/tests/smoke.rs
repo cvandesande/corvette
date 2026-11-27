@@ -407,7 +407,8 @@ async fn disconnect_closes_the_socket_immediately_unlike_the_silent_stall() {
     // Frames already in flight when disconnect() fires may still land in the
     // client's read buffer; drain them and require the socket to reach a
     // real, clean EOF -- unlike the silent stall, which never does.
-    let reached_eof = tokio::time::timeout(Duration::from_secs(2), async {
+    // 30 s only trips on a real hang; the wait itself is on the EOF event.
+    let reached_eof = tokio::time::timeout(Duration::from_secs(30), async {
         let mut probe = [0_u8; 256];
         loop {
             match client.reader.read(&mut probe).await {

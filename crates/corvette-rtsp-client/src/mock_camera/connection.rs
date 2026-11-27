@@ -25,10 +25,7 @@ pub(super) async fn handle(
     let mut reader = BufReader::new(read_half);
     let (tx, mut rx) = mpsc::channel(8);
 
-    // A dedicated reader task keeps `mpsc::Receiver::recv` (cancel-safe) as
-    // the only thing `select!`ed against the socket's read side below --
-    // selecting directly on a partially read request would drop already
-    // consumed bytes on cancellation and corrupt the stream.
+    // recv() is cancel-safe; selecting on the reader directly would drop already-consumed bytes on cancellation.
     let reader_task = tokio::spawn(async move {
         loop {
             match rtsp_message::read_request(&mut reader).await {
@@ -46,8 +43,6 @@ pub(super) async fn handle(
     reader_task.abort();
 }
 
-/// Handles `OPTIONS`/`DESCRIBE`/`SETUP` (and any auth challenges) until
-/// `PLAY` starts the frame stream, or the connection ends.
 async fn drive_handshake(
     rx: &mut mpsc::Receiver<Request>,
     writer: &mut (impl AsyncWrite + Unpin),
@@ -57,10 +52,11 @@ async fn drive_handshake(
 ) {
     let mut last_nonce: Option<String> = None;
     let mut session_id: Option<String> = None;
+    let mut close = std::pin::pin!(close_signal.notified());
 
     loop {
         let request = tokio::select! {
-            () = close_signal.notified() => return,
+            () = &mut close => return,
             request = rx.recv() => match request {
                 Some(request) => request,
                 None => return,
@@ -117,9 +113,6 @@ async fn drive_handshake(
                     return;
                 };
                 if config.stream_before_play_response {
-                    // Reproduces a real camera observed streaming on the
-                    // interleaved channel before its own PLAY response
-                    // arrives on the same socket.
                     let packet = rtp::fabricate_h264_packet(0, 0, SSRC, 0);
                     let framed = rtp::interleave(RTP_CHANNEL, &packet);
                     if writer.write_all(&framed).await.is_err() {
@@ -151,11 +144,6 @@ async fn drive_handshake(
     }
 }
 
-/// After `PLAY`: pushes synthetic RTP frames on a steady interval while
-/// answering any keep-alive (`GET_PARAMETER`/`OPTIONS`) that arrives, until
-/// no keep-alive has arrived within the declared timeout -- at which point
-/// frames silently stop, matching the real cameras' observed failure mode
-/// exactly: no TCP close, no RTSP error, socket left open.
 async fn stream_frames(
     rx: &mut mpsc::Receiver<Request>,
     writer: &mut (impl AsyncWrite + Unpin),
@@ -170,6 +158,8 @@ async fn stream_frames(
     let mut frame_index: u64 = 0;
     let mut stalled = false;
     let mut pending_keepalive_reply: Option<Vec<u8>> = None;
+    // Long-lived: a fresh waiter per select loses a close the ticker branch wins.
+    let mut close = std::pin::pin!(close_signal.notified());
 
     loop {
         if !stalled && last_keepalive.elapsed() >= config.declared_timeout {
@@ -177,7 +167,7 @@ async fn stream_frames(
         }
 
         tokio::select! {
-            () = close_signal.notified() => return,
+            () = &mut close => return,
             _ = ticker.tick(), if !stalled => {
                 if let Some(reply) = pending_keepalive_reply.take()
                     && writer.write_all(&reply).await.is_err()
