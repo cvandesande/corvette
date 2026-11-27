@@ -41,6 +41,7 @@ fn front_camera() -> CameraConfig {
         width: 640,
         height: 480,
         fps: 10,
+        enabled: true,
         confirm_threshold: 0.7,
         source: None,
         area: None,
@@ -99,7 +100,7 @@ fn dialed_url(
     lookup: &impl Fn(&str) -> Option<String>,
 ) -> String {
     let address = stream_address(camera, restream_address, lookup).expect("the dial");
-    let mut factory = plan.command_factory(PathBuf::from("/usr/bin/ffmpeg"), address);
+    let mut factory = plan.command_factory(PathBuf::from("/usr/bin/ffmpeg"), &address);
     let args: Vec<String> = factory()
         .as_std()
         .get_args()
@@ -204,6 +205,7 @@ fn an_area_point_outside_the_pixel_range_is_an_area_error() {
         width: 640,
         height: 480,
         fps: 10,
+        enabled: true,
         confirm_threshold: 0.7,
         source: None,
         area: Some(Area {
@@ -228,6 +230,7 @@ fn a_frame_too_narrow_for_the_motion_shape_is_a_stage_error() {
         width: 2,
         height: 1600,
         fps: 10,
+        enabled: true,
         confirm_threshold: 0.7,
         source: None,
         area: None,
@@ -243,7 +246,7 @@ fn the_decode_command_names_the_sub_stream_url_exactly_once() {
     let dir = temp_dir("command");
     let plan = CameraPlan::new(&config(&labels_in(&dir)), &front_camera()).expect("the plan");
     let address = stream_address(&front_camera(), "127.0.0.1:8554", &no_secret).expect("the dial");
-    let mut factory = plan.command_factory(PathBuf::from("/usr/bin/ffmpeg"), address);
+    let mut factory = plan.command_factory(PathBuf::from("/usr/bin/ffmpeg"), &address);
     let url = "rtsp://127.0.0.1:8554/front_sub";
     let first = factory();
     assert_eq!(first.as_std().get_program(), "/usr/bin/ffmpeg");

@@ -11,17 +11,16 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Component, Path, PathBuf, absolute};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use corvette_detect::{
-    CameraEntry, CameraPlan, CameraThreadSettings, CameraThreads, Config, DEFAULT_POLICY,
-    EventFeed, FrameObjects, JoinReport, ServiceState, SharedLink, StreamAddress, Supervised,
-    ThreadEnd, WorkerLink, revision, serve, serve_track_events, stream_address,
+    CameraChannels, CameraPlan, CameraRecipe, CameraStartup, CameraThreadSettings, Config,
+    DEFAULT_POLICY, EventFeed, ServiceState, SharedLink, StreamAddress, Supervised, ToggleService,
+    WorkerLink, revision, serve, serve_track_events, stream_address,
 };
 use tokio::process::Command;
 use tokio::runtime::Runtime;
 use tokio::signal::unix::{Signal, SignalKind};
-use tokio::sync::watch;
 
 const USAGE: &str = "\
 usage: corvette-detect-service --config PATH --ffmpeg PROGRAM
@@ -437,22 +436,24 @@ pub fn run(
         worker_command(&options.worker, &config.worker_socket),
         |_child| {},
     );
-    let mut started = Vec::new();
-    if let Err(reason) = start_cameras(&mut started, &options, &config, plans) {
-        log_event("service", "camera-start-failed", reason);
-        stop_and_join(started, options.stop_timeout);
+    let link = SharedLink::new(WorkerLink::new(
+        config.worker_socket.clone(),
+        config.deadline,
+        DEFAULT_POLICY,
+    ));
+    let startups = camera_startups(&config, &options, plans, &link);
+    let state = Arc::new(
+        ServiceState::new(Vec::new())
+            .with_cameras(startups)
+            .with_worker(worker.subscribe())
+            .with_config_path(options.config.clone())
+            .with_stop_timeout(options.stop_timeout),
+    );
+    if start_enabled(&state, &config, options.stop_timeout).is_err() {
         return ExitCode::from(EXIT_STARTUP);
     }
-    let entries: Vec<(String, CameraEntry)> = started
-        .iter()
-        .map(|(name, threads)| (name.clone(), CameraEntry::Live(threads.handle())))
-        .collect();
-    let state = Arc::new(
-        ServiceState::new(entries)
-            .with_worker(worker.subscribe())
-            .with_config_path(options.config.clone()),
-    );
-    let listener = match bind_all(&runtime, &options, &state, &started) {
+    let toggles = state.toggles();
+    let listener = match bind_all(&runtime, &options, &state, &toggles) {
         Ok(listener) => listener,
         Err((event, reason)) => {
             log_event("service", event, reason);
@@ -473,7 +474,7 @@ pub fn run(
         Ended::Signaled(name) => {
             log_event("service", "shutdown-signal", format!("signal={name}"));
             remove_all_sockets(&options);
-            stop_and_join(started, options.stop_timeout);
+            runtime.block_on(toggles.close(options.stop_timeout));
             // The worker guard's drop kills its child, so the runtime must outlive the guard.
             drop(entered);
             drop(worker);
@@ -482,6 +483,47 @@ pub fn run(
             ExitCode::SUCCESS
         }
     }
+}
+
+fn camera_startups(
+    config: &Config,
+    options: &Options,
+    plans: Vec<(CameraPlan, StreamAddress)>,
+    link: &SharedLink,
+) -> Vec<CameraStartup> {
+    let settings = CameraThreadSettings {
+        frame_timeout: options.frame_timeout,
+        backoff: DEFAULT_POLICY,
+    };
+    config
+        .cameras
+        .iter()
+        .zip(plans)
+        .map(|(camera, (_plan, address))| CameraStartup {
+            name: camera.name.clone(),
+            channels: CameraChannels::new(),
+            recipe: CameraRecipe::new(
+                config.clone(),
+                camera.clone(),
+                options.ffmpeg.clone(),
+                address,
+                link.clone(),
+                settings,
+            ),
+            enabled: camera.enabled,
+        })
+        .collect()
+}
+
+fn start_enabled(state: &ServiceState, config: &Config, stop_timeout: Duration) -> Result<(), ()> {
+    for camera in config.cameras.iter().filter(|camera| camera.enabled) {
+        if let Err(reason) = state.start_camera(&camera.name) {
+            log_event("service", "camera-start-failed", reason);
+            state.stop_started(stop_timeout);
+            return Err(());
+        }
+    }
+    Ok(())
 }
 
 enum Ended {
@@ -497,7 +539,7 @@ async fn serve_or_signal(
     interrupt: &mut Signal,
 ) -> Ended {
     tokio::select! {
-        served = serve(listener, state, None) => Ended::Served(served),
+        served = serve(listener, state, None, None) => Ended::Served(served),
         Some(()) = terminate.recv() => Ended::Signaled("SIGTERM"),
         Some(()) = interrupt.recv() => Ended::Signaled("SIGINT"),
     }
@@ -531,48 +573,6 @@ fn remove_all_sockets(options: &Options) {
     remove_socket(&options.ipc_socket);
     if let Some(path) = &options.track_events_socket {
         remove_socket(path);
-    }
-}
-
-/// Stops every started camera at once, then joins each with the time left of the one shared `budget`.
-fn stop_and_join(started: Vec<(String, CameraThreads)>, budget: Duration) {
-    let count = started.len();
-    let deadline = Instant::now() + budget;
-    for (_, threads) in &started {
-        threads.stop();
-    }
-    for (name, threads) in started {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        report_camera(&name, threads.join(remaining));
-    }
-    log_event("service", "cameras-stopped", format!("count={count}"));
-}
-
-fn report_camera(name: &str, report: JoinReport) {
-    let timed_out = report.runner == ThreadEnd::TimedOut || report.producer == ThreadEnd::TimedOut;
-    let event = if timed_out {
-        "stop-timeout"
-    } else if report.runner == ThreadEnd::Panicked || report.producer == ThreadEnd::Panicked {
-        "camera-thread-panicked"
-    } else {
-        return;
-    };
-    log_event(
-        "service",
-        event,
-        format!(
-            "camera={name} runner={} producer={}",
-            end_word(report.runner),
-            end_word(report.producer)
-        ),
-    );
-}
-
-const fn end_word(end: ThreadEnd) -> &'static str {
-    match end {
-        ThreadEnd::Finished => "finished",
-        ThreadEnd::Panicked => "panicked",
-        ThreadEnd::TimedOut => "timed_out",
     }
 }
 
@@ -661,42 +661,6 @@ fn plan_all(
     Ok(plans)
 }
 
-fn start_cameras(
-    started: &mut Vec<(String, CameraThreads)>,
-    options: &Options,
-    config: &Config,
-    plans: Vec<(CameraPlan, StreamAddress)>,
-) -> Result<(), String> {
-    let link = SharedLink::new(WorkerLink::new(
-        config.worker_socket.clone(),
-        config.deadline,
-        DEFAULT_POLICY,
-    ));
-    let settings = CameraThreadSettings {
-        frame_timeout: options.frame_timeout,
-        backoff: DEFAULT_POLICY,
-    };
-    started.reserve(plans.len());
-    for (plan, address) in plans {
-        let name = plan.name().to_owned();
-        let make_command = plan.command_factory(options.ffmpeg.clone(), address);
-        let (spec, clock) = (plan.spec(), plan.clock());
-        match CameraThreads::start(
-            &name,
-            settings,
-            spec,
-            clock,
-            make_command,
-            &link,
-            move |ids, infer| plan.pipeline(ids, infer),
-        ) {
-            Ok(camera_threads) => started.push((name, camera_threads)),
-            Err(error) => return Err(format!("camera={name} {error}")),
-        }
-    }
-    Ok(())
-}
-
 fn read_config(path: &Path) -> Result<(Config, Vec<u8>), String> {
     let bytes = fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let shown = std::str::from_utf8(&bytes)
@@ -706,20 +670,16 @@ fn read_config(path: &Path) -> Result<(Config, Vec<u8>), String> {
     Ok((config, bytes))
 }
 
-// Bind the ipc socket first, then the status socket and the track-event socket; one feed feeds both event transports, and its publishers read each camera's frame channel until that camera stops.
+// Bind the ipc socket first, then the status socket and the track-event socket; one feed feeds both event transports, and its publishers read each camera's persistent objects channel across every toggle.
 fn bind_all(
     runtime: &Runtime,
     options: &Options,
     state: &Arc<ServiceState>,
-    started: &[(String, CameraThreads)],
+    toggles: &ToggleService,
 ) -> Result<tokio::net::UnixListener, (&'static str, String)> {
     let feed = Arc::new(EventFeed::new());
-    let camera_frames: Vec<(String, watch::Receiver<Option<FrameObjects>>)> = started
-        .iter()
-        .map(|(name, threads)| (name.clone(), threads.handle().objects))
-        .collect();
-    feed.spawn_publishers(camera_frames);
-    start_ipc(runtime, options, state, &feed)?;
+    feed.spawn_publishers(state.camera_object_receivers());
+    start_ipc(runtime, options, state, &feed, toggles)?;
     let listener = bind_socket(&options.socket)?;
     start_track_events(runtime, options, &feed)?;
     Ok(listener)
@@ -776,6 +736,7 @@ fn start_ipc(
     options: &Options,
     state: &Arc<ServiceState>,
     feed: &Arc<EventFeed>,
+    toggles: &ToggleService,
 ) -> Result<(), (&'static str, String)> {
     let path = &options.ipc_socket;
     // One path twice would let the legacy claim steal the ipc socket and rebind it at 0666.
@@ -786,7 +747,12 @@ fn start_ipc(
         ));
     }
     let listener = bind_ipc_socket(path).map_err(|reason| ("ipc-socket-refused", reason))?;
-    runtime.spawn(serve(listener, Arc::clone(state), Some(Arc::clone(feed))));
+    runtime.spawn(serve(
+        listener,
+        Arc::clone(state),
+        Some(Arc::clone(feed)),
+        Some(toggles.clone()),
+    ));
     Ok(())
 }
 

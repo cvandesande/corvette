@@ -71,6 +71,7 @@ fn start(test: &str, config: Option<PathBuf>) -> PathBuf {
         Arc::new(state),
         READ_TIMEOUT,
         None,
+        None,
     ));
     socket
 }

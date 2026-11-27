@@ -34,6 +34,7 @@ pub const CAMERA_KEYS: &[&str] = &[
     "width",
     "height",
     "fps",
+    "enabled",
     "confirm_threshold",
     "area",
     "source",
@@ -63,6 +64,7 @@ pub struct CameraConfig {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    pub enabled: bool,
     pub confirm_threshold: f64,
     pub area: Option<Area>,
     pub source: Option<CameraSource>,
@@ -369,6 +371,13 @@ fn camera_at(
     let width = integer_at(object, at, "width", MIN_EDGE, MAX_EDGE, None, out);
     let height = integer_at(object, at, "height", MIN_EDGE, MAX_EDGE, None, out);
     let fps = integer_at(object, at, "fps", MIN_FPS, MAX_FPS, None, out);
+    let enabled = object.get("enabled").map_or(Some(true), |flag| match flag {
+        Value::Bool(flag) => Some(*flag),
+        other => {
+            out.push(wrong_type_at(dotted(base, "enabled"), "a boolean", other));
+            None
+        }
+    });
     let confirm_threshold = confirm_at(object, base, out);
     let area = object.get("area").map_or(Some(None), |area| {
         Some(area_at(area, &dotted(base, "area"), out))
@@ -396,6 +405,7 @@ fn camera_at(
         width: width?,
         height: height?,
         fps: fps?,
+        enabled: enabled?,
         confirm_threshold: confirm_threshold?,
         area: area?,
         source: source?,
@@ -781,6 +791,9 @@ fn camera_to_value(camera: &CameraConfig) -> Value {
     object.insert("width".to_owned(), Value::from(u64::from(camera.width)));
     object.insert("height".to_owned(), Value::from(u64::from(camera.height)));
     object.insert("fps".to_owned(), Value::from(u64::from(camera.fps)));
+    if !camera.enabled {
+        object.insert("enabled".to_owned(), Value::Bool(false));
+    }
     object.insert(
         "confirm_threshold".to_owned(),
         Value::from(camera.confirm_threshold),

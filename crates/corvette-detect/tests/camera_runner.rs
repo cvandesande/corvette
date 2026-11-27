@@ -1,10 +1,10 @@
 // Tests may unwrap, expect and index: `docs/standards/STYLE.md` states
 // "Tests may unwrap, expect and index", and the crate lints do not forbid them.
 use corvette_detect::{
-    CameraHandle, CameraRunner, CameraState, CameraStatus, CandidateStage, DEFAULT_POLICY, Decode,
-    EngineError, Frame, FrameSpec, Infer, Labels, LiveError, LivePipeline, ObjectStage,
-    PipelineCounters, RegionStage, RegionStageSettings, RunnerError, SharedLink, StepEnd,
-    WorkerLink, frame_slot,
+    CameraHandle, CameraObjects, CameraRunner, CameraState, CameraStatus, CandidateStage,
+    DEFAULT_POLICY, Decode, EngineError, Frame, FrameSpec, Infer, Labels, LiveError, LivePipeline,
+    ObjectStage, PipelineCounters, RegionStage, RegionStageSettings, RunnerError, SharedLink,
+    StepEnd, WorkerLink, frame_slot,
 };
 use corvette_detect_proto::{HEADER_LEN, Reply, Request, Row, TENSOR_BYTES, parse_header};
 use corvette_motion::{MotionSettings, Shape, SizeGrid};
@@ -155,7 +155,10 @@ fn working_frames_publish_a_confirmed_object_and_running_state() {
     assert_eq!(status.state, CameraState::Running);
     assert_eq!(status.counters.frames_in, 3);
     assert_eq!(status.frames_dropped, 0, "one frame in, one frame out");
-    let objects = handle.objects.borrow().clone().expect("objects published");
+    let objects = match &*handle.objects.borrow() {
+        CameraObjects::Frame(objects) => objects.clone(),
+        other => panic!("objects published, got {other:?}"),
+    };
     assert!(
         objects.objects.iter().any(|object| object.confirmed),
         "a confirmed person after three frames, cells said person={}",
@@ -170,8 +173,10 @@ fn a_frame_with_no_rows_publishes_seen_empty_objects_not_unknown() {
     let (mut runner, handle) = CameraRunner::new(receiver, pipeline, Duration::from_secs(1));
     sender.put(black_frame(0));
     assert!(matches!(runner.step_once(), Ok(StepEnd::Frame)));
-    let objects = handle.objects.borrow().clone();
-    let objects = objects.expect("a seen frame publishes Some, not None");
+    let objects = match &*handle.objects.borrow() {
+        CameraObjects::Frame(objects) => objects.clone(),
+        other => panic!("a seen frame publishes a frame, got {other:?}"),
+    };
     assert!(objects.objects.is_empty(), "seen but nothing there");
 }
 
@@ -186,12 +191,18 @@ fn a_failing_inference_reports_unavailable_then_recovers() {
     let status = *handle.status.borrow();
     assert_eq!(status.state, CameraState::InferenceUnavailable);
     assert_eq!(status.counters.frames_inference_failed, 1);
-    assert!(handle.objects.borrow().is_none(), "unknown, not empty");
+    assert!(
+        matches!(&*handle.objects.borrow(), CameraObjects::Cleared),
+        "unknown, not empty"
+    );
     cells.failing.set(false);
     sender.put(flat_frame(1));
     assert!(matches!(runner.step_once(), Ok(StepEnd::Frame)));
     assert_eq!(handle.status.borrow().state, CameraState::Running);
-    assert!(handle.objects.borrow().is_some(), "recovered to Some");
+    assert!(
+        matches!(&*handle.objects.borrow(), CameraObjects::Frame(_)),
+        "recovered to a frame"
+    );
 }
 
 #[test]
@@ -203,7 +214,7 @@ fn a_quiet_source_past_the_timeout_reports_a_gap() {
     let status = *handle.status.borrow();
     assert_eq!(status.state, CameraState::WaitingForFrames);
     assert_eq!(status.source_gaps, 1);
-    assert!(handle.objects.borrow().is_none());
+    assert!(matches!(&*handle.objects.borrow(), CameraObjects::Cleared));
 }
 
 #[test]
@@ -213,14 +224,17 @@ fn a_gap_after_a_seen_frame_clears_the_objects() {
     let (mut runner, handle) = CameraRunner::new(receiver, pipeline, Duration::from_millis(500));
     sender.put(black_frame(0));
     assert!(matches!(runner.step_once(), Ok(StepEnd::Frame)));
-    assert!(handle.objects.borrow().is_some(), "the frame was seen");
+    assert!(
+        matches!(&*handle.objects.borrow(), CameraObjects::Frame(_)),
+        "the frame was seen"
+    );
     sender.gap();
     assert!(matches!(runner.step_once(), Ok(StepEnd::Gap)));
     let status = *handle.status.borrow();
     assert_eq!(status.state, CameraState::WaitingForFrames);
     assert_eq!(status.source_gaps, 1);
     assert!(
-        handle.objects.borrow().is_none(),
+        matches!(&*handle.objects.borrow(), CameraObjects::Cleared),
         "the gap clears to unknown"
     );
 }
@@ -232,7 +246,10 @@ fn an_exiting_child_reports_a_gap_after_its_last_frame() {
     let (mut runner, handle) = CameraRunner::new(receiver, pipeline, Duration::from_secs(1));
     sender.put(black_frame(0));
     assert!(matches!(runner.step_once(), Ok(StepEnd::Frame)));
-    assert!(handle.objects.borrow().is_some(), "the frame was seen");
+    assert!(
+        matches!(&*handle.objects.borrow(), CameraObjects::Frame(_)),
+        "the frame was seen"
+    );
     sender.gap();
     assert!(
         matches!(runner.step_once(), Ok(StepEnd::Gap)),
@@ -241,7 +258,7 @@ fn an_exiting_child_reports_a_gap_after_its_last_frame() {
     let status = *handle.status.borrow();
     assert_eq!(status.source_gaps, 1, "the gap is counted");
     assert!(
-        handle.objects.borrow().is_none(),
+        matches!(&*handle.objects.borrow(), CameraObjects::Cleared),
         "end of stream clears objects to unknown"
     );
 }
@@ -492,7 +509,7 @@ fn initial_status() -> CameraStatus {
 #[test]
 fn a_restarted_runner_publishes_on_the_cameras_own_channels() {
     let (status_tx, status_rx) = watch::channel(initial_status());
-    let (objects_tx, objects_rx) = watch::channel(None);
+    let (objects_tx, objects_rx) = watch::channel(CameraObjects::Cleared);
     let mut handle = CameraHandle {
         status: status_rx,
         objects: objects_rx,
@@ -541,7 +558,7 @@ fn a_runner_with_restarts_publishes_the_count_on_every_status() {
     let (sender, receiver) = frame_slot();
     let (runner, _unused) = CameraRunner::new(receiver, pipeline, Duration::from_millis(50));
     let (status_tx, status_rx) = watch::channel(initial_status());
-    let (objects_tx, objects_rx) = watch::channel(None);
+    let (objects_tx, objects_rx) = watch::channel(CameraObjects::Cleared);
     let handle = CameraHandle {
         status: status_rx,
         objects: objects_rx,

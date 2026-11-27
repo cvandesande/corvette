@@ -47,12 +47,12 @@ impl ServiceState {
 
     /// Decides a `POST config/validate` from its head: `Ok` is the body length to read, `Err` is the finished `400` answer.
     pub(crate) fn validate_length(target: &str, head: &[u8]) -> Result<usize, String> {
-        required_length(target, "POST", head)
+        Self::required_length(target, "POST", head)
     }
 
     /// Decides a `PUT config` from its head: `Ok` is the body length to read, `Err` is the finished `400` answer.
     pub(crate) fn apply_length(target: &str, head: &[u8]) -> Result<usize, String> {
-        required_length(target, "PUT", head)
+        Self::required_length(target, "PUT", head)
     }
 
     /// Answers `POST config/validate`: the loader's whole rule set against the proposed value, changing nothing.
@@ -201,19 +201,20 @@ impl ServiceState {
             &Value::Object(answer).to_string(),
         )
     }
-}
 
-fn required_length(target: &str, verb: &str, head: &[u8]) -> Result<usize, String> {
-    match content_length(head) {
-        None => Err(bad_request(
-            target,
-            &format!("a {verb} needs a valid Content-Length"),
-        )),
-        Some(length) if length > MAX_BODY_BYTES => Err(bad_request(
-            target,
-            &format!("body over the {MAX_BODY_BYTES} byte bound"),
-        )),
-        Some(length) => Ok(length),
+    /// The declared body length a `verb` request on `target` must carry; `Err` is the 400 answer text.
+    pub(crate) fn required_length(target: &str, verb: &str, head: &[u8]) -> Result<usize, String> {
+        match content_length(head) {
+            None => Err(bad_request(
+                target,
+                &format!("a {verb} needs a valid Content-Length"),
+            )),
+            Some(length) if length > MAX_BODY_BYTES => Err(bad_request(
+                target,
+                &format!("body over the {MAX_BODY_BYTES} byte bound"),
+            )),
+            Some(length) => Ok(length),
+        }
     }
 }
 
@@ -227,7 +228,8 @@ fn config_body(target: &str, body: &[u8]) -> Result<Value, String> {
 
 /// Whether a `Remote-User` is safe inside the audit line's quotes: a control
 /// character or a double quote there could split or forge a line.
-fn remote_user_is_auditable(user: &str) -> bool {
+#[must_use]
+pub fn remote_user_is_auditable(user: &str) -> bool {
     !user.is_empty()
         && user
             .bytes()
@@ -252,7 +254,8 @@ fn source_refusal_answer(target: &str, value: &Value) -> Option<String> {
     })
 }
 
-fn header<'a>(head: &'a [u8], name: &str) -> Option<&'a str> {
+#[must_use]
+pub fn header<'a>(head: &'a [u8], name: &str) -> Option<&'a str> {
     let text = std::str::from_utf8(head).ok()?;
     text.split("\r\n").skip(1).find_map(|line| {
         let (key, value) = line.split_once(':')?;
@@ -301,7 +304,8 @@ fn temp_path(path: &Path) -> PathBuf {
     ))
 }
 
-fn unauthorized(instance: &str) -> String {
+#[must_use]
+pub fn unauthorized(instance: &str) -> String {
     problem(
         401,
         "unauthorized",

@@ -1,6 +1,7 @@
 //! Minimal HTTP/1.1 over a Unix socket, one request per connection: one camera's objects answer, the detection status answer, and the configuration routes; the API server maps any non-`200` here to its public `503 detection_unavailable`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -9,7 +10,10 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
 
 use crate::camera_runner::CameraHandle;
-use crate::object_stage::FrameObjects;
+use crate::enabled::{
+    CameraSlot, DEFAULT_TOGGLE_JOIN_TIMEOUT, SlotState, ToggleService, slot_state,
+};
+use crate::object_stage::{CameraObjects, FrameObjects};
 use crate::service_bodies::{ObjectsAnswer, WorkerReport, objects_answer, off_entry, status_entry};
 use crate::supervised::Status;
 use crate::track_events::{EventFeed, EventStream};
@@ -22,6 +26,7 @@ const VALIDATE_PATH: &str = "/corvette/api/v1/detection/config/validate";
 const SCHEMA_PATH: &str = "/corvette/api/v1/detection/config/schema";
 const CAMERAS_PREFIX: &str = "/corvette/api/v1/cameras/";
 const OBJECTS_SUFFIX: &str = "/objects";
+const ENABLED_SUFFIX: &str = "/enabled";
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
@@ -30,9 +35,11 @@ pub enum CameraEntry {
     Live(CameraHandle),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ServiceState {
-    cameras: Vec<(String, CameraEntry)>,
+    pub(crate) cameras: Arc<Mutex<Vec<Arc<CameraSlot>>>>,
+    pub(crate) closing: Arc<AtomicBool>,
+    pub(crate) stop_timeout: Duration,
     worker: Option<watch::Receiver<Status>>,
     config_path: Option<PathBuf>,
     apply_lock: Arc<Mutex<()>>,
@@ -42,11 +49,36 @@ impl ServiceState {
     #[must_use]
     pub fn new(cameras: Vec<(String, CameraEntry)>) -> Self {
         Self {
-            cameras,
+            cameras: Arc::new(Mutex::new(
+                cameras
+                    .into_iter()
+                    .map(|(name, entry)| {
+                        Arc::new(CameraSlot {
+                            name,
+                            channels: None,
+                            recipe: None,
+                            toggle: tokio::sync::Mutex::new(()),
+                            stopping: AtomicBool::new(false),
+                            state: Mutex::new(SlotState {
+                                entry,
+                                threads: None,
+                            }),
+                        })
+                    })
+                    .collect(),
+            )),
+            closing: Arc::new(AtomicBool::new(false)),
+            stop_timeout: DEFAULT_TOGGLE_JOIN_TIMEOUT,
             worker: None,
             config_path: None,
             apply_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    #[must_use]
+    pub const fn with_stop_timeout(mut self, stop_timeout: Duration) -> Self {
+        self.stop_timeout = stop_timeout;
+        self
     }
 
     #[must_use]
@@ -77,15 +109,16 @@ impl ServiceState {
 
 /// Accept connections until one `accept` fails; each connection is answered by its own task, closed after one request except an event stream, which pumps until it ends.
 ///
-/// When `events` is `Some`, this listener serves `GET /corvette/api/v1/events` from that feed; a `None` listener answers it `404`.
+/// When `events` is `Some`, this listener serves `GET /corvette/api/v1/events` from that feed and, when `toggles` is `Some`, `POST /corvette/api/v1/cameras/<name>/enabled`; a `None` listener answers both `404`.
 /// # Errors
 /// Returns `Err` when `accept` fails.
 pub async fn serve(
     listener: UnixListener,
     state: Arc<ServiceState>,
     events: Option<Arc<EventFeed>>,
+    toggles: Option<ToggleService>,
 ) -> std::io::Result<()> {
-    serve_with_timeout(listener, state, DEFAULT_READ_TIMEOUT, events).await
+    serve_with_timeout(listener, state, DEFAULT_READ_TIMEOUT, events, toggles).await
 }
 
 /// # Errors
@@ -95,13 +128,22 @@ pub async fn serve_with_timeout(
     state: Arc<ServiceState>,
     read_timeout: Duration,
     events: Option<Arc<EventFeed>>,
+    toggles: Option<ToggleService>,
 ) -> std::io::Result<()> {
     loop {
         let (stream, _peer) = listener.accept().await?;
         let state = Arc::clone(&state);
         let events = events.clone();
+        let toggles = toggles.clone();
         tokio::spawn(async move {
-            answer_one(stream, &state, events.as_ref(), read_timeout).await;
+            answer_one(
+                stream,
+                &state,
+                events.as_ref(),
+                toggles.as_ref(),
+                read_timeout,
+            )
+            .await;
         });
     }
 }
@@ -153,9 +195,10 @@ async fn answer_one(
     mut stream: UnixStream,
     state: &ServiceState,
     events: Option<&Arc<EventFeed>>,
+    toggles: Option<&ToggleService>,
     read_timeout: Duration,
 ) {
-    let Some(answered) = answer(&mut stream, state, events, read_timeout).await else {
+    let Some(answered) = answer(&mut stream, state, events, toggles, read_timeout).await else {
         return;
     };
     match answered {
@@ -173,6 +216,7 @@ async fn answer(
     stream: &mut UnixStream,
     state: &ServiceState,
     events: Option<&Arc<EventFeed>>,
+    toggles: Option<&ToggleService>,
     read_timeout: Duration,
 ) -> Option<Answered> {
     let (head, prefix) = match tokio::time::timeout(read_timeout, read_head(stream)).await {
@@ -204,9 +248,20 @@ async fn answer(
             None,
         )));
     };
-    match route(state, method, target, &head, events) {
+    match route(state, method, target, &head, events, toggles) {
         RouteAnswer::Done(response) => Some(Answered::Response(response)),
         RouteAnswer::EventStream(feed) => Some(Answered::Stream(feed)),
+        RouteAnswer::EnabledBody { camera, length } => {
+            match read_body(stream, length, &prefix, read_timeout).await {
+                BodyRead::Complete(body) => Some(Answered::Response(
+                    state.enabled_answer(target, &camera, &head, &body).await,
+                )),
+                BodyRead::Missing => Some(Answered::Response(ServiceState::missing_body_answer(
+                    target,
+                ))),
+                BodyRead::Broken => None,
+            }
+        }
         RouteAnswer::ValidateBody { length } => {
             match read_body(stream, length, &prefix, read_timeout).await {
                 BodyRead::Complete(body) => {
@@ -290,6 +345,7 @@ enum RouteAnswer {
     EventStream(Arc<EventFeed>),
     ValidateBody { length: usize },
     ApplyBody { length: usize },
+    EnabledBody { camera: String, length: usize },
 }
 
 fn route(
@@ -298,10 +354,23 @@ fn route(
     target: &str,
     head: &[u8],
     events: Option<&Arc<EventFeed>>,
+    toggles: Option<&ToggleService>,
 ) -> RouteAnswer {
     use RouteAnswer::Done;
     if target.contains(['?', '#']) {
         return Done(not_found());
+    }
+    if let Some(camera) = enabled_camera(target) {
+        if toggles.is_none() {
+            return Done(not_found());
+        }
+        if method != "POST" {
+            return Done(method_not_allowed("POST"));
+        }
+        return match ServiceState::required_length(target, "POST", head) {
+            Ok(length) => RouteAnswer::EnabledBody { camera, length },
+            Err(answer) => Done(answer),
+        };
     }
     if target == EVENTS_PATH {
         if method != "GET" {
@@ -343,37 +412,44 @@ fn route(
             Err(answer) => Done(answer),
         };
     }
-    if let Some(index) = objects_index(state, target) {
+    if let Some(name) = camera_name_in(target, OBJECTS_SUFFIX) {
         if method != "GET" {
             return Done(method_not_allowed("GET"));
         }
-        return Done(objects_response(state, index));
+        let Some(slot) = state.slot_for(&name) else {
+            return Done(not_found());
+        };
+        return Done(objects_response(&slot));
     }
     Done(not_found())
 }
 
-fn not_found() -> String {
+/// The camera name in `/corvette/api/v1/cameras/<name><suffix>`, percent-decoded; `None` for any other shape.
+fn camera_name_in(target: &str, suffix: &str) -> Option<String> {
+    let segment = target.strip_prefix(CAMERAS_PREFIX)?.strip_suffix(suffix)?;
+    if segment.is_empty() || segment.contains('/') {
+        return None;
+    }
+    percent_decode(segment)
+}
+
+fn enabled_camera(target: &str) -> Option<String> {
+    camera_name_in(target, ENABLED_SUFFIX)
+}
+
+#[must_use]
+pub fn not_found() -> String {
     http_response(404, "Not Found", "{\"reason\":\"not_found\"}", None)
 }
 
-fn method_not_allowed(method: &str) -> String {
+#[must_use]
+pub fn method_not_allowed(method: &str) -> String {
     http_response(
         405,
         "Method Not Allowed",
         "{\"reason\":\"method_not_allowed\"}",
         Some(method),
     )
-}
-
-fn objects_index(state: &ServiceState, target: &str) -> Option<usize> {
-    let segment = target
-        .strip_prefix(CAMERAS_PREFIX)?
-        .strip_suffix(OBJECTS_SUFFIX)?;
-    if segment.is_empty() || segment.contains('/') {
-        return None;
-    }
-    let decoded = percent_decode(segment)?;
-    state.cameras.iter().position(|(name, _)| *name == decoded)
 }
 
 /// Percent-decodes a raw path segment; `None` on a malformed escape or non-UTF-8 bytes; `+` stays `+`.
@@ -405,29 +481,37 @@ const fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
-fn objects_response(state: &ServiceState, index: usize) -> String {
-    match &state.cameras[index].1 {
-        CameraEntry::Off => http_response(200, "OK", "{\"objects\":[]}", None),
-        CameraEntry::Live(handle) => {
-            let published: Option<FrameObjects> = (*handle.objects.borrow()).clone();
-            match objects_answer(published.as_ref()) {
-                Ok(ObjectsAnswer::Objects(body)) => http_response(200, "OK", &body, None),
-                Ok(ObjectsAnswer::Unknown) => http_response(
-                    503,
-                    "Service Unavailable",
-                    "{\"reason\":\"objects_unknown\"}",
-                    None,
-                ),
-                Err(err) => {
-                    crate::log_event("service", "objects-serialisation", err);
-                    http_response(
-                        500,
-                        "Internal Server Error",
-                        "{\"reason\":\"serialisation_failed\"}",
-                        None,
-                    )
-                }
-            }
+fn objects_response(slot: &Arc<CameraSlot>) -> String {
+    let live = match &slot_state(slot).entry {
+        CameraEntry::Off => None,
+        CameraEntry::Live(handle) => Some(handle.clone()),
+    };
+    let Some(handle) = live else {
+        return http_response(200, "OK", "{\"objects\":[]}", None);
+    };
+    let published_now = handle.objects.borrow();
+    let published: Option<&FrameObjects> = match &*published_now {
+        CameraObjects::Frame(known) => Some(known),
+        CameraObjects::Cleared | CameraObjects::Stopped => None,
+    };
+    let answer = objects_answer(published);
+    drop(published_now);
+    match answer {
+        Ok(ObjectsAnswer::Objects(body)) => http_response(200, "OK", &body, None),
+        Ok(ObjectsAnswer::Unknown) => http_response(
+            503,
+            "Service Unavailable",
+            "{\"reason\":\"objects_unknown\"}",
+            None,
+        ),
+        Err(err) => {
+            crate::log_event("service", "objects-serialisation", err);
+            http_response(
+                500,
+                "Internal Server Error",
+                "{\"reason\":\"serialisation_failed\"}",
+                None,
+            )
         }
     }
 }
@@ -437,18 +521,19 @@ fn status_body(state: &ServiceState) -> String {
         .worker
         .as_ref()
         .map(|receiver| WorkerReport::from_status(&receiver.borrow()));
-    let entries: Vec<String> = state
-        .cameras
+    let cameras = state.cameras_locked();
+    let entries: Vec<String> = cameras
         .iter()
-        .map(|(name, entry)| match entry {
-            CameraEntry::Off => off_entry(name),
-            CameraEntry::Live(handle) => status_entry(name, &handle.status.borrow(), worker),
+        .map(|slot| match &slot_state(slot).entry {
+            CameraEntry::Off => off_entry(&slot.name),
+            CameraEntry::Live(handle) => status_entry(&slot.name, &handle.status.borrow(), worker),
         })
         .collect();
+    drop(cameras);
     format!("{{\"cameras\":[{}]}}", entries.join(","))
 }
 
-fn http_response(status: u16, reason: &str, body: &str, allow: Option<&str>) -> String {
+pub fn http_response(status: u16, reason: &str, body: &str, allow: Option<&str>) -> String {
     let allow = allow.map_or_else(String::new, |methods| format!("Allow: {methods}\r\n"));
     format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n{allow}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",

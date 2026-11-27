@@ -91,6 +91,11 @@
             "default": 5,
             "description": "Detect frame rate in frames per second."
           },
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether the camera starts when the process starts; absent means enabled."
+          },
           "confirm_threshold": {
             "type": "number",
             "exclusiveMinimum": 0,

@@ -1,6 +1,7 @@
 //! Runs one camera as two operating-system threads: a frame producer owning the decode child, and a pipeline runner that rebuilds and restarts after a fatal error.
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::{Mutex, MutexGuard};
 use std::thread::Builder;
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,7 @@ use crate::ffmpeg::FrameSpec;
 use crate::frame_slot::{SlotCloser, SlotReceiver, SlotSender, frame_slot};
 use crate::live_pipeline::{LivePipeline, PipelineCounters};
 use crate::log_event;
-use crate::object_stage::FrameObjects;
+use crate::object_stage::{CameraObjects, FrameObjects};
 use crate::shared_link::{SharedInfer, SharedLink};
 use crate::source::{FrameSource, SourceError, SourceStopper};
 
@@ -78,27 +79,116 @@ pub struct JoinReport {
     pub producer: ThreadEnd,
 }
 
+/// The status and objects channels of one camera, alive for the process: a toggle swaps the threads, never these channels, so a publisher spawned at startup keeps live receivers across a toggle.
+#[derive(Clone, Debug)]
+pub struct CameraChannels {
+    status_tx: watch::Sender<CameraStatus>,
+    objects_tx: watch::Sender<CameraObjects>,
+}
+
+impl Default for CameraChannels {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CameraChannels {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            status_tx: watch::channel(initial_status()).0,
+            objects_tx: watch::channel(CameraObjects::Cleared).0,
+        }
+    }
+
+    #[must_use]
+    pub fn handle(&self) -> CameraHandle {
+        CameraHandle {
+            status: self.status_tx.subscribe(),
+            objects: self.objects_tx.subscribe(),
+        }
+    }
+
+    #[must_use]
+    pub fn objects_receiver(&self) -> watch::Receiver<CameraObjects> {
+        self.objects_tx.subscribe()
+    }
+
+    /// Places one frame's objects on the channel, as the runner thread does for every processed frame.
+    pub fn publish_frame(&self, objects: FrameObjects) {
+        let _ = self.objects_tx.send(CameraObjects::Frame(objects));
+    }
+
+    pub(crate) fn mark_stopped(&self) {
+        let _ = self.objects_tx.send(CameraObjects::Stopped);
+    }
+}
+
+/// One camera thread's end: a delivered value survives a timed-out wait, so a later wait reports the same end instead of waiting twice on a thread that already ended.
+#[derive(Debug)]
+struct EndWatcher {
+    done: Receiver<()>,
+    ended: Option<ThreadEnd>,
+}
+
+impl EndWatcher {
+    fn wait_until(&mut self, deadline: Instant) -> ThreadEnd {
+        self.end_or_wait(Some(deadline))
+    }
+
+    fn wait_finished(&mut self) -> ThreadEnd {
+        self.end_or_wait(None)
+    }
+
+    fn end_or_wait(&mut self, deadline: Option<Instant>) -> ThreadEnd {
+        if let Some(ended) = self.ended {
+            return ended;
+        }
+        let ended = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match self.done.recv_timeout(remaining) {
+                    Ok(()) => ThreadEnd::Finished,
+                    Err(RecvTimeoutError::Disconnected) => ThreadEnd::Panicked,
+                    Err(RecvTimeoutError::Timeout) => return ThreadEnd::TimedOut,
+                }
+            }
+            None => match self.done.recv() {
+                Ok(()) => ThreadEnd::Finished,
+                Err(_sender_dropped) => ThreadEnd::Panicked,
+            },
+        };
+        self.ended = Some(ended);
+        ended
+    }
+}
+
+/// The producer inputs one start takes from its plan: the frame geometry the reader expects and the clock it stamps.
+#[derive(Clone, Copy, Debug)]
+pub struct ProducerPlan {
+    pub spec: FrameSpec,
+    pub clock: FrameClock,
+}
+
 #[derive(Debug)]
 pub struct CameraThreads {
-    status_tx: watch::Sender<CameraStatus>,
-    objects_tx: watch::Sender<Option<FrameObjects>>,
     stop_tx: SyncSender<()>,
     slot_closer: SlotCloser,
     stopper: SourceStopper,
-    producer_done: Receiver<()>,
-    runner_done: Receiver<()>,
+    runner_end: Mutex<EndWatcher>,
+    producer_end: Mutex<EndWatcher>,
 }
 
 impl CameraThreads {
-    /// Starts one camera's two OS threads and the decode child they supervise; `stop` ends them and `join` waits for both.
+    /// Starts one camera's two OS threads and the decode child they supervise, publishing on the persistent `channels`; `stop` ends them and `join` waits for both.
     ///
     /// # Errors
     /// [`StartError::ThreadStart`] when an OS thread cannot be created, [`StartError::ProducerRuntime`] when the producer's runtime cannot be built, [`StartError::NoStopper`] when the producer hands no stopper back within [`STOPPER_WAIT`].
     pub fn start<M, B, E>(
         unit: &str,
         settings: CameraThreadSettings,
-        spec: FrameSpec,
-        clock: FrameClock,
+        channels: &CameraChannels,
+        producer: ProducerPlan,
         make_command: M,
         link: &SharedLink,
         build: B,
@@ -110,10 +200,11 @@ impl CameraThreads {
             + 'static,
         E: std::fmt::Display + Send + 'static,
     {
+        let ProducerPlan { spec, clock } = producer;
         let (slot_sender, slot_receiver) = frame_slot();
         let slot_closer = slot_receiver.closer();
-        let (status_tx, _) = watch::channel(initial_status());
-        let (objects_tx, _) = watch::channel(None);
+        let status_tx = channels.status_tx.clone();
+        let objects_tx = channels.objects_tx.clone();
         let (stop_tx, stop_rx) = mpsc::sync_channel(1);
         let (handback_tx, handback_rx) = mpsc::sync_channel(1);
         let (producer_done_tx, producer_done) = mpsc::sync_channel(1);
@@ -148,8 +239,6 @@ impl CameraThreads {
         };
 
         let thread_link = link.clone();
-        let thread_status_tx = status_tx.clone();
-        let thread_objects_tx = objects_tx.clone();
         let runner_unit = unit.to_string();
         let runner = Builder::new().spawn(move || {
             run_runner(
@@ -157,7 +246,7 @@ impl CameraThreads {
                 &slot_receiver,
                 &thread_link,
                 settings,
-                (&thread_status_tx, &thread_objects_tx),
+                (&status_tx, &objects_tx),
                 &stop_rx,
                 build,
             );
@@ -173,23 +262,18 @@ impl CameraThreads {
         }
 
         Ok(Self {
-            status_tx,
-            objects_tx,
             stop_tx,
             slot_closer,
             stopper,
-            producer_done,
-            runner_done,
+            runner_end: Mutex::new(EndWatcher {
+                done: runner_done,
+                ended: None,
+            }),
+            producer_end: Mutex::new(EndWatcher {
+                done: producer_done,
+                ended: None,
+            }),
         })
-    }
-
-    /// The camera's persistent status and objects channels, unchanged across runner restarts.
-    #[must_use]
-    pub fn handle(&self) -> CameraHandle {
-        CameraHandle {
-            status: self.status_tx.subscribe(),
-            objects: self.objects_tx.subscribe(),
-        }
     }
 
     /// Stops the frame source, closes the slot and wakes a runner waiting in back-off; idempotent and callable from any thread.
@@ -202,20 +286,30 @@ impl CameraThreads {
     /// Waits for both threads under one shared `timeout` deadline and reports how each ended; call `stop` first, `join` only waits.
     #[must_use]
     pub fn join(self, timeout: Duration) -> JoinReport {
+        self.wait_ends(timeout)
+    }
+
+    /// Waits like `join` without consuming the threads; a thread that ends after a timed-out wait is reported by a later wait.
+    #[must_use]
+    pub fn wait_ends(&self, timeout: Duration) -> JoinReport {
         let deadline = Instant::now() + timeout;
-        let runner = ended_by(&self.runner_done, deadline);
-        let producer = ended_by(&self.producer_done, deadline);
+        let runner = end_of(&self.runner_end).wait_until(deadline);
+        let producer = end_of(&self.producer_end).wait_until(deadline);
+        JoinReport { runner, producer }
+    }
+
+    /// Waits for both threads to end, however long that takes, after a timed-out wait left one running.
+    #[must_use]
+    pub fn wait_finished(&self) -> JoinReport {
+        let runner = end_of(&self.runner_end).wait_finished();
+        let producer = end_of(&self.producer_end).wait_finished();
         JoinReport { runner, producer }
     }
 }
 
-fn ended_by(done: &Receiver<()>, deadline: Instant) -> ThreadEnd {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    match done.recv_timeout(remaining) {
-        Ok(()) => ThreadEnd::Finished,
-        Err(RecvTimeoutError::Disconnected) => ThreadEnd::Panicked,
-        Err(RecvTimeoutError::Timeout) => ThreadEnd::TimedOut,
-    }
+fn end_of(end: &Mutex<EndWatcher>) -> MutexGuard<'_, EndWatcher> {
+    end.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn initial_status() -> CameraStatus {
@@ -298,10 +392,7 @@ fn run_runner<B, E>(
     slot: &SlotReceiver,
     link: &SharedLink,
     settings: CameraThreadSettings,
-    channels: (
-        &watch::Sender<CameraStatus>,
-        &watch::Sender<Option<FrameObjects>>,
-    ),
+    channels: (&watch::Sender<CameraStatus>, &watch::Sender<CameraObjects>),
     stop_rx: &Receiver<()>,
     build: B,
 ) where
@@ -481,7 +572,7 @@ mod tests {
         let (sender, receiver) = frame_slot();
         let closer = receiver.closer();
         let (status_tx, mut status_rx) = watch::channel(initial_status());
-        let (objects_tx, _objects_rx) = watch::channel(None);
+        let (objects_tx, _objects_rx) = watch::channel(CameraObjects::Cleared);
         let (_stop_tx, stop_rx) = mpsc::channel();
         let runner_thread = std::thread::spawn(move || {
             let settings = CameraThreadSettings {

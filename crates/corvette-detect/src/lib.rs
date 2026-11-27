@@ -13,6 +13,7 @@ mod config_change;
 mod config_file;
 mod config_routes;
 mod config_schema;
+mod enabled;
 mod engine;
 mod ffmpeg;
 mod frame_slot;
@@ -41,7 +42,10 @@ pub use camera_plan::{CameraPlan, PlanError, StreamAddress, stream_address};
 pub use camera_runner::{
     CameraHandle, CameraRunner, CameraState, CameraStatus, RunnerError, StepEnd,
 };
-pub use camera_thread::{CameraThreadSettings, CameraThreads, JoinReport, StartError, ThreadEnd};
+pub use camera_thread::{
+    CameraChannels, CameraThreadSettings, CameraThreads, JoinReport, ProducerPlan, StartError,
+    ThreadEnd,
+};
 pub use candidate_stage::{CandidateError, CandidateStage, Infer};
 pub use clock::FrameClock;
 pub use config::{
@@ -55,12 +59,17 @@ pub use config::{
 };
 pub use config_change::classify;
 pub use config_file::render;
+pub use config_routes::{header, remote_user_is_auditable, unauthorized};
 pub use config_schema::{SCHEMA_ID, SCHEMA_JSON};
+pub use enabled::{
+    CameraRecipe, CameraSlot, CameraStartup, DEFAULT_TOGGLE_JOIN_TIMEOUT, RestartFailure,
+    SlotState, ToggleService, slot_state,
+};
 pub use engine::{EngineError, LabelError, Labels, WorkerClient};
 pub use ffmpeg::{Decode, FrameSpec, Input, MAX_FRAME_BYTES, SpecError, decode_command};
 pub use frame_slot::{SlotCloser, SlotEvent, SlotReceiver, SlotSender, frame_slot};
 pub use live_pipeline::{FrameOutcome, LiveError, LivePipeline, PipelineCounters};
-pub use object_stage::{FrameObjects, ObjectStage, ObjectStageError, TrackedObject};
+pub use object_stage::{CameraObjects, FrameObjects, ObjectStage, ObjectStageError, TrackedObject};
 pub use rate_window::{RateWindow, Rates};
 pub use reader::{Frame, FrameReader, ReadError};
 pub use record::{RecordError, RecordHeader, RecordWriter, json_string, object_entries};
@@ -72,7 +81,10 @@ pub use segment::{SegmentError, SegmentName};
 pub use service_bodies::{
     OFF_STATE, ObjectsAnswer, WorkerReport, objects_answer, off_entry, state_name, status_entry,
 };
-pub use service_socket::{CameraEntry, ServiceState, serve, serve_with_timeout};
+pub use service_socket::{
+    CameraEntry, ServiceState, http_response, method_not_allowed, not_found, serve,
+    serve_with_timeout,
+};
 pub use shared_link::{LinkTimings, SharedInfer, SharedLink};
 pub use source::{FrameSource, STREAM_QUEUE_CAPACITY, SourceError};
 pub use source_url::{StreamAddressError, StreamKind, resolve_stream_url};

@@ -1,4 +1,6 @@
-use corvette_detect::{EventFeed, FrameObjects, ServiceState, serve, serve_track_events};
+use corvette_detect::{
+    CameraObjects, EventFeed, FrameObjects, ServiceState, serve, serve_track_events,
+};
 use corvette_detect_proto::{TrackFrame, encode_track_line};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,9 +39,9 @@ fn tick_line(second: u64) -> Vec<u8> {
     })
 }
 
-async fn serve_pair(tag: &str) -> (PathBuf, PathBuf, watch::Sender<Option<FrameObjects>>) {
+async fn serve_pair(tag: &str) -> (PathBuf, PathBuf, watch::Sender<CameraObjects>) {
     let feed = Arc::new(EventFeed::new());
-    let (sender, receiver) = watch::channel(None);
+    let (sender, receiver) = watch::channel(CameraObjects::Cleared);
     feed.spawn_publishers(vec![("front".to_owned(), receiver)]);
     let ipc = temp_socket(&format!("{tag}-ipc"));
     let ipc_listener = UnixListener::bind(&ipc).unwrap();
@@ -47,6 +49,7 @@ async fn serve_pair(tag: &str) -> (PathBuf, PathBuf, watch::Sender<Option<FrameO
         ipc_listener,
         Arc::new(ServiceState::new(Vec::new())),
         Some(Arc::clone(&feed)),
+        None,
     ));
     let track = temp_socket(&format!("{tag}-track"));
     let track_listener = UnixListener::bind(&track).unwrap();
@@ -124,7 +127,9 @@ async fn the_http_stream_and_the_socket_subscriber_receive_the_same_lines_one_li
 
     let expected: Vec<Vec<u8>> = (100..103).map(tick_line).collect();
     for second in 100..103 {
-        sender.send(Some(tick_frame(second))).unwrap();
+        sender
+            .send(CameraObjects::Frame(tick_frame(second)))
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let socket_body = read_body(&mut track_stream).await;
@@ -144,11 +149,11 @@ async fn the_http_stream_and_the_socket_subscriber_receive_the_same_lines_one_li
 #[tokio::test]
 async fn a_late_subscriber_receives_only_the_lines_after_its_registration() {
     let (ipc, _track, sender) = serve_pair("late").await;
-    sender.send(Some(tick_frame(100))).unwrap();
+    sender.send(CameraObjects::Frame(tick_frame(100))).unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     let (mut late_stream, head) = request_events(&ipc).await;
     assert!(head.starts_with(b"HTTP/1.1 200 OK"), "head: {head:?}");
-    sender.send(Some(tick_frame(101))).unwrap();
+    sender.send(CameraObjects::Frame(tick_frame(101))).unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     let body = read_body(&mut late_stream).await;
     assert_eq!(

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use corvette_detect::{
-    CameraEntry, CameraHandle, CameraState, CameraStatus, FrameObjects, PipelineCounters, Policy,
-    ServiceState, Status, Supervised, TrackedObject, serve_with_timeout,
+    CameraEntry, CameraHandle, CameraObjects, CameraState, CameraStatus, FrameObjects,
+    PipelineCounters, Policy, ServiceState, Status, Supervised, TrackedObject, serve_with_timeout,
 };
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -27,7 +27,13 @@ fn start(test: &str, cameras: Vec<(String, CameraEntry)>) -> PathBuf {
     let socket = socket_path(test);
     let listener = UnixListener::bind(&socket).expect("bind");
     let state = Arc::new(ServiceState::new(cameras));
-    tokio::spawn(serve_with_timeout(listener, state, READ_TIMEOUT, None));
+    tokio::spawn(serve_with_timeout(
+        listener,
+        state,
+        READ_TIMEOUT,
+        None,
+        None,
+    ));
     socket
 }
 
@@ -39,7 +45,13 @@ fn start_with_worker(
     let socket = socket_path(test);
     let listener = UnixListener::bind(&socket).expect("bind");
     let state = Arc::new(ServiceState::new(cameras).with_worker(worker));
-    tokio::spawn(serve_with_timeout(listener, state, READ_TIMEOUT, None));
+    tokio::spawn(serve_with_timeout(
+        listener,
+        state,
+        READ_TIMEOUT,
+        None,
+        None,
+    ));
     socket
 }
 
@@ -118,7 +130,8 @@ const fn running(frames_in: u64) -> CameraStatus {
 
 fn live_handle(status: CameraStatus, objects: Option<FrameObjects>) -> CameraHandle {
     let (_status_tx, status_rx) = watch::channel(status);
-    let (_objects_tx, objects_rx) = watch::channel(objects);
+    let held = objects.map_or(CameraObjects::Cleared, CameraObjects::Frame);
+    let (_objects_tx, objects_rx) = watch::channel(held);
     CameraHandle {
         status: status_rx,
         objects: objects_rx,
@@ -351,7 +364,7 @@ async fn malformed_escapes_and_invalid_utf8_answer_not_found_even_when_registere
 #[tokio::test]
 async fn status_lists_cameras_in_registered_order_and_tracks_the_published_status() {
     let (status_tx, status_rx) = watch::channel(running(3));
-    let (_, objects_rx) = watch::channel::<Option<FrameObjects>>(None);
+    let (_, objects_rx) = watch::channel::<CameraObjects>(CameraObjects::Cleared);
     let a = CameraHandle {
         status: status_rx,
         objects: objects_rx,

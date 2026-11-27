@@ -14,7 +14,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, watch};
 
 use crate::log_event;
-use crate::object_stage::FrameObjects;
+use crate::object_stage::CameraObjects;
 
 // Bound on one subscriber's queued lines; start and end lines enqueue past this bound instead of dropping.
 pub const TRACK_EVENTS_QUEUE_LINES: usize = 256;
@@ -186,10 +186,10 @@ impl EventFeed {
         }
     }
 
-    /// Spawns one publisher task per camera; each publishes that camera's frames until its objects sender is dropped. Call inside the runtime that should own the tasks.
+    /// Spawns one publisher task per camera; each publishes that camera's frames until its objects sender is dropped, and closes its own open tracks when the camera-stopped value arrives. Call inside the runtime that should own the tasks.
     pub fn spawn_publishers(
         self: &Arc<Self>,
-        cameras: Vec<(String, watch::Receiver<Option<FrameObjects>>)>,
+        cameras: Vec<(String, watch::Receiver<CameraObjects>)>,
     ) {
         for (camera, objects) in cameras {
             tokio::spawn(publish(camera, objects, Arc::clone(self)));
@@ -329,7 +329,7 @@ pub async fn serve_track_events<L: TrackAccept + Send + 'static>(
 
 async fn publish(
     camera: String,
-    mut objects: watch::Receiver<Option<FrameObjects>>,
+    mut objects: watch::Receiver<CameraObjects>,
     feed: Arc<EventFeed>,
 ) {
     let mut lines: HashMap<String, LineState> = HashMap::new();
@@ -338,8 +338,22 @@ async fn publish(
         if objects.changed().await.is_err() {
             return;
         }
-        let Some(known) = (*objects.borrow_and_update()).clone() else {
-            continue;
+        let known = match &*objects.borrow_and_update() {
+            CameraObjects::Frame(known) => known.clone(),
+            CameraObjects::Cleared => continue,
+            CameraObjects::Stopped => {
+                // The camera ended without a per-frame end list; this publisher owns the open set, so it ends every open line, sorted by track id for a stable order.
+                let mut ended: Vec<&String> = lines.keys().collect();
+                ended.sort();
+                for track_id in ended {
+                    feed.push(&TrackFrame::End {
+                        camera: camera.clone(),
+                        track_id: track_id.clone(),
+                    });
+                }
+                lines.clear();
+                continue;
+            }
         };
         if known.motion_triggered {
             // The bound matches the consumer's millisecond clamp, so the frame time always converts.
@@ -425,6 +439,7 @@ async fn pump(mut stream: UnixStream, subscriber: Arc<Subscriber>, feed: Arc<Eve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object_stage::{FrameObjects, TrackedObject};
     use std::sync::PoisonError;
 
     fn queued_lines(subscriber: &Subscriber) -> Vec<String> {
@@ -473,11 +488,11 @@ mod tests {
         let subscriber = Arc::new(Subscriber::new(61));
         let feed = Arc::new(EventFeed::new());
         feed.sockets.lock().unwrap().push(Arc::clone(&subscriber));
-        let (sender, receiver) = watch::channel(None);
+        let (sender, receiver) = watch::channel(CameraObjects::Cleared);
         tokio::spawn(publish("front".to_owned(), receiver, feed));
         for time in [100.5, 100.9, 101.2] {
             sender
-                .send(Some(motion_frame(time, true)))
+                .send(CameraObjects::Frame(motion_frame(time, true)))
                 .expect("frame published");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -493,11 +508,11 @@ mod tests {
         let subscriber = Arc::new(Subscriber::new(62));
         let feed = Arc::new(EventFeed::new());
         feed.sockets.lock().unwrap().push(Arc::clone(&subscriber));
-        let (sender, receiver) = watch::channel(None);
+        let (sender, receiver) = watch::channel(CameraObjects::Cleared);
         tokio::spawn(publish("front".to_owned(), receiver, feed));
         for time in [100.5, 101.2] {
             sender
-                .send(Some(motion_frame(time, false)))
+                .send(CameraObjects::Frame(motion_frame(time, false)))
                 .expect("frame published");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -672,6 +687,68 @@ mod tests {
             );
         }
         assert_eq!(state.first_motion, None);
+    }
+
+    #[tokio::test]
+    async fn the_stopped_value_ends_every_open_line_and_clears_the_set() {
+        let subscriber = Arc::new(Subscriber::new(63));
+        let feed = Arc::new(EventFeed::new());
+        feed.sockets.lock().unwrap().push(Arc::clone(&subscriber));
+        let (sender, receiver) = watch::channel(CameraObjects::Cleared);
+        tokio::spawn(publish("front".to_owned(), receiver, feed));
+        let line_start = |id: &str| {
+            String::from_utf8_lossy(&encode_track_line(&TrackFrame::Start(TrackInfo {
+                camera: "front".to_owned(),
+                track_id: id.to_owned(),
+                label: "person".to_owned(),
+                bounds: [0.1, 0.2, 0.3, 0.4],
+                zones: Vec::new(),
+                first_motion: None,
+                last_seen: 1.0,
+            })))
+            .into_owned()
+        };
+        let line_end = |id: &str| {
+            String::from_utf8_lossy(&encode_track_line(&TrackFrame::End {
+                camera: "front".to_owned(),
+                track_id: id.to_owned(),
+            }))
+            .into_owned()
+        };
+        for track_id in ["7", "8"] {
+            sender
+                .send(CameraObjects::Frame(FrameObjects {
+                    frame_time: 1.0,
+                    objects: vec![TrackedObject {
+                        id: track_id.to_owned(),
+                        label: "person".to_owned(),
+                        score: 0.9,
+                        confirmed: true,
+                        bounds: [0.1, 0.2, 0.3, 0.4],
+                        edges: [100, 200, 300, 400],
+                        first_seen: 1.0,
+                        last_seen: 1.0,
+                        zones_now: Vec::new(),
+                        zones_entered: Vec::new(),
+                        stationary: false,
+                    }],
+                    ended: Vec::new(),
+                    motion_triggered: false,
+                }))
+                .expect("frame published");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        sender.send(CameraObjects::Stopped).expect("stop published");
+        assert_eq!(
+            wait_for_lines(&subscriber, 4).await,
+            vec![
+                line_start("7"),
+                line_start("8"),
+                line_end("7"),
+                line_end("8"),
+            ],
+            "both open tracks end once, in track-id order"
+        );
     }
 
     #[test]

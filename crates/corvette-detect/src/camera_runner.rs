@@ -8,7 +8,7 @@ use crate::frame_slot::{SlotEvent, SlotReceiver};
 use crate::live_pipeline::{FrameOutcome, LiveError, LivePipeline, PipelineCounters};
 use crate::log_event;
 use crate::object_events::ObjectLog;
-use crate::object_stage::FrameObjects;
+use crate::object_stage::CameraObjects;
 use crate::rate_window::RateWindow;
 use crate::shared_link::LinkTimings;
 
@@ -37,7 +37,7 @@ pub struct CameraStatus {
 #[derive(Clone, Debug)]
 pub struct CameraHandle {
     pub status: watch::Receiver<CameraStatus>,
-    pub objects: watch::Receiver<Option<FrameObjects>>,
+    pub objects: watch::Receiver<CameraObjects>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,7 +82,7 @@ pub struct CameraRunner<'a, E: Infer> {
     source_gaps: u64,
     runner_restarts: u32,
     status: watch::Sender<CameraStatus>,
-    objects: watch::Sender<Option<FrameObjects>>,
+    objects: watch::Sender<CameraObjects>,
     window: RateWindow,
     timings: Option<LinkTimings>,
     log_unit: Option<String>,
@@ -111,7 +111,7 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
             lock_wait_ms: 0,
         };
         let (status, status_rx) = watch::channel(initial);
-        let (objects, objects_rx) = watch::channel(None);
+        let (objects, objects_rx) = watch::channel(CameraObjects::Cleared);
         let arrived_at_start = slot.arrived();
         (
             Self {
@@ -148,7 +148,7 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
     pub fn publishing_to(
         mut self,
         status: watch::Sender<CameraStatus>,
-        objects: watch::Sender<Option<FrameObjects>>,
+        objects: watch::Sender<CameraObjects>,
         restarts: u32,
     ) -> Self {
         self.status = status;
@@ -180,12 +180,12 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
                                 log_event(unit, event, detail);
                             }
                         }
-                        let _ = self.objects.send_replace(Some(objects));
+                        let _ = self.objects.send_replace(CameraObjects::Frame(objects));
                         self.publish(CameraState::Running);
                         Ok(StepEnd::Frame)
                     }
                     Ok(FrameOutcome::InferenceUnavailable) => {
-                        let _ = self.objects.send_replace(None);
+                        let _ = self.objects.send_replace(CameraObjects::Cleared);
                         self.publish(CameraState::InferenceUnavailable);
                         Ok(StepEnd::Frame)
                     }
@@ -212,7 +212,7 @@ impl<'a, E: Infer> CameraRunner<'a, E> {
 
     fn record_gap(&mut self) -> StepEnd {
         self.source_gaps = self.source_gaps.saturating_add(1);
-        let _ = self.objects.send_replace(None);
+        let _ = self.objects.send_replace(CameraObjects::Cleared);
         self.publish(CameraState::WaitingForFrames);
         StepEnd::Gap
     }

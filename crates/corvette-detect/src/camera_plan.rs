@@ -174,18 +174,11 @@ impl CameraPlan {
     pub fn command_factory(
         &self,
         ffmpeg: PathBuf,
-        address: StreamAddress,
+        address: &StreamAddress,
     ) -> impl FnMut() -> Command + Send + 'static {
         let spec = self.spec;
-        move || {
-            decode_command(
-                &ffmpeg,
-                &Input::Live {
-                    url: address.0.clone(),
-                },
-                spec,
-            )
-        }
+        let url = address.0.clone();
+        move || decode_command(&ffmpeg, &Input::Live { url: url.clone() }, spec)
     }
 
     // Frigate defaults the deployment runs: floor 320, a 640x640 model, "person" tracked with the default filter, tracker timings from the camera rate; the failing stage names itself.

@@ -1,9 +1,10 @@
 // Tests may unwrap, expect and index: `docs/standards/STYLE.md` states
 // "Tests may unwrap, expect and index", and the crate lints do not forbid them.
 use corvette_detect::{
-    CameraState, CameraThreadSettings, CameraThreads, CandidateStage, DEFAULT_POLICY, Decode,
-    FrameClock, FrameSpec, JoinReport, Labels, LivePipeline, ObjectStage, Policy, RegionStage,
-    RegionStageSettings, SharedInfer, SharedLink, ThreadEnd, WorkerLink,
+    CameraChannels, CameraState, CameraThreadSettings, CameraThreads, CandidateStage,
+    DEFAULT_POLICY, Decode, FrameClock, FrameSpec, JoinReport, Labels, LivePipeline, ObjectStage,
+    Policy, ProducerPlan, RegionStage, RegionStageSettings, SharedInfer, SharedLink, ThreadEnd,
+    WorkerLink,
 };
 use corvette_motion::{MotionSettings, Shape, SizeGrid};
 use corvette_track::{IdSource, ObjectFilter, ObjectFilters, TrackerSettings, ZoneSet};
@@ -155,14 +156,18 @@ fn wait_until(what: &str, within: Duration, mut ready: impl FnMut() -> bool) {
 
 #[test]
 fn a_healthy_camera_reaches_running_and_finishes_on_stop() {
+    let channels = CameraChannels::new();
     let threads = CameraThreads::start(
         "healthy",
         CameraThreadSettings {
             frame_timeout: Duration::from_millis(500),
             backoff: DEFAULT_POLICY,
         },
-        spec(),
-        FrameClock::replay(Duration::ZERO, spec()),
+        &channels,
+        ProducerPlan {
+            spec: spec(),
+            clock: FrameClock::replay(Duration::ZERO, spec()),
+        },
         move || {
             shell(&format!(
                 "while :; do head -c {BIG_FRAME_BYTES} /dev/zero; done"
@@ -172,7 +177,7 @@ fn a_healthy_camera_reaches_running_and_finishes_on_stop() {
         build_live,
     )
     .expect("the camera threads start");
-    let handle = threads.handle();
+    let handle = channels.handle();
     wait_until(
         "the status to reach running",
         Duration::from_secs(5),
@@ -198,20 +203,24 @@ fn a_healthy_camera_reaches_running_and_finishes_on_stop() {
 
 #[test]
 fn a_fatal_first_frame_restarts_the_runner_and_stop_ends_it() {
+    let channels = CameraChannels::new();
     let threads = CameraThreads::start(
         "fatal",
         CameraThreadSettings {
             frame_timeout: Duration::from_millis(500),
             backoff: SHORT_FATAL,
         },
-        small_spec(),
-        FrameClock::replay(Duration::ZERO, small_spec()),
+        &channels,
+        ProducerPlan {
+            spec: small_spec(),
+            clock: FrameClock::replay(Duration::ZERO, small_spec()),
+        },
         || shell("while :; do printf abcdefghijkl; sleep 1; done"),
         &missing_worker_link(),
         build_fatal,
     )
     .expect("the camera threads start");
-    let mut handle = threads.handle();
+    let mut handle = channels.handle();
     wait_until("the first failure", Duration::from_secs(5), || {
         handle.status.borrow().state == CameraState::Failed
     });
@@ -245,20 +254,24 @@ fn a_fatal_first_frame_restarts_the_runner_and_stop_ends_it() {
 
 #[test]
 fn a_runner_in_a_long_backoff_returns_from_join_as_soon_as_stop_is_called() {
+    let channels = CameraChannels::new();
     let threads = CameraThreads::start(
         "long-backoff",
         CameraThreadSettings {
             frame_timeout: Duration::from_millis(500),
             backoff: LONG_BACKOFF,
         },
-        small_spec(),
-        FrameClock::replay(Duration::ZERO, small_spec()),
+        &channels,
+        ProducerPlan {
+            spec: small_spec(),
+            clock: FrameClock::replay(Duration::ZERO, small_spec()),
+        },
         || shell("printf abcdefghijkl; sleep 30"),
         &missing_worker_link(),
         build_fatal,
     )
     .expect("the camera threads start");
-    let handle = threads.handle();
+    let handle = channels.handle();
     wait_until("the first failure", Duration::from_secs(5), || {
         handle.status.borrow().state == CameraState::Failed
     });
@@ -287,14 +300,18 @@ fn a_silent_child_stops_both_threads_and_dies() {
         std::process::id()
     ));
     let script = format!("echo $$ > '{}'; exec sleep 30", pid_file.display());
+    let channels = CameraChannels::new();
     let threads = CameraThreads::start(
         "silent",
         CameraThreadSettings {
             frame_timeout: Duration::from_millis(500),
             backoff: SHORT_FATAL,
         },
-        small_spec(),
-        FrameClock::replay(Duration::ZERO, small_spec()),
+        &channels,
+        ProducerPlan {
+            spec: small_spec(),
+            clock: FrameClock::replay(Duration::ZERO, small_spec()),
+        },
         move || shell(&script),
         &missing_worker_link(),
         build_live,
@@ -330,14 +347,18 @@ fn a_silent_child_stops_both_threads_and_dies() {
 
 #[test]
 fn stopping_twice_is_harmless() {
+    let channels = CameraChannels::new();
     let threads = CameraThreads::start(
         "twice",
         CameraThreadSettings {
             frame_timeout: Duration::from_millis(500),
             backoff: DEFAULT_POLICY,
         },
-        spec(),
-        FrameClock::replay(Duration::ZERO, spec()),
+        &channels,
+        ProducerPlan {
+            spec: spec(),
+            clock: FrameClock::replay(Duration::ZERO, spec()),
+        },
         move || {
             shell(&format!(
                 "while :; do head -c {BIG_FRAME_BYTES} /dev/zero; done"
@@ -347,7 +368,7 @@ fn stopping_twice_is_harmless() {
         build_live,
     )
     .expect("the camera threads start");
-    let handle = threads.handle();
+    let handle = channels.handle();
     wait_until(
         "the status to reach running",
         Duration::from_secs(5),
@@ -368,14 +389,18 @@ fn stopping_twice_is_harmless() {
 
 #[test]
 fn a_build_that_panics_reports_the_runner_as_panicked() {
+    let channels = CameraChannels::new();
     let threads = CameraThreads::start(
         "panicking-build",
         CameraThreadSettings {
             frame_timeout: Duration::from_millis(500),
             backoff: SHORT_FATAL,
         },
-        spec(),
-        FrameClock::replay(Duration::ZERO, spec()),
+        &channels,
+        ProducerPlan {
+            spec: spec(),
+            clock: FrameClock::replay(Duration::ZERO, spec()),
+        },
         || shell("exec sleep 30"),
         &missing_worker_link(),
         build_panics,
@@ -396,14 +421,18 @@ fn a_build_that_panics_reports_the_runner_as_panicked() {
 #[test]
 fn a_failing_pipeline_build_publishes_failed_and_retries_after_the_back_off() {
     BUILD_REFUSALS.store(0, Ordering::SeqCst);
+    let channels = CameraChannels::new();
     let threads = CameraThreads::start(
         "failing-build",
         CameraThreadSettings {
             frame_timeout: Duration::from_millis(500),
             backoff: SHORT_FATAL,
         },
-        spec(),
-        FrameClock::replay(Duration::ZERO, spec()),
+        &channels,
+        ProducerPlan {
+            spec: spec(),
+            clock: FrameClock::replay(Duration::ZERO, spec()),
+        },
         move || {
             shell(&format!(
                 "while :; do head -c {BIG_FRAME_BYTES} /dev/zero; done"
@@ -413,7 +442,7 @@ fn a_failing_pipeline_build_publishes_failed_and_retries_after_the_back_off() {
         build_refused_twice_then_live,
     )
     .expect("the camera threads start");
-    let mut handle = threads.handle();
+    let mut handle = channels.handle();
     wait_until("the first build failure", Duration::from_secs(5), || {
         handle.status.borrow().state == CameraState::Failed
     });
@@ -445,20 +474,24 @@ fn a_failing_pipeline_build_publishes_failed_and_retries_after_the_back_off() {
 
 #[test]
 fn a_child_that_exits_after_one_frame_restarts_and_feeds_a_second_frame() {
+    let channels = CameraChannels::new();
     let threads = CameraThreads::start(
         "restart-feed",
         CameraThreadSettings {
             frame_timeout: Duration::from_millis(500),
             backoff: RESTART_FAST,
         },
-        spec(),
-        FrameClock::replay(Duration::ZERO, spec()),
+        &channels,
+        ProducerPlan {
+            spec: spec(),
+            clock: FrameClock::replay(Duration::ZERO, spec()),
+        },
         move || shell(&format!("head -c {BIG_FRAME_BYTES} /dev/zero")),
         &missing_worker_link(),
         build_live,
     )
     .expect("the camera threads start");
-    let handle = threads.handle();
+    let handle = channels.handle();
     wait_until(
         "a second frame from the restarted child",
         Duration::from_secs(5),

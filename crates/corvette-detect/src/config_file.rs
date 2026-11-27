@@ -113,6 +113,12 @@ fn write_camera(camera_table: &mut Table, camera: &CameraConfig) {
         &Value::from(u64::from(camera.fps)),
         None,
     );
+    write_field(
+        camera_table,
+        "enabled",
+        &Value::Bool(camera.enabled),
+        Some(&Value::Bool(true)),
+    );
     let threshold = Value::from(camera.confirm_threshold);
     write_field(
         camera_table,

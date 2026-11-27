@@ -1,8 +1,8 @@
 use corvette_detect::{
-    CameraEntry, CameraRunner, CandidateStage, Decode, EventFeed, Frame, FrameObjects, FrameSpec,
-    Infer, Labels, LivePipeline, ObjectStage, ServiceState, StepEnd, TRACK_EVENTS_ACCEPT_BACKOFF,
-    TRACK_EVENTS_MAX_SUBSCRIBERS, TrackAccept, TrackedObject, frame_slot, objects_answer, serve,
-    serve_track_events,
+    CameraEntry, CameraHandle, CameraObjects, CameraRunner, CandidateStage, Decode, EventFeed,
+    Frame, FrameObjects, FrameSpec, Infer, Labels, LivePipeline, ObjectStage, ServiceState,
+    StepEnd, TRACK_EVENTS_ACCEPT_BACKOFF, TRACK_EVENTS_MAX_SUBSCRIBERS, TrackAccept, TrackedObject,
+    frame_slot, objects_answer, serve, serve_track_events,
 };
 use corvette_detect_proto::{Row, TrackFrame, decode_track_line};
 use corvette_motion::{MotionSettings, Shape, SizeGrid};
@@ -99,7 +99,7 @@ fn person(score: f64, edges: [i32; 4]) -> FrameDetection {
 const STAY: [i32; 4] = [100, 140, 200, 340];
 const MOVE: [i32; 4] = [300, 140, 400, 340];
 
-async fn serve_bound(tag: &str, receiver: watch::Receiver<Option<FrameObjects>>) -> PathBuf {
+async fn serve_bound(tag: &str, receiver: watch::Receiver<CameraObjects>) -> PathBuf {
     let path = temp_socket(tag);
     let listener = UnixListener::bind(&path).unwrap();
     let feed = Arc::new(EventFeed::new());
@@ -127,7 +127,7 @@ async fn a_track_gets_start_update_end_lines_and_first_motion_flips_after_it_mov
         0.5,
     )
     .unwrap();
-    let (sender, receiver) = watch::channel(None);
+    let (sender, receiver) = watch::channel(CameraObjects::Cleared);
     let path = serve_bound("lifecycle", receiver).await;
     let mut client = connect(&path).await;
 
@@ -141,7 +141,7 @@ async fn a_track_gets_start_update_end_lines_and_first_motion_flips_after_it_mov
     ];
     for (time, detections) in steps {
         let frame = stage.step(time, detections).unwrap();
-        sender.send(Some(frame)).unwrap();
+        sender.send(CameraObjects::Frame(frame)).unwrap();
         tokio::time::sleep(TICK).await;
     }
 
@@ -204,7 +204,7 @@ async fn two_subscribers_receive_identical_lines() {
         0.5,
     )
     .unwrap();
-    let (sender, receiver) = watch::channel(None);
+    let (sender, receiver) = watch::channel(CameraObjects::Cleared);
     let path = serve_bound("two", receiver).await;
     let mut first = connect(&path).await;
     let mut second = connect(&path).await;
@@ -215,7 +215,7 @@ async fn two_subscribers_receive_identical_lines() {
         (0.2, vec![person(0.9, MOVE)]),
     ] {
         let frame = stage.step(time, detections).unwrap();
-        sender.send(Some(frame)).unwrap();
+        sender.send(CameraObjects::Frame(frame)).unwrap();
         tokio::time::sleep(TICK).await;
     }
 
@@ -271,23 +271,28 @@ fn count_newlines(stream: &UnixStream) -> usize {
 
 #[tokio::test]
 async fn a_stalled_subscriber_drops_updates_keeps_boundaries_and_the_loop_keeps_publishing() {
-    let (sender, receiver) = watch::channel(None);
+    let (sender, receiver) = watch::channel(CameraObjects::Cleared);
     let path = serve_bound("stalled", receiver).await;
     let mut stalled = connect(&path).await;
     let live = connect(&path).await;
 
     let updates: u32 = 6_000;
-    sender.send(Some(moving_track("t1", 1.0))).unwrap();
+    sender
+        .send(CameraObjects::Frame(moving_track("t1", 1.0)))
+        .unwrap();
     let mut live_lines = count_newlines(&live);
     for step in 1u32..=updates {
         sender
-            .send(Some(moving_track("t1", 1.0 + f64::from(step))))
+            .send(CameraObjects::Frame(moving_track(
+                "t1",
+                1.0 + f64::from(step),
+            )))
             .unwrap();
         tokio::time::sleep(Duration::from_micros(100)).await;
         live_lines += count_newlines(&live);
     }
     sender
-        .send(Some(FrameObjects {
+        .send(CameraObjects::Frame(FrameObjects {
             frame_time: 2.0 + f64::from(updates),
             objects: Vec::new(),
             ended: vec!["t1".to_owned()],
@@ -345,8 +350,7 @@ fn flat_frame(spec: &FrameSpec, index: u64) -> Frame {
     }
 }
 
-#[tokio::test]
-async fn with_no_subscriber_the_status_and_objects_answers_stay_the_pipeline_values() {
+fn running_camera() -> (CameraHandle, Option<FrameObjects>) {
     let settings = TrackerSettings {
         width: 160,
         height: 120,
@@ -389,9 +393,15 @@ async fn with_no_subscriber_the_status_and_objects_answers_stay_the_pipeline_val
         let step = runner.step_once();
         assert!(matches!(step, Ok(StepEnd::Frame)), "step {index}: {step:?}");
     }
-    let published: Option<FrameObjects> = (*handle.objects.borrow()).clone();
+    let published: Option<FrameObjects> = match &*handle.objects.borrow() {
+        CameraObjects::Frame(objects) => Some(objects.clone()),
+        CameraObjects::Cleared | CameraObjects::Stopped => None,
+    };
     assert!(published.is_some(), "the mock pipeline published objects");
+    (handle, published)
+}
 
+async fn serve_front_state(handle: &CameraHandle) -> (PathBuf, PathBuf) {
     let objects_rx = handle.objects.clone();
     let events_path = temp_socket("none");
     let events_listener = UnixListener::bind(&events_path).unwrap();
@@ -400,7 +410,6 @@ async fn with_no_subscriber_the_status_and_objects_answers_stay_the_pipeline_val
     tokio::spawn(async move {
         let () = serve_track_events(events_listener, events_feed).await;
     });
-
     let service_state = ServiceState::new(vec![(
         "front".to_owned(),
         CameraEntry::Live(handle.clone()),
@@ -408,11 +417,14 @@ async fn with_no_subscriber_the_status_and_objects_answers_stay_the_pipeline_val
     let status_path = temp_socket("none-status");
     let status_listener = UnixListener::bind(&status_path).unwrap();
     tokio::spawn(async move {
-        let _ = serve(status_listener, Arc::new(service_state), None).await;
+        let _ = serve(status_listener, Arc::new(service_state), None, None).await;
     });
     tokio::time::sleep(TICK).await;
+    (status_path, events_path)
+}
 
-    let mut watcher = UnixStream::connect(&status_path).await.unwrap();
+async fn ask_status(status_path: &Path) -> String {
+    let mut watcher = UnixStream::connect(status_path).await.unwrap();
     watcher
         .write_all(
             b"GET /corvette/api/v1/detection/status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
@@ -421,13 +433,11 @@ async fn with_no_subscriber_the_status_and_objects_answers_stay_the_pipeline_val
         .unwrap();
     let mut answer = Vec::new();
     watcher.read_to_end(&mut answer).await.unwrap();
-    let text = String::from_utf8_lossy(&answer).into_owned();
-    assert!(
-        text.starts_with("HTTP/1.1 200") && text.contains("\"camera\":\"front\""),
-        "the status answer is unchanged: {text}"
-    );
+    String::from_utf8_lossy(&answer).into_owned()
+}
 
-    let mut client = UnixStream::connect(&status_path).await.unwrap();
+async fn ask_objects(status_path: &Path) -> (String, String) {
+    let mut client = UnixStream::connect(status_path).await.unwrap();
     client
         .write_all(
             b"GET /corvette/api/v1/cameras/front/objects HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
@@ -438,9 +448,28 @@ async fn with_no_subscriber_the_status_and_objects_answers_stay_the_pipeline_val
     client.read_to_end(&mut answer).await.unwrap();
     let text = String::from_utf8_lossy(&answer).into_owned();
     let (head, body) = text.split_once("\r\n\r\n").expect("a header");
+    (head.to_owned(), body.to_owned())
+}
+
+#[tokio::test]
+async fn with_no_subscriber_the_status_answer_stays_the_pipeline_value() {
+    let (handle, _published) = running_camera();
+    let (status_path, _events) = serve_front_state(&handle).await;
+    let text = ask_status(&status_path).await;
+    assert!(
+        text.starts_with("HTTP/1.1 200") && text.contains("\"camera\":\"front\""),
+        "the status answer is unchanged: {text}"
+    );
+}
+
+#[tokio::test]
+async fn with_no_subscriber_the_objects_answer_stays_the_pipeline_value() {
+    let (handle, published) = running_camera();
+    let (status_path, _events) = serve_front_state(&handle).await;
+    let (head, body) = ask_objects(&status_path).await;
     assert!(
         head.starts_with("HTTP/1.1 200"),
-        "the objects answer is 200: {text}"
+        "the objects answer is 200: {head}"
     );
     match objects_answer(published.as_ref()) {
         Ok(corvette_detect::ObjectsAnswer::Objects(expected)) => {
@@ -463,7 +492,7 @@ async fn a_track_moving_from_its_first_frame_gets_first_motion_on_the_moving_fra
         0.5,
     )
     .unwrap();
-    let (sender, receiver) = watch::channel(None);
+    let (sender, receiver) = watch::channel(CameraObjects::Cleared);
     let path = serve_bound("moves-first", receiver).await;
     let mut client = connect(&path).await;
     for (time, detections) in [
@@ -471,7 +500,7 @@ async fn a_track_moving_from_its_first_frame_gets_first_motion_on_the_moving_fra
         (0.1, vec![person(0.9, MOVE)]),
     ] {
         let frame = stage.step(time, detections).unwrap();
-        sender.send(Some(frame)).unwrap();
+        sender.send(CameraObjects::Frame(frame)).unwrap();
         tokio::time::sleep(TICK).await;
     }
     let frames = decode_lines(&read_lines(&mut client).await);
@@ -494,7 +523,7 @@ async fn a_track_moving_from_its_first_frame_gets_first_motion_on_the_moving_fra
 
 #[tokio::test]
 async fn connections_beyond_the_subscriber_bound_are_closed() {
-    let (sender, receiver) = watch::channel(None);
+    let (sender, receiver) = watch::channel(CameraObjects::Cleared);
     let path = serve_bound("count", receiver).await;
     let mut bound = Vec::new();
     for _ in 0..TRACK_EVENTS_MAX_SUBSCRIBERS {
@@ -510,7 +539,9 @@ async fn connections_beyond_the_subscriber_bound_are_closed() {
         0,
         "a connection past the bound is closed"
     );
-    sender.send(Some(moving_track("t1", 1.0))).unwrap();
+    sender
+        .send(CameraObjects::Frame(moving_track("t1", 1.0)))
+        .unwrap();
     tokio::time::sleep(TICK).await;
     assert!(
         count_newlines(&bound[0]) >= 1,
@@ -551,7 +582,7 @@ impl TrackAccept for RetryAccept {
 
 #[tokio::test]
 async fn a_failed_accept_is_logged_retried_and_acceptance_keeps_working() {
-    let (sender, receiver) = watch::channel(None);
+    let (sender, receiver) = watch::channel(CameraObjects::Cleared);
     let fake = RetryAccept {
         failures: Arc::new(Mutex::new(2)),
         pair_given: Arc::new(AtomicBool::new(false)),
@@ -567,7 +598,9 @@ async fn a_failed_accept_is_logged_retried_and_acceptance_keeps_working() {
         .unwrap()
         .pop()
         .expect("the loop accepted after the injected failures");
-    sender.send(Some(moving_track("t1", 1.0))).unwrap();
+    sender
+        .send(CameraObjects::Frame(moving_track("t1", 1.0)))
+        .unwrap();
     let frames = decode_lines(&read_lines(&mut client).await);
     assert!(
         kinds_of(&frames).contains(&'s'),

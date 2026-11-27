@@ -1045,3 +1045,35 @@ fn the_direct_source_sample_loads_with_placeholders_only() {
         "no credential value belongs in the sample"
     );
 }
+
+#[test]
+fn a_camera_without_the_enabled_key_defaults_to_enabled() {
+    let config =
+        Config::from_toml(&camera_with("width = 640\nheight = 480\nfps = 5\n")).expect("loads");
+    assert!(config.cameras[0].enabled, "absent means enabled");
+}
+
+#[test]
+fn a_camera_marked_disabled_in_the_file_starts_disabled() {
+    let config = Config::from_toml(&camera_with(
+        "width = 640\nheight = 480\nfps = 5\nenabled = false\n",
+    ))
+    .expect("loads");
+    assert!(!config.cameras[0].enabled);
+    let value = config.to_value();
+    let camera = &value["cameras"].as_array().expect("cameras")[0];
+    assert_eq!(
+        camera["enabled"],
+        serde_json::Value::Bool(false),
+        "false stays in the route view"
+    );
+}
+
+#[test]
+fn an_enabled_flag_that_is_not_a_boolean_is_refused() {
+    let error = Config::from_toml(&camera_with(
+        "width = 640\nheight = 480\nfps = 5\nenabled = \"off\"\n",
+    ))
+    .expect_err("refused");
+    assert!(format!("{error:?}").contains("enabled"), "{error:?}");
+}

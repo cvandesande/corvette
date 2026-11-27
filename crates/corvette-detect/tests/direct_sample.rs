@@ -69,7 +69,7 @@ fn plan_for(sample: &Config) -> (PathBuf, CameraPlan) {
 fn dialed_url(plan: &CameraPlan, camera: &CameraConfig, variable: &str) -> String {
     let lookup = |name: &str| (name == variable).then(|| CANARY.to_owned());
     let address = stream_address(camera, "", &lookup).expect("the dial");
-    let mut factory = plan.command_factory(PathBuf::from("/usr/bin/ffmpeg"), address);
+    let mut factory = plan.command_factory(PathBuf::from("/usr/bin/ffmpeg"), &address);
     let args: Vec<String> = factory()
         .as_std()
         .get_args()

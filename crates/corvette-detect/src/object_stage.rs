@@ -33,6 +33,13 @@ pub struct FrameObjects {
     pub motion_triggered: bool,
 }
 
+#[derive(Clone, Debug)]
+pub enum CameraObjects {
+    Frame(FrameObjects),
+    Cleared,
+    Stopped,
+}
+
 impl FrameObjects {
     #[must_use]
     pub fn regions(&self) -> Vec<Region> {
