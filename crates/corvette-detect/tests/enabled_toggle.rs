@@ -17,6 +17,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::time::timeout;
 
+include!("support/mod.rs");
+
 const ONE_FRAME_BYTES: usize = 28800;
 const WORKER_HOLD: Duration = Duration::from_millis(1200);
 const DRAIN: Duration = Duration::from_secs(6);
@@ -38,17 +40,42 @@ fn sleeping_ffmpeg(dir: &Path) -> PathBuf {
     path
 }
 
+// The stub ends itself when its reader is gone: the write fails once the pipe closes.
 fn streaming_ffmpeg(dir: &Path) -> PathBuf {
     let path = dir.join("frame-ffmpeg");
-    fs::write(
-        &path,
-        format!(
-            "#!/bin/sh\nwhile :; do head -c {ONE_FRAME_BYTES} /dev/zero | tr '\\0' '\\200'; done\n"
-        ),
-    )
-    .unwrap();
+    let emitter = format!("head -c {ONE_FRAME_BYTES} /dev/zero | tr '\\0' '\\200'");
+    let script = forever_stream(&emitter, 32);
+    fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     path
+}
+
+// Poll /proc for up to 5 s until no process still names this directory.
+async fn no_stub_process_holds(dir: &Path) {
+    let marker = dir.to_string_lossy().into_owned();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut holding = Vec::new();
+        for entry in fs::read_dir("/proc").unwrap() {
+            let name = entry.unwrap().file_name();
+            let Ok(pid) = name.to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            if let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline"))
+                && String::from_utf8_lossy(&raw).contains(&marker)
+            {
+                holding.push(pid);
+            }
+        }
+        if holding.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "processes still hold {marker}: {holding:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 // Answers one infer request a second after it arrives, so the runner is inside a request when a stop lands.
@@ -482,6 +509,9 @@ async fn a_timed_out_join_keeps_the_camera_off_until_both_threads_have_ended() {
         on_after, 200,
         "the restart landed once both threads ended: {body_after}"
     );
+    let (status, _) = post(&setup.socket, "front", false).await;
+    assert_eq!(status, 200, "the restarted camera goes off again");
+    no_stub_process_holds(&dir).await;
 }
 
 #[tokio::test]

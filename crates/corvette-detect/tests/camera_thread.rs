@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
+include!("support/mod.rs");
+
 const WIDTH: usize = 160;
 const HEIGHT: usize = 120;
 // One whole frame of the large spec: 160 * 120 * 3 / 2 bytes.
@@ -169,8 +171,9 @@ fn a_healthy_camera_reaches_running_and_finishes_on_stop() {
             clock: FrameClock::replay(Duration::ZERO, spec()),
         },
         move || {
-            shell(&format!(
-                "while :; do head -c {BIG_FRAME_BYTES} /dev/zero; done"
+            shell(&forever_stream(
+                &format!("head -c {BIG_FRAME_BYTES} /dev/zero"),
+                32,
             ))
         },
         &missing_worker_link(),
@@ -215,7 +218,7 @@ fn a_fatal_first_frame_restarts_the_runner_and_stop_ends_it() {
             spec: small_spec(),
             clock: FrameClock::replay(Duration::ZERO, small_spec()),
         },
-        || shell("while :; do printf abcdefghijkl; sleep 1; done"),
+        || shell(&forever_stream("printf abcdefghijkl || exit 1; sleep 1", 1)),
         &missing_worker_link(),
         build_fatal,
     )
@@ -360,8 +363,9 @@ fn stopping_twice_is_harmless() {
             clock: FrameClock::replay(Duration::ZERO, spec()),
         },
         move || {
-            shell(&format!(
-                "while :; do head -c {BIG_FRAME_BYTES} /dev/zero; done"
+            shell(&forever_stream(
+                &format!("head -c {BIG_FRAME_BYTES} /dev/zero"),
+                32,
             ))
         },
         &missing_worker_link(),
@@ -434,8 +438,9 @@ fn a_failing_pipeline_build_publishes_failed_and_retries_after_the_back_off() {
             clock: FrameClock::replay(Duration::ZERO, spec()),
         },
         move || {
-            shell(&format!(
-                "while :; do head -c {BIG_FRAME_BYTES} /dev/zero; done"
+            shell(&forever_stream(
+                &format!("head -c {BIG_FRAME_BYTES} /dev/zero"),
+                32,
             ))
         },
         &missing_worker_link(),
