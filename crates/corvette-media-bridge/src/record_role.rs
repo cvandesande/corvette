@@ -78,25 +78,44 @@ pub struct RecordingRuntime {
 }
 
 impl RecordingRuntime {
-    /// Starts the track-events consumer writing into this runtime's index writer; the contract comment lives on [`event_consumer::run`].
+    /// Starts an events consumer on `transport` writing into this runtime's index writer; the contract comments live on [`event_consumer::run`] and [`event_consumer::run_http`].
     #[must_use]
     pub fn spawn_event_consumer(
         self: &Arc<Self>,
         socket: std::path::PathBuf,
+        transport: event_consumer::Transport,
         stop: &crate::shutdown::Shutdown,
     ) -> tokio::task::JoinHandle<()> {
         let runtime = Arc::clone(self);
         let stop = stop.clone();
         tokio::spawn(async move {
             let writer = EventWriter::new(runtime.review.clone());
-            let consuming = event_consumer::run(
-                socket,
-                runtime.rows.clone(),
-                writer,
-                runtime.open_events,
-                PieceRecorder::wall_clock_ms,
-                event_consumer::EVENT_RECONNECT_BACKOFF,
-            );
+            let consuming = async {
+                match transport {
+                    event_consumer::Transport::TrackEvents => {
+                        event_consumer::run(
+                            socket,
+                            runtime.rows.clone(),
+                            writer,
+                            runtime.open_events,
+                            PieceRecorder::wall_clock_ms,
+                            event_consumer::EVENT_RECONNECT_BACKOFF,
+                        )
+                        .await;
+                    }
+                    event_consumer::Transport::EventsHttp => {
+                        event_consumer::run_http(
+                            socket,
+                            runtime.rows.clone(),
+                            writer,
+                            runtime.open_events,
+                            PieceRecorder::wall_clock_ms,
+                            event_consumer::EVENT_RECONNECT_BACKOFF,
+                        )
+                        .await;
+                    }
+                }
+            };
             tokio::select! {
                 () = consuming => {}
                 () = stop.wait() => {} // releasing this task releases the rows sender for the writer thread

@@ -169,11 +169,20 @@ pub async fn start_with_recording(
     }
 
     let mut events: Option<tokio::task::JoinHandle<()>> = None;
-    if let Some(socket) = std::env::var_os(event_consumer::TRACK_EVENTS_SOCKET_ENV_VAR) {
+    let events_source = std::env::var_os(event_consumer::EVENTS_SOCKET_ENV_VAR)
+        .map(|socket| (socket, event_consumer::Transport::EventsHttp))
+        .or_else(|| {
+            std::env::var_os(event_consumer::TRACK_EVENTS_SOCKET_ENV_VAR)
+                .map(|socket| (socket, event_consumer::Transport::TrackEvents))
+        });
+    if let Some((socket, transport)) = events_source {
         match &recording {
             Some(runtime) => {
-                events =
-                    Some(runtime.spawn_event_consumer(std::path::PathBuf::from(socket), &stop));
+                events = Some(runtime.spawn_event_consumer(
+                    std::path::PathBuf::from(socket),
+                    transport,
+                    &stop,
+                ));
             }
             None => log_event(
                 "events",
