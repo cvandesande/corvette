@@ -47,7 +47,6 @@
             cargo = toolchain;
             rustc = toolchain;
           };
-          # The lockfile's moq packages are git dependencies pinned by rev, so Nix fetches them by that rev.
           cargoLock = {
             lockFile = ./Cargo.lock;
             allowBuiltinFetchGit = true;

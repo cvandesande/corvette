@@ -1,31 +1,7 @@
-//! Restart-on-panic supervision for one camera's one role (INV-5(b), DP-3).
-//!
-//! Matches `corvette-rtsp-client`'s own established convention
-//! (`crates/corvette-rtsp-client/src/client/task.rs`'s
-//! `spawn_supervised_with`) shape-for-shape. That function is a private
-//! implementation detail of issue #18's own crate (not part of its public
-//! API, and this item does not modify that crate), so this is a fresh
-//! implementation of the same pattern, not a shared or copied dependency.
-//!
-//! Each camera's RTSP-restream-feeding task and its MoQ-publish task each get
-//! their own call to [`spawn_supervised_with`], so one role's panic for one
-//! camera restarts only that same task -- never a sibling role for the same
-//! camera, never another camera's task, matching INV-5.
-
 use std::future::Future;
 use tokio::task::JoinHandle;
 
-/// Spawns `make_worker()`'s output as its own task and respawns it whenever
-/// it ends.
-///
-/// That is whether by panic or (unexpectedly, since a real worker here runs
-/// forever) by returning -- so a panic inside it is caught by the runtime as
-/// a [`tokio::task::JoinError`] at this function's own boundary rather than
-/// propagating to the caller or to any other supervised task.
-///
-/// Returns the supervisor's own [`JoinHandle`]; dropping the returned
-/// [`Supervised`] guard aborts both the supervisor and whichever worker
-/// attempt is currently running.
+/// Spawns `make_worker()` as a task, respawning it on panic or return; dropping the returned guard stops both.
 pub fn spawn_supervised_with<F, Fut>(name: String, make_worker: F) -> Supervised
 where
     F: Fn() -> Fut + Send + 'static,
@@ -48,31 +24,18 @@ where
     Supervised { supervisor }
 }
 
-/// Writes one structured log line, matching `corvette-rtsp-client`'s own
-/// `eprintln!`-based convention: no metrics/logging-framework dependency
-/// exists in this workspace, and this item does not add one.
+/// One structured log line on stderr; this workspace has no logging framework to add.
 pub fn log_event(unit: &str, event: &str, detail: impl std::fmt::Display) {
     eprintln!("corvette-media-bridge unit=\"{unit}\" event={event} detail=\"{detail}\"");
 }
 
-/// Owns a supervised task; dropping it stops the supervisor (and whichever
-/// worker attempt is in flight), the same lifecycle
-/// `corvette_rtsp_client::Client`'s own `Drop` gives its supervisor.
 #[derive(Debug)]
 pub struct Supervised {
     supervisor: JoinHandle<()>,
 }
 
 impl Supervised {
-    /// Whether the supervisor's own task has ended.
-    ///
-    /// The supervisor loop in [`spawn_supervised_with`] only returns when its
-    /// worker's `JoinHandle` reports a cancelled panic (i.e. this
-    /// `Supervised` itself was already dropped) -- a live, un-dropped
-    /// `Supervised` whose worker keeps panicking is respawned forever and
-    /// never finishes. This is a diagnostic for a caller (an item's own
-    /// tests, e.g.) to confirm a worker is still being supervised, not a
-    /// signal that the worker itself is currently healthy.
+    /// True only after the guard was dropped: a live supervisor respawns its worker forever.
     #[must_use]
     pub fn is_finished(&self) -> bool {
         self.supervisor.is_finished()
@@ -92,10 +55,6 @@ mod tests {
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
     use std::time::Duration;
 
-    /// A stand-in worker: increments `ticks` on a steady interval, panicking
-    /// on its `panic_after`th tick if that count is nonzero (used once, then
-    /// never again). Mirrors `corvette-rtsp-client`'s own equivalent test
-    /// double (`client/task.rs`'s `instrumented_worker`).
     async fn instrumented_worker(ticks: Arc<AtomicU32>, panic_after: Arc<AtomicUsize>) {
         loop {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -112,11 +71,6 @@ mod tests {
         }
     }
 
-    /// INV-5(b): a panicking supervised worker recovers (resumes progress)
-    /// without affecting a sibling's own progress (INV-5(a), which holds
-    /// unconditionally under Tokio regardless, and is exercised here too
-    /// simply as an incidental double-check, not as this test's own proof of
-    /// (a)).
     #[tokio::test]
     async fn a_panicking_supervised_worker_recovers_without_affecting_a_sibling() {
         let panicking_ticks = Arc::new(AtomicU32::new(0));
