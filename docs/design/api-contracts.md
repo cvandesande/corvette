@@ -548,7 +548,10 @@ schedule instead of being pushed updates over a held-open connection, so there i
 
 Every accepted connection carries a five-second bound covering reading its request and
 preparing its answer; a buffered response is written inside that same bound, and a streamed
-body continues under the per-write bound its route states. Without it, a peer that opens a
+body continues under the per-write bound its route states. The camera-enabled POST route
+carries a twenty-five-second whole-connection bound, because its relay to the detection
+service totals twenty seconds for a camera join; the other detection relays total four
+seconds. Every other route keeps the five-second bound. Without it, a peer that opens a
 connection and never finishes sending
 would leave the read loop parked forever, leaking one task and one file descriptor per
 connection — a live deployment showed roughly seventy such stuck connections after less
@@ -1036,7 +1039,8 @@ the server sends each piece as it reads it. A `Range` header on a download is
 ignored: the answer is always `200` with the whole file. Byte ranges belong to
 the playlist route's segments.
 
-The shared five-second request deadline bounds reading the request and
+The five-second request deadline, shared by every route but the camera-enabled toggle,
+bounds reading the request and
 preparing the answer up to its first body byte; a download that has begun is
 never expired by that deadline. Each body write — the head, every chunk, the
 terminating chunk — must complete within 15 seconds of starting, and every
@@ -1600,6 +1604,29 @@ not read the schema at runtime and a test checks agreement
 JSON Schema 2020-12 (`docs/design/detection-config.schema.json:2`) and gains a stable
 `$id` equal to this serving URL, keeping `additionalProperties: false`, which is the
 right closure while the schema is one plain object.
+
+`POST /corvette/api/v1/cameras/<name>/enabled` switches one camera's runtime state.
+The body is one JSON object whose single member is the boolean `enabled`, and
+re-applying the state a camera already has answers the same `200`. The route carries
+the same admin gate as the configuration write: a caller whose role is not `admin`
+is answered `403` before anything is forwarded, and a caller without `Remote-User`
+is answered `401`. The API server relays the request to the detection service over
+that service's local socket, and the relayed request carries its own auditable
+`Remote-User` naming who switched the camera; the service's answer passes through
+unchanged: `200` `{"camera":"<name>","enabled":<bool>}`, `400` for a body that is
+not one boolean `enabled`, `404` for an unknown camera, `405` for any method other
+than `POST`, and `503` when a failed camera start, an unreachable socket, a refused
+connection or an unset socket stops the switch from landing. Switching a camera back
+on restarts it from the plan the process started with, so a switch never mixes with a
+configuration change made while cameras run.
+
+The camera list `GET /corvette/api/v1/cameras` reports each camera's `enabled`
+flag from that same runtime state: the API server reads the detection service's
+status answer, and a camera whose state is `off` there shows `enabled: false`.
+The status is the flag's only carrier to the list: a camera the status does not
+name keeps the value the configuration file holds; without a detection socket
+the list shows those configuration values, and an unreadable status shows
+`enabled: false` for every camera, because an on claim needs evidence.
 
 ## The configuration routes answer with these codes and one error body
 

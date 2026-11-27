@@ -18,7 +18,7 @@ pub(crate) const MAX_BODY_BYTES: usize = 262_144;
 
 const VALIDATE_SUFFIX: &str = "detection/config/validate";
 const SCHEMA_SUFFIX: &str = "detection/config/schema";
-const ADMIN_ROLE: &str = "admin";
+pub(crate) const ADMIN_ROLE: &str = "admin";
 
 pub(crate) fn serves(path: &str) -> bool {
     path.strip_prefix(API_PREFIX)
@@ -31,10 +31,10 @@ fn is_apply(request: &Request) -> bool {
 
 /// The request the service sees: its own `Remote-User`, the caller's `If-Match`
 /// and `Content-Type` unchanged, the body bytes, nothing else of the caller's headers.
-fn backend_request(request: &Request, user: &str) -> Vec<u8> {
+pub(crate) fn backend_request(request: &Request, user: &str, target: &str) -> Vec<u8> {
     let mut out = format!(
-        "{} {} HTTP/1.1\r\nHost: detection\r\nRemote-User: {user}\r\nConnection: close\r\n",
-        request.method, request.path
+        "{} {target} HTTP/1.1\r\nHost: detection\r\nRemote-User: {user}\r\nConnection: close\r\n",
+        request.method
     )
     .into_bytes();
     if let Some(if_match) = &request.if_match {
@@ -56,7 +56,7 @@ fn has_control_byte(text: &str) -> bool {
     text.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
 }
 
-struct BackendAnswer {
+pub(crate) struct BackendAnswer {
     status: String,
     content_type: String,
     cache_control: String,
@@ -140,7 +140,7 @@ fn parse_answer(answer: &[u8]) -> Result<BackendAnswer, String> {
     })
 }
 
-fn passthrough(answer: BackendAnswer) -> Response {
+pub(crate) fn passthrough(answer: BackendAnswer) -> Response {
     let mut extra = Vec::new();
     if let Some(etag) = answer.etag {
         extra.push((Cow::Borrowed("ETag"), etag));
@@ -158,7 +158,7 @@ fn passthrough(answer: BackendAnswer) -> Response {
     }
 }
 
-async fn exchange(
+pub(crate) async fn exchange(
     socket: &Path,
     request: &[u8],
     timeouts: Option<(Duration, Duration)>,
@@ -198,7 +198,13 @@ async fn exchange_bounded(
     parse_answer(&answer)
 }
 
-fn problem(status: u16, title: &str, code: &str, detail: &str, instance: &str) -> Response {
+pub(crate) fn problem(
+    status: u16,
+    title: &str,
+    code: &str,
+    detail: &str,
+    instance: &str,
+) -> Response {
     let mut body = Map::new();
     body.insert("type".to_owned(), Value::String("about:blank".to_owned()));
     body.insert("title".to_owned(), Value::String(title.to_owned()));
@@ -216,7 +222,7 @@ fn problem(status: u16, title: &str, code: &str, detail: &str, instance: &str) -
     }
 }
 
-fn detection_unavailable(instance: &str) -> Response {
+pub(crate) fn detection_unavailable(instance: &str) -> Response {
     problem(
         503,
         "Service Unavailable",
@@ -224,6 +230,29 @@ fn detection_unavailable(instance: &str) -> Response {
         "the detection service could not be reached over its local socket",
         instance,
     )
+}
+
+pub(crate) fn body_length_refusal(request: &Request) -> Option<Response> {
+    if !matches!(request.method.as_str(), "PUT" | "POST") {
+        return None;
+    }
+    match request.body_len {
+        None => Some(problem(
+            400,
+            "Bad Request",
+            "bad_request",
+            &format!("a {} needs a valid Content-Length", request.method),
+            &request.path,
+        )),
+        Some(length) if length > MAX_BODY_BYTES => Some(problem(
+            400,
+            "Bad Request",
+            "bad_request",
+            &format!("body over the {MAX_BODY_BYTES} byte bound"),
+            &request.path,
+        )),
+        Some(_length) => None,
+    }
 }
 
 /// Forwards one configuration-route request; every refusal here precedes the relay.
@@ -237,28 +266,8 @@ pub(crate) async fn forward(request: &Request, user: &str, relay: &Relay) -> Res
             &request.path,
         );
     }
-    if matches!(request.method.as_str(), "PUT" | "POST") {
-        match request.body_len {
-            None => {
-                return problem(
-                    400,
-                    "Bad Request",
-                    "bad_request",
-                    &format!("a {} needs a valid Content-Length", request.method),
-                    &request.path,
-                );
-            }
-            Some(length) if length > MAX_BODY_BYTES => {
-                return problem(
-                    400,
-                    "Bad Request",
-                    "bad_request",
-                    &format!("body over the {MAX_BODY_BYTES} byte bound"),
-                    &request.path,
-                );
-            }
-            Some(_length) => {}
-        }
+    if let Some(refusal) = body_length_refusal(request) {
+        return refusal;
     }
     let Some(socket) = relay.socket.as_deref() else {
         log_event(
@@ -268,7 +277,13 @@ pub(crate) async fn forward(request: &Request, user: &str, relay: &Relay) -> Res
         );
         return detection_unavailable(&request.path);
     };
-    match exchange(socket, &backend_request(request, user), relay.timeouts).await {
+    match exchange(
+        socket,
+        &backend_request(request, user, &request.path),
+        relay.timeouts,
+    )
+    .await
+    {
         Ok(answer) => passthrough(answer),
         Err(reason) => {
             log_event("detection-config", "relay-error", reason);

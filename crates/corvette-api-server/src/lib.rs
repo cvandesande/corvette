@@ -13,6 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
 pub mod activity;
+pub mod camera_enabled;
 pub mod clip_link;
 pub mod config;
 pub mod database;
@@ -37,6 +38,9 @@ pub const SOCKET_PATH_ENV: &str = "CORVETTE_API_SOCKET";
 const MAX_REQUEST_HEADER_BYTES: usize = 8192;
 
 pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Whole-connection timeout for the camera-enabled POST route, whose relay budgets 20 s.
+pub(crate) const TOGGLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Seconds since the Unix epoch, the unit of every stored `start` and `end`.
 type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
@@ -288,27 +292,52 @@ pub async fn shutdown_signal() {
 async fn handle_connection(mut stream: UnixStream, context: &ConnectionContext) {
     // The connection deadline covers everything up to the answer being ready to write.
     // A streamed body then continues under the per-write inactivity bound in `download`.
-    let deadline = tokio::time::Instant::now() + context.timeout;
-    match tokio::time::timeout_at(deadline, read_and_route(&mut stream, context)).await {
-        Err(_elapsed) => connection_timeout_log(context),
-        Ok(Ready::ClosedEarly) => log_event(
+    let start = tokio::time::Instant::now();
+    // The head read keeps the default bound for every route; a route may lengthen the
+    // connection only once its parsed head names it, counted from the same instant.
+    let head = match tokio::time::timeout_at(start + context.timeout, read_head(&mut stream)).await
+    {
+        Err(_elapsed) => {
+            connection_timeout_log(context.timeout);
+            return;
+        }
+        Ok(head) => head,
+    };
+    let (timeout, ready) = match head {
+        Head::Done(ready) => (context.timeout, ready),
+        Head::Parsed {
+            request,
+            body_prefix,
+        } => {
+            let timeout = route_connection_timeout(&request, context.timeout);
+            let relayed = read_body_and_route(&mut stream, context, *request, body_prefix);
+            match tokio::time::timeout_at(start + timeout, relayed).await {
+                Err(_elapsed) => {
+                    connection_timeout_log(timeout);
+                    return;
+                }
+                Ok(ready) => (timeout, ready),
+            }
+        }
+    };
+    match ready {
+        Ready::ClosedEarly => log_event(
             "http",
             "request-incomplete",
             "peer closed before a complete request header block arrived",
         ),
-        Ok(Ready::Answer {
+        Ready::Answer {
             mut response,
             drain_after_write,
-        }) => {
+        } => {
             if response.stream.is_some() {
                 if let Err(err) = write_response(&mut stream, &mut response).await {
                     log_event("http", "response-write-error", err);
                 }
             } else {
-                match tokio::time::timeout_at(deadline, write_response(&mut stream, &mut response))
-                    .await
-                {
-                    Err(_elapsed) => connection_timeout_log(context),
+                let write = write_response(&mut stream, &mut response);
+                match tokio::time::timeout_at(start + timeout, write).await {
+                    Err(_elapsed) => connection_timeout_log(timeout),
                     Ok(Err(err)) => log_event("http", "response-write-error", err),
                     Ok(Ok(())) => {}
                 }
@@ -320,37 +349,63 @@ async fn handle_connection(mut stream: UnixStream, context: &ConnectionContext) 
     }
 }
 
-fn connection_timeout_log(context: &ConnectionContext) {
+/// The whole-connection timeout for a parsed request. The camera-enabled POST route
+/// outlasts the 20 s its relay budgets for the service's camera join.
+fn route_connection_timeout(request: &Request, default: Duration) -> Duration {
+    if request.method == "POST" && camera_enabled::serves(&request.path) {
+        TOGGLE_CONNECTION_TIMEOUT
+    } else {
+        default
+    }
+}
+
+fn connection_timeout_log(timeout: Duration) {
     log_event(
         "http",
         "connection-timeout",
         format!(
-            "peer did not complete a request within {:?}; closed to avoid leaking the connection",
-            context.timeout
+            "peer did not complete a request within {timeout:?}; closed to avoid leaking the connection"
         ),
     );
 }
 
-async fn read_and_route(stream: &mut UnixStream, context: &ConnectionContext) -> Ready {
+enum Head {
+    Done(Ready),
+    Parsed {
+        request: Box<Request>,
+        body_prefix: Vec<u8>,
+    },
+}
+
+async fn read_head(stream: &mut UnixStream) -> Head {
     let (block, body_prefix) = match read_header_block(stream).await {
         HeaderRead::Complete(block, prefix) => (block, prefix),
         HeaderRead::TooLarge => {
-            return Ready::Answer {
+            return Head::Done(Ready::Answer {
                 response: Box::new(bad_request("request header block exceeded the size limit")),
                 drain_after_write: true,
-            };
+            });
         }
-        HeaderRead::Closed => return Ready::ClosedEarly,
+        HeaderRead::Closed => return Head::Done(Ready::ClosedEarly),
     };
-    let mut request = match parse_request(&block) {
-        Ok(request) => request,
-        Err(reason) => {
-            return Ready::Answer {
-                response: Box::new(bad_request(&reason)),
-                drain_after_write: false,
-            };
-        }
-    };
+    match parse_request(&block) {
+        Ok(request) => Head::Parsed {
+            request: Box::new(request),
+            body_prefix,
+        },
+        Err(reason) => Head::Done(Ready::Answer {
+            response: Box::new(bad_request(&reason)),
+            drain_after_write: false,
+        }),
+    }
+}
+
+async fn read_body_and_route(
+    stream: &mut UnixStream,
+    context: &ConnectionContext,
+    mut request: Request,
+    body_prefix: Vec<u8>,
+) -> Ready {
     if let Some(length) = request
         .body_len
         .filter(|length| *length > 0 && *length <= detection_config::MAX_BODY_BYTES)
@@ -550,7 +605,9 @@ fn parse_request_line(line: &[u8]) -> Result<(&str, &str, &str), String> {
     }
     let target_ok = parts[1].starts_with('/');
     let body_method = matches!(parts[0], "PUT" | "POST");
-    if parts[0] != "GET" && !(body_method && target_ok && detection_config::serves(parts[1])) {
+    let relayed_write_route =
+        detection_config::serves(parts[1]) || camera_enabled::serves(parts[1]);
+    if parts[0] != "GET" && !(body_method && target_ok && relayed_write_route) {
         return Err(format!("method {} is not GET", parts[0]));
     }
     if parts[2] != "HTTP/1.0" && parts[2] != "HTTP/1.1" {
@@ -659,6 +716,9 @@ async fn route(request: &Request, context: &ConnectionContext) -> Response {
     if detection_config::serves(&request.path) {
         return detection_config::forward(request, user, detection).await;
     }
+    if let Some(segment) = camera_enabled::enabled_segment(&request.path) {
+        return camera_enabled::forward(request, segment, user, detection).await;
+    }
     if let Some(segment) = still::camera_segment(&request.path) {
         return still_picture(request, config, segment, clock, status_state).await;
     }
@@ -700,7 +760,7 @@ async fn route(request: &Request, context: &ConnectionContext) -> Response {
             )
             .await
         }
-        Route::Cameras => cameras(config, &request.remote_role).await,
+        Route::Cameras => cameras(config, &request.remote_role, detection).await,
         Route::ClipLink => clip_link(request, config, db_path, clock).await,
         Route::DetectionStatus => detection::status(config, &request.remote_role, detection).await,
         Route::Events => events_list(request, config, index_path, clock).await,
@@ -709,8 +769,11 @@ async fn route(request: &Request, context: &ConnectionContext) -> Response {
     }
 }
 
-async fn cameras(config: &ConfigSource, role: &str) -> Response {
-    match config.camera_list_json(role).await {
+async fn cameras(config: &ConfigSource, role: &str, detection: &detection::Relay) -> Response {
+    match config
+        .camera_list_json(role, camera_enabled::camera_flags(detection).await)
+        .await
+    {
         Ok(body) => Response::json("200 OK", body),
         Err(err) => config_unavailable(&err),
     }

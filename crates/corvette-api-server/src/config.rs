@@ -1,6 +1,7 @@
 //! Only a plain `200` whose body matches its `Content-Length` is a
 //! trustworthy configuration; chunked, encoded or truncated responses are not.
 
+use crate::camera_enabled::StatusFlags;
 use crate::{find_header_end, log_event, split_at_byte, split_header_lines, trim_spaces, utf8};
 use corvette_api::{CameraEntry, FrigateConfig};
 use std::time::{Duration, Instant};
@@ -51,13 +52,32 @@ impl ConfigSource {
         }
     }
 
-    pub(crate) async fn camera_list_json(&self, role: &str) -> Result<Vec<u8>, ConfigFetchError> {
-        let list = corvette_api::CameraList {
-            cameras: self
-                .config()
-                .await?
-                .camera_entries_for_role_including_off(role),
-        };
+    /// Cameras the status names take its answer; an unreadable status shows every camera off.
+    pub(crate) async fn camera_list_json(
+        &self,
+        role: &str,
+        status: StatusFlags,
+    ) -> Result<Vec<u8>, ConfigFetchError> {
+        let mut cameras = self
+            .config()
+            .await?
+            .camera_entries_for_role_including_off(role);
+        match status {
+            StatusFlags::NoSocket => {}
+            StatusFlags::Unreadable => {
+                for entry in &mut cameras {
+                    entry.enabled = false;
+                }
+            }
+            StatusFlags::Answered(flags) => {
+                for entry in &mut cameras {
+                    if let Some(flag) = flags.iter().find(|flag| flag.name == entry.name) {
+                        entry.enabled = flag.enabled;
+                    }
+                }
+            }
+        }
+        let list = corvette_api::CameraList { cameras };
         // CameraList is only strings and integers; its derived serializer cannot fail.
         Ok(serde_json::to_vec(&list).expect("camera list serializes"))
     }
