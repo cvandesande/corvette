@@ -233,17 +233,29 @@ fn a_stale_socket_file_is_replaced() {
     let socket = socket_path("bin-stale-s");
     drop(UnixListener::bind(&socket).expect("stale serving socket"));
     let _worker = start("stale", PARAM, "10000", &socket);
-    wait_ready(&socket);
-    let mut stream = connect(&socket);
-    send(
-        &mut stream,
-        &Request::InferRawRequest {
-            id: 11,
-            deadline_ms: 10_000,
-            tensor: &ZERO_TENSOR,
-        },
-    );
-    let reply = read_reply(&mut stream).expect("raw reply");
+    // A concurrent test's fork can inherit the stale fd before exec and keep
+    // that path a live ghost; only an answered request is the replacing worker.
+    let request_bytes = Request::InferRawRequest {
+        id: 11,
+        deadline_ms: 10_000,
+        tensor: &ZERO_TENSOR,
+    }
+    .encode();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let reply = loop {
+        if let Some(mut attempt) = try_connect(&socket)
+            && attempt.write_all(&request_bytes).is_ok()
+            && let Some(reply) = read_reply(&mut attempt)
+        {
+            break reply;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the replaced socket never answered on {}",
+            socket.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
     let Reply::Raw { id, values } = reply else {
         panic!("expected a Raw reply, got {reply:?}");
     };
