@@ -78,12 +78,13 @@ async fn no_stub_process_holds(dir: &Path) {
     }
 }
 
-// Answers one infer request a second after it arrives, so the runner is inside a request when a stop lands.
+// Holds the first infer request on each connection for a second and answers the rest at once, so the runner is inside a request when a stop lands and the first frame's whole burst of regions still drains quickly.
 fn worker_holding(dir: &Path) {
     let listener = StdUnixListener::bind(dir.join("worker.sock")).unwrap();
     std::thread::spawn(move || {
         while let Ok((mut stream, _)) = listener.accept() {
             std::thread::spawn(move || {
+                let mut hold_next = true;
                 loop {
                     let mut header = [0u8; HEADER_LEN];
                     if stream.read_exact(&mut header).is_err() {
@@ -101,7 +102,10 @@ fn worker_holding(dir: &Path) {
                     let Ok(Request::InferRequest { id, .. }) = Request::decode(&request) else {
                         break;
                     };
-                    std::thread::sleep(WORKER_HOLD);
+                    if hold_next {
+                        hold_next = false;
+                        std::thread::sleep(WORKER_HOLD);
+                    }
                     let reply = Reply::Rows {
                         id,
                         worker_ms: 5,

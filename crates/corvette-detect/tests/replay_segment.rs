@@ -536,8 +536,11 @@ fn an_area_polygon_at_a_quiet_corner_sends_fewer_worker_requests_than_no_area() 
             corner_run.join().expect("corner run"),
         )
     });
-    assert_eq!(without, 27, "no-area request count");
-    assert_eq!(with, 15, "bottom-left-corner request count");
+    assert_eq!(without, 35, "no-area count: 27 motion plus 8 startup");
+    assert_eq!(
+        with, 23,
+        "bottom-left-corner count: 15 motion plus 8 startup"
+    );
     assert!(
         with < without,
         "the mask drops the motion outside the polygon"
@@ -578,8 +581,8 @@ fn growing_the_keep_mask_by_the_pad_sweeps_in_motion_and_sends_more_requests() {
             grown_run.join().expect("grown run"),
         )
     });
-    assert_eq!(tight, 15, "unpadded count keeps only the quiet corner");
-    assert_eq!(grown, 27, "a pad of 150 reaches the moving region");
+    assert_eq!(tight, 23, "unpadded count keeps only the quiet corner");
+    assert_eq!(grown, 35, "a pad of 150 reaches the moving region");
 }
 
 #[test]
@@ -609,8 +612,8 @@ fn the_pad_boundary_at_frame_pixels_flips_the_keep_mask_and_the_request_count() 
             pad_pixels: 46,
         }),
     );
-    assert_eq!(before, 15, "pad 45 has not reached the motion yet");
-    assert_eq!(at, 27, "pad 46 keeps the first motion column");
+    assert_eq!(before, 23, "pad 45 has not reached the motion yet");
+    assert_eq!(at, 35, "pad 46 keeps the first motion column");
     assert!(
         at > before,
         "one frame pixel of radius changes the request count"

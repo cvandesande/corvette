@@ -138,12 +138,15 @@ fn a_valid_plan_builds_two_fresh_pipelines_and_steps_one_frame() {
         .pipeline(&mut second_ids, link.infer_handle())
         .expect("the second pipeline");
     assert_eq!(second.counters(), PipelineCounters::default());
-    // An empty size grid gives the startup frame no region; the bright second frame makes motion, and motion gives a region to infer.
+    // The seeded grid gives the startup frame its eight regions, so that frame reaches the worker socket too.
     let frame_bytes = spec.frame_bytes();
     let dark = vec![0u8; frame_bytes];
     let bright = vec![255u8; frame_bytes];
-    let quiet = first.step(0.0, &dark).expect("the startup frame steps");
-    assert!(matches!(quiet, FrameOutcome::Objects(_)), "{quiet:?}");
+    let startup = first.step(0.0, &dark).expect("the startup frame steps");
+    assert!(
+        matches!(startup, FrameOutcome::InferenceUnavailable),
+        "the startup regions reached the missing worker socket: {startup:?}"
+    );
     let outcome = first
         .step(0.1, &bright)
         .expect("the motion frame steps through the missing worker socket");
@@ -155,10 +158,10 @@ fn a_valid_plan_builds_two_fresh_pipelines_and_steps_one_frame() {
         first.counters(),
         PipelineCounters {
             frames_in: 2,
-            frames_tracked: 1,
-            frames_inference_failed: 1,
-            inferences_run: 1,
-            frames_without_region: 1,
+            frames_tracked: 0,
+            frames_inference_failed: 2,
+            inferences_run: 9,
+            frames_without_region: 0,
         }
     );
     fs::remove_dir_all(&dir).expect("remove temp dir");

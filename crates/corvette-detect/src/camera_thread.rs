@@ -484,15 +484,15 @@ mod tests {
         ids: &mut IdSource,
         infer: SharedInfer,
     ) -> Result<LivePipeline<'_, SharedInfer>, LabelError> {
+        let frame = Shape::new(160, 120).expect("frame shape");
         let settings = RegionStageSettings {
             motion: MotionSettings::default(),
             floor: 32,
-            grid: SizeGrid::empty(),
+            grid: SizeGrid::seeded(frame, 32).expect("seeded grid"),
             model: Shape::new(640, 640).expect("model shape"),
             motion_enabled: true,
         };
-        let regions = RegionStage::new(settings, Shape::new(160, 120).expect("frame shape"), None)
-            .expect("region stage");
+        let regions = RegionStage::new(settings, frame, None).expect("region stage");
         let mut filters = BTreeMap::new();
         filters.insert("person".to_owned(), ObjectFilter::default());
         let candidates = CandidateStage::new(

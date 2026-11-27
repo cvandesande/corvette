@@ -43,6 +43,33 @@ impl SizeGrid {
         }
     }
 
+    /// A grid seeded for the startup scan: the four quadrant cells (2,2),(5,2),(2,5),(5,5) and the four edge-centre cells (3,0),(3,7),(0,3),(7,3) each hold one sample of a `floor`-wide region relative to `frame`, every other cell stays empty.
+    #[must_use]
+    pub fn seeded(frame: Shape, floor: usize) -> Option<Self> {
+        // The mean is frame-width-relative like the learned sizes, so `startup_regions` sizes each region to exactly `floor`.
+        let mean =
+            f64::from(u32::try_from(floor).ok()?) / f64::from(u32::try_from(frame.width()).ok()?);
+        let cell = SizeCell {
+            samples: 1,
+            mean,
+            std_dev: 0.0,
+        };
+        let mut grid = Self::empty();
+        for (x, y) in [
+            (2, 2),
+            (5, 2),
+            (2, 5),
+            (5, 5),
+            (3, 0),
+            (3, 7),
+            (0, 3),
+            (7, 3),
+        ] {
+            grid.set(x, y, cell);
+        }
+        Some(grid)
+    }
+
     pub const fn set(&mut self, x: usize, y: usize, cell: SizeCell) -> bool {
         if x >= GRID_SIZE || y >= GRID_SIZE {
             return false;
@@ -163,4 +190,54 @@ pub fn startup_regions(frame: Shape, floor: usize, grid: &SizeGrid) -> Option<Ve
         )?);
     }
     Some(regions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REAL_SHAPES: [(usize, usize); 2] = [(1920, 1080), (640, 360)]; // 16:9 main stream, small substream
+
+    #[test]
+    fn seeded_grid_yields_eight_in_frame_floor_sized_regions() {
+        for (width, height) in REAL_SHAPES {
+            let frame = Shape::new(width, height).expect("frame shape");
+            let grid = SizeGrid::seeded(frame, 320).expect("seed");
+            let regions = startup_regions(frame, 320, &grid).expect("startup regions");
+            assert_eq!(regions.len(), 8, "shape {width}x{height}");
+            for region in &regions {
+                assert!(region.x1 >= 0 && region.y1 >= 0, "shape {width}x{height}");
+                assert!(
+                    region.x2 <= i32::try_from(width).expect("width fits")
+                        && region.y2 <= i32::try_from(height).expect("height fits"),
+                    "shape {width}x{height}"
+                );
+                assert_eq!(region.x2 - region.x1, 320, "shape {width}x{height}");
+                assert_eq!(region.y2 - region.y1, 320, "shape {width}x{height}");
+            }
+        }
+    }
+
+    #[test]
+    fn seeded_grid_yields_no_duplicate_regions() {
+        for (width, height) in REAL_SHAPES {
+            let frame = Shape::new(width, height).expect("frame shape");
+            let grid = SizeGrid::seeded(frame, 320).expect("seed");
+            let regions = startup_regions(frame, 320, &grid).expect("startup regions");
+            for (index, left) in regions.iter().enumerate() {
+                for right in &regions[index + 1..] {
+                    assert_ne!(left, right, "shape {width}x{height}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seeded_grid_yields_the_same_regions_on_every_call() {
+        let frame = Shape::new(1920, 1080).expect("frame shape");
+        let grid = SizeGrid::seeded(frame, 320).expect("seed");
+        let first = startup_regions(frame, 320, &grid).expect("first call");
+        let second = startup_regions(frame, 320, &grid).expect("second call");
+        assert_eq!(first, second);
+    }
 }

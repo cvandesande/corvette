@@ -201,7 +201,7 @@ impl CameraPlan {
             RegionStageSettings {
                 motion: MotionSettings::default(),
                 floor: 320,
-                grid: SizeGrid::empty(),
+                grid: SizeGrid::seeded(frame, 320).ok_or("region")?,
                 model: Shape::new(640, 640).ok_or("region")?,
                 motion_enabled: true,
             },
@@ -333,5 +333,32 @@ fn grow_axis(line: &mut [u8], pad: usize) {
         .collect();
     for (byte, seen) in line.iter_mut().zip(forward.iter().zip(back.iter().rev())) {
         *byte = if *seen.0 || *seen.1 { 255 } else { 0 };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A flat all-zero picture keeps the motion detector quiet, so the first frame shows the startup scan alone.
+    #[test]
+    fn first_frame_of_a_still_scene_sends_the_startup_regions() {
+        let labels = Labels::parse("0 person").expect("labels");
+        let mut ids = IdSource::default();
+        let (mut regions, _candidates, _objects) =
+            CameraPlan::build_stages(1920, 1080, 30, &labels, 0.5, None, &mut ids).expect("stages");
+        let still = vec![0u8; 1920 * 1080 * 3 / 2];
+        let first = regions.step(&still, &[]).expect("first frame");
+        assert_eq!(
+            first.len(),
+            8,
+            "the seeded grid sends eight regions on frame one"
+        );
+        for tensor in &first {
+            assert_eq!(tensor.region.x2 - tensor.region.x1, 320);
+            assert_eq!(tensor.region.y2 - tensor.region.y1, 320);
+        }
+        let second = regions.step(&still, &[]).expect("second frame");
+        assert!(second.is_empty(), "a still second frame sends nothing");
     }
 }
